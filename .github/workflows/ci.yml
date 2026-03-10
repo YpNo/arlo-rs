@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   schedule:
-    - cron: '0 0 * * 0' # Run weekly on Sunday for security audits
+    - cron: '0 0 * * 0'
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,6 +27,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Git Credentials
+        uses: ./.github/actions/rs-cloudscraper
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -34,7 +38,6 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Run cargo clippy
-        # We allow dead code during development but deny other warnings
         run: cargo clippy --all-targets --all-features -- -D warnings -A dead_code
 
   test:
@@ -42,11 +45,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      # We need cmake for boring-sys (dependency of rquest)
+      - name: Setup Git Credentials
+        uses: ./.github/actions/rs-cloudscraper
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install Dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential
-        
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Rust Cache
@@ -59,11 +63,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install cargo-audit
-        uses: actions-rs/cargo@v1
+      - name: Setup Git Credentials
+        uses: ./.github/actions/setup-rust-private
         with:
-          command: install
-          args: cargo-audit
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
       - name: Run cargo audit
         run: cargo audit
 
@@ -72,25 +77,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      # Dependencies for building boring-sys
+      - name: Configure Git for Private Repos
+        run: git config --global ${{ env.GIT_AUTH_CONFIG }}
       - name: Install Dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential
-        
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-      
       - name: Install cargo-tarpaulin
-        uses: actions-rs/cargo@v1
-        with:
-          command: install
-          args: cargo-tarpaulin
-          
+        run: cargo install cargo-tarpaulin
       - name: Run cargo-tarpaulin
         run: cargo +nightly tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
-        
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
