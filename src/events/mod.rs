@@ -124,13 +124,13 @@ impl EventManager {
 
                 if let Err(e) = out {
                     log::warn!("Keep-Alive Ping failed: {}", e);
-                } else if let Ok(resp) = out {
-                    if !resp.status().is_success() {
-                        log::warn!(
-                            "Keep-Alive Ping returned non-success status: {}",
-                            resp.status()
-                        );
-                    }
+                } else if let Ok(resp) = out
+                    && !resp.status().is_success()
+                {
+                    log::warn!(
+                        "Keep-Alive Ping returned non-success status: {}",
+                        resp.status()
+                    );
                 }
             }
         });

@@ -77,10 +77,10 @@ impl ArloClient {
         // 3. Attach payload if it's a POST/PUT
         if let Some(data) = payload {
             builder = builder.json(data);
-            if self.debug_mode {
-                if let Ok(json) = serde_json::to_string(data) {
-                    dump_pay = json;
-                }
+            if self.debug_mode
+                && let Ok(json) = serde_json::to_string(data)
+            {
+                dump_pay = json;
             }
         }
 
