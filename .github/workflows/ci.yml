@@ -64,7 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Setup Git Credentials
-        uses: ./.github/actions/setup-rust-private
+        uses: ./.github/actions/rs-cloudscraper
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install cargo-audit
@@ -77,8 +77,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Configure Git for Private Repos
-        run: git config --global ${{ env.GIT_AUTH_CONFIG }}
+      - name: Setup Git Credentials
+        uses: ./.github/actions/rs-cloudscraper
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install Dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential
       - name: Install Rust toolchain
