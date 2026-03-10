@@ -1,8 +1,8 @@
-name: 'Setup Rust Private'
+name: 'rs-cloudscraper'
 description: 'Configures Git for private crates'
 inputs:
   token:
-    description: 'GitHub Token or PAT'
+    description: 'GitHub Token'
     required: true
 
 runs:
