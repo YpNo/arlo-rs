@@ -1,0 +1,14 @@
+name: 'Setup Rust Private'
+description: 'Configures Git for private crates'
+inputs:
+  token:
+    description: 'GitHub Token or PAT'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure Git for Private Repos
+      shell: bash
+      run: |
+        git config --global url."https://x-access-token:${{ inputs.token }}@github.com/".insteadOf "https://github.com/"
