@@ -1,4 +1,4 @@
-name: 'Setup Rust Private'
+name: 'Setup Private Crates'
 description: 'Configures Git for private crates'
 inputs:
   token:
@@ -12,3 +12,7 @@ runs:
       shell: bash
       run: |
         git config --global url."https://x-access-token:${{ inputs.token }}@github.com/".insteadOf "https://github.com/"
+    
+    - name: Force Cargo to use Git CLI
+      shell: bash
+      run: echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $GITHUB_ENV
