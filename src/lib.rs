@@ -8,9 +8,9 @@
 //! # Architecture
 //!
 //! 1. **`ArloClient`**: The core interactive REST client. It uses a custom `reqwest` builder configured
-//! to proxy traffic seamlessly.
+//!    to proxy traffic seamlessly.
 //! 2. **`EventManager`**: An Actor-pattern `tokio` background task that subscribes to Arlo's Server-Sent Events (SSE).
-//! It parses JSON event chunks and broadcasts strictly-typed `ArloEvent` enums down a channel.
+//!    It parses JSON event chunks and broadcasts strictly-typed `ArloEvent` enums down a channel.
 //!
 //! # Exampe usage
 //! ```no_run

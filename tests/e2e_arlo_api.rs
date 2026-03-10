@@ -13,7 +13,7 @@ async fn test_live_arlo_api_traversal() {
 
     // This will implicitly parse the config, launch the CloudScraper, establish the TLS Proxy,
     // and potentially hit the Login API automatically (if creds are defined).
-    let mut client = ArloClient::from_config(config_path)
+    let client = ArloClient::from_config(config_path)
         .await
         .expect("Failed to instantiate ArloClient");
 

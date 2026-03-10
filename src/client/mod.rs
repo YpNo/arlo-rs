@@ -103,17 +103,13 @@ impl ArloClient {
     pub async fn from_config(path: &str) -> Result<Self, ArloError> {
         let config = ArloConfig::load_from_file(path)?;
 
-        let client_conf = config
-            .client
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| ClientConfig {
-                debug_mode: None,
-                user_agent: None,
-                session_cache_path: None,
-                headless: None,
-                upstream_proxy: None,
-            });
+        let client_conf = config.client.as_ref().cloned().unwrap_or(ClientConfig {
+            debug_mode: None,
+            user_agent: None,
+            session_cache_path: None,
+            headless: None,
+            upstream_proxy: None,
+        });
 
         // Optionally set a custom User-Agent if defined
         let mut builder = Self::with_config(&client_conf).await?;
@@ -147,12 +143,12 @@ impl ArloClient {
         }
 
         // We can immediately trigger login if credentials are provided in the config
-        if let Some(creds) = config.credentials {
-            if let (Some(email), Some(pass)) = (creds.email, creds.password) {
-                // Ignore the error if it fails since they may need to handle MFA via CLI
-                // but let's at least try the base login.
-                let _ = builder.login(&email, &pass).await;
-            }
+        if let Some(creds) = config.credentials
+            && let (Some(email), Some(pass)) = (creds.email, creds.password)
+        {
+            // Ignore the error if it fails since they may need to handle MFA via CLI
+            // but let's at least try the base login.
+            let _ = builder.login(&email, &pass).await;
         }
 
         Ok(builder)

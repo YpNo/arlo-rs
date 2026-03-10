@@ -45,15 +45,15 @@ impl AuthManager {
 
     /// Loads the authentication state from a JSON file path if it exists
     pub fn load_from_cache(path: &str) -> Option<Self> {
-        if let Ok(contents) = fs::read_to_string(path) {
-            if let Ok(schema) = serde_json::from_str::<AuthCacheSchema>(&contents) {
-                return Some(Self {
-                    access_token: schema.access_token,
-                    user_id: schema.user_id,
-                    device_id: schema.device_id,
-                    cache_path: Some(path.to_string()),
-                });
-            }
+        if let Ok(contents) = fs::read_to_string(path)
+            && let Ok(schema) = serde_json::from_str::<AuthCacheSchema>(&contents)
+        {
+            return Some(Self {
+                access_token: schema.access_token,
+                user_id: schema.user_id,
+                device_id: schema.device_id,
+                cache_path: Some(path.to_string()),
+            });
         }
         None
     }

@@ -96,9 +96,9 @@ mod tests {
 
         // Assert Client Config
         let client = config.client.unwrap();
-        assert_eq!(client.debug_mode.unwrap(), true);
+        assert!(client.debug_mode.unwrap());
         assert_eq!(client.session_cache_path.unwrap(), ".session");
-        assert_eq!(client.headless.unwrap(), false);
+        assert!(!client.headless.unwrap());
         assert_eq!(client.upstream_proxy.unwrap(), "http://localhost:8080");
     }
 
