@@ -2,23 +2,33 @@
 name = "rs-arlo"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
-tokio = { version = "1.50.0", features = ["full", "rt-multi-thread"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "socks"] }
+tokio = { version = "1.52", features = ["full", "rt-multi-thread"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "socks"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-uuid = { version = "1.11", features = ["v4", "fast-rng"] }
+uuid = { version = "1.23", features = ["v4", "fast-rng"] }
 log = "0.4"
 urlencoding = "2.1"
-toml = "0.8"
-rs-cloudscraper = { git = "https://github.com/YpNo/rs-cloudscraper", tag = "v0.2.0" }
+toml = "1.1"
+# rs-cloudscraper = { git = "https://github.com/YpNo/rs-cloudscraper", tag = "v0.2.0" }
+rs-cloudscraper = { path = "../rs-cloudscraper", features = ["browser"] }
 native-tls = "0.2.18"
 mailparse = "0.16.1"
 regex = "1.12.3"
 imap = "3.0.0-alpha.15"
+rustls = { version = "0.23", features = ["ring"] }
+chrono = "0.4.44"
+flate2 = "1.1.9"
+base64 = "0.22.1"
+tracing = "0.1"
+tracing-futures = "0.2"
+
 
 [dev-dependencies]
 env_logger = "0.11"
 tempfile = "3.26.0"
+mockito = "1.6.1"

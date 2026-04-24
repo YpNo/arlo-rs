@@ -16,6 +16,7 @@ use crate::error::ArloError;
 pub use auth::AuthManager;
 use reqwest::Client;
 use rs_cloudscraper::{BrowserProfile, CloudScraper};
+use tracing::{info, warn, instrument};
 
 /// Core REST API manager for the Arlo ecosystem.
 ///
@@ -35,6 +36,7 @@ pub struct ArloClient {
 
 impl ArloClient {
     /// Builds a new ArloClient using default profiles
+    #[instrument]
     pub async fn new() -> Result<Self, ArloError> {
         let config = ClientConfig {
             debug_mode: None,
@@ -47,7 +49,13 @@ impl ArloClient {
     }
 
     /// Builds the ArloClient bridging precise overrides to the headless browser engine.
+    #[instrument(skip(config))]
     pub async fn with_config(config: &ClientConfig) -> Result<Self, ArloError> {
+        // Enforce a process-wide default CryptoProvider for rustls 0.23+ to prevent panics in the TLS MITM proxy
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+
         let mut profile = BrowserProfile::random();
         if let Some(ref ua) = config.user_agent {
             profile.user_agent = ua.clone();
@@ -100,6 +108,7 @@ impl ArloClient {
 
     /// Automatically hydrates the client configuration from a TOML file.
     /// This establishes the background proxy and sets debug modes according to the config.
+    #[instrument(skip(path))]
     pub async fn from_config(path: &str) -> Result<Self, ArloError> {
         let config = ArloConfig::load_from_file(path)?;
 
@@ -119,18 +128,18 @@ impl ArloClient {
             .as_ref()
             .and_then(|c| c.session_cache_path.clone());
         if let Some(ref path) = session_cache_path {
-            if let Some(cached_auth) = AuthManager::load_from_cache(path) {
+            if let Some(cached_auth) = AuthManager::load_from_cache(path).await {
                 builder.auth = cached_auth;
 
                 // Immediately validate if the token is still active
                 if builder.validate_session_v3().await.is_ok() {
-                    log::info!(
+                    info!(
                         "Successfully restored active Arlo session from cache: {}",
                         path
                     );
                     return Ok(builder); // Skip redundant login overrides!
                 } else {
-                    log::warn!(
+                    warn!(
                         "Cached Arlo session expired or invalid. Falling back to fresh login..."
                     );
                     builder.auth = AuthManager::new();
@@ -142,24 +151,6 @@ impl ArloClient {
             }
         }
 
-        // We can immediately trigger login if credentials are provided in the config
-        if let Some(creds) = config.credentials
-            && let (Some(email), Some(pass)) = (creds.email, creds.password)
-        {
-            // Ignore the error if it fails since they may need to handle MFA via CLI
-            // but let's at least try the base login.
-            let _ = builder.login(&email, &pass).await;
-        }
-
         Ok(builder)
-    }
-
-    /// Automatically scans an IMAP mailbox for arriving Arlo MFA OTP codes based
-    /// on the configuration defined. Spawns as a non-blocking background thread.
-    pub async fn fetch_imap_otp(
-        &self,
-        imap_config: &crate::config::ImapConfig,
-    ) -> Result<String, ArloError> {
-        crate::client::auth_imap::fetch_otp(imap_config).await
     }
 }

@@ -27,6 +27,9 @@ pub enum ArloError {
     #[error("Device not found: {0}")]
     DeviceNotFound(String),
 
+    #[error("Parsing error: {0}")]
+    ParseError(String),
+
     #[error("I/O Error: {0}")]
     IoError(#[from] std::io::Error),
 }
