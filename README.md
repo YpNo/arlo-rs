@@ -58,19 +58,44 @@ To avoid repeated MFA prompts, `rs-arlo` automatically serializes successful ses
 
 To help you validate your deployment and bypass functionality, we've bundled two fully automated testing scenarios in the `examples/` directory. Be sure to configure your `config.toml` first!
 
-### Scenario 1: Authentication & Device Listing
-This scenario walks you through the initial login process, queries Arlo for your requested 2FA Factor (Push/Email), caches the active token so you don't get prompted repeatedly, and then discovers all attached Hubs and Cameras dynamically.
+### Scenario 1: Authentication & Device Listing (`demo1.rs`)
+This scenario walks you through the initial login process, queries Arlo for your requested 2FA Factor (Push/Email), caches the active token so you don't get prompted repeatedly, and then discovers all attached Hubs and Cameras dynamically. If you enabled IMAP in the config, it will automatically poll your inbox and extract the 6-digit OTP to complete the login seamlessly without user interaction!
 
 ```bash
-RUST_LOG=info cargo run --example scenario1_auth_list
+RUST_LOG=info cargo run --example demo1
 ```
 
-### Scenario 2: Streaming & Actuation
-Once authenticated and verified by Scenario 1, this script re-attaches to the API using your cached session token, isolates the first camera on your account, requests an authorized live stream URL (containing dynamic AES tokens), and immediately executes a cloud Snapshot trigger on the hardware.
+### Scenario 2: Streaming & Actuation (`demo2.rs`)
+Once authenticated and verified by Scenario 1, this script re-attaches to the API using your cached session token (`.arlo_session.json`). It isolates the first camera on your account, requests an authorized live stream URL (containing dynamic AES tokens), and seamlessly initiates the Arlo state machine.
 
 ```bash
-RUST_LOG=info cargo run --example scenario2_stream_actuate
+RUST_LOG=info cargo run --example demo2
 ```
+
+## 🛠️ Development & Cargo Commands
+
+When contributing or debugging the `rs-arlo` library, you can use these essential `cargo` commands:
+
+- **Check for compilation errors without building binaries:**
+  ```bash
+  cargo check --examples
+  ```
+- **Automatically format the codebase to standard Rust style:**
+  ```bash
+  cargo fmt
+  ```
+- **Run the Rust linter to catch common mistakes and improve performance:**
+  ```bash
+  cargo clippy --all-targets --all-features
+  ```
+- **Generate and open the highly-detailed HTML documentation locally:**
+  ```bash
+  cargo doc --no-deps --open
+  ```
+- **Run the E2E Integration tests (requires valid config.toml credentials):**
+  ```bash
+  RUST_LOG=info cargo test --test e2e_arlo_api -- --nocapture
+  ```
 
 ## 🤝 Contributing
 

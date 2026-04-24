@@ -1,3 +1,9 @@
+//! Server-Sent Events (SSE) Telemetry & Actor Model.
+//!
+//! This module implements the asynchronous Actor pattern used to safely monitor Arlo's
+//! continuous `hmsweb` telemetry stream without blocking the main REST executing thread.
+//! It establishes a resilient WebSocket/SSE connection, parses the raw JSON blobs into
+//! strictly-typed `ArloEvent` enums, and broadcasts them system-wide using Tokio sync channels.
 use crate::endpoints::*;
 use crate::error::ArloError;
 use crate::headers::ARLO_API_HOST;
@@ -6,6 +12,7 @@ use reqwest::Client;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+use tracing::{info, error, warn, debug, instrument, info_span, Instrument};
 
 /// Subscription Engine interpreting Arlo's Server-Sent Events (SSE) telemetry.
 ///
@@ -25,6 +32,7 @@ pub struct EventManager {
 
 impl EventManager {
     /// Connects to the Arlo SSE endpoint and spawns a background tokio task to process events.
+    #[instrument(skip(client, access_token, device_id))]
     pub async fn start(
         client: Client,
         access_token: String,
@@ -55,7 +63,7 @@ impl EventManager {
                 urlencoding::encode(&token_clone)
             );
 
-            log::info!("Connecting to SSE Stream: {}", subscribe_url);
+            info!("Connecting to SSE Stream: {}", subscribe_url);
 
             loop {
                 // Initialize the connection
@@ -70,7 +78,7 @@ impl EventManager {
 
                 match out {
                     Ok(mut response) => {
-                        log::info!("SSE Connected (Status: {})", response.status());
+                        info!("SSE Connected (Status: {})", response.status());
                         while let Ok(Some(chunk)) = response.chunk().await {
                             let text = String::from_utf8_lossy(&chunk);
                             for line in text.lines() {
@@ -92,13 +100,13 @@ impl EventManager {
                         }
                     }
                     Err(e) => {
-                        log::error!("SSE connection error: {}. Reconnecting in 5s...", e);
+                        error!("SSE connection error: {}. Reconnecting in 5s...", e);
                     }
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
-        });
+        }.instrument(info_span!("sse_listener")));
 
         manager._loop_handle = Some(handle);
 
@@ -113,7 +121,7 @@ impl EventManager {
                 // Arlo tokens expire if idle. Ping every 10 minutes to maintain session state.
                 tokio::time::sleep(Duration::from_secs(600)).await;
 
-                log::debug!("Sending Keep-Alive Ping to {}", session_url);
+                debug!("Sending Keep-Alive Ping to {}", session_url);
                 let out = ping_client
                     .get(&session_url)
                     .header("Authorization", &ping_token)
@@ -123,20 +131,40 @@ impl EventManager {
                     .await;
 
                 if let Err(e) = out {
-                    log::warn!("Keep-Alive Ping failed: {}", e);
+                    warn!("Keep-Alive Ping failed: {}", e);
                 } else if let Ok(resp) = out
                     && !resp.status().is_success()
                 {
-                    log::warn!(
+                    warn!(
                         "Keep-Alive Ping returned non-success status: {}",
                         resp.status()
                     );
                 }
             }
-        });
+        }.instrument(info_span!("keep_alive_ping")));
 
         manager._ping_handle = Some(ping_handle);
 
         Ok(manager)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::events::ArloEvent;
+
+    #[test]
+    fn test_parse_sse_event_single() {
+        let json_str = "{\"action\": \"is\", \"resource\": \"cameras/C1\", \"publishResponse\": false, \"properties\": {\"motionDetected\": true}}";
+        let event: Result<ArloEvent, _> = serde_json::from_str(json_str);
+        assert!(event.is_ok());
+    }
+
+    #[test]
+    fn test_parse_sse_event_batch() {
+        let json_str = "[{\"action\": \"is\", \"resource\": \"cameras/C1\", \"publishResponse\": false, \"properties\": {\"motionDetected\": true}}, {\"action\": \"is\", \"resource\": \"cameras/C2\", \"publishResponse\": false, \"properties\": {\"motionDetected\": false}}]";
+        let events: Result<Vec<ArloEvent>, _> = serde_json::from_str(json_str);
+        assert!(events.is_ok());
+        assert_eq!(events.unwrap().len(), 2);
     }
 }

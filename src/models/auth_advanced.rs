@@ -5,5 +5,5 @@ use serde::{Deserialize, Serialize};
 pub struct SessionV3Response {
     pub user_id: String,
     pub token: String,
-    pub valid_for: u64,
+    pub valid_for: Option<u64>,
 }

@@ -4,8 +4,11 @@ pub const AUTH_GET_FACTORS: &str = "/api/getFactors";
 pub const AUTH_START_AUTH: &str = "/api/startAuth";
 pub const AUTH_FINISH_AUTH: &str = "/api/finishAuth";
 pub const AUTH_GET_FACTOR_ID: &str = "/api/getFactorId";
+pub const AUTH_VALIDATE_ACCESS_TOKEN: &str = "/api/validateAccessToken";
+pub const AUTH_START_PAIRING_FACTOR: &str = "/api/startPairingFactor";
 pub const AUTH_LOGIN_V2: &str = "/hmsweb/login/v2";
 pub const AUTH_SESSION_V3: &str = "/hmsweb/users/session/v3";
+pub const AUTH_DEVICE_SUPPORT_V2: &str = "/hmsweb/devicesupport/v2";
 pub const AUTH_LOGOUT: &str = "/hmsweb/logout";
 
 pub const API_DEVICES: &str = "/hmsweb/users/devices";

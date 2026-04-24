@@ -46,7 +46,7 @@ pub struct FactorData {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthStartResponse {
-    pub factors: Vec<FactorData>,
+    pub items: Vec<FactorData>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,6 +58,20 @@ pub struct FactorRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerifyFactorRequest {
-    pub factor_id: String,
+    pub factor_auth_code: String,
     pub otp: String,
+    pub is_browser_trusted: bool,
+}
+
+/// Represents the asynchronous state of an authentication attempt.
+#[derive(Debug, Clone)]
+pub enum AuthResult {
+    /// The session is fully established and validated. Ready to use.
+    Success,
+    /// MFA is required. The flow is paused. The user must provide the OTP to `submit_mfa()`
+    MfaRequired {
+        factor_id: String,
+        factor_auth_code: String,
+        provider: String,
+    },
 }
