@@ -19,7 +19,8 @@ rs-cloudscraper = { path = "../rs-cloudscraper", features = ["browser"] }
 native-tls = "0.2.18"
 mailparse = "0.16.1"
 regex = "1.12.3"
-imap = "3.0.0-alpha.15"
+imap-client = { path = "../imap-rs/imap-client" }
+imap-core = { path = "../imap-rs/imap-core" }
 rustls = { version = "0.23", features = ["ring"] }
 chrono = "0.4.44"
 flate2 = "1.1.9"
