@@ -32,4 +32,7 @@ pub enum ArloError {
 
     #[error("I/O Error: {0}")]
     IoError(#[from] std::io::Error),
+
+    #[error("Timed out: {0}")]
+    Timeout(String),
 }

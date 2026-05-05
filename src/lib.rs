@@ -12,15 +12,19 @@
 //! 2. **`EventManager`**: An Actor-pattern `tokio` background task that subscribes to Arlo's Server-Sent Events (SSE).
 //!    It parses JSON event chunks and broadcasts strictly-typed `ArloEvent` enums down a channel.
 //!
-//! # Exampe usage
+//! # Example
 //! ```no_run
-//! use rs_arlo::client::ArloClient;
+//! use rs_arlo::ArloClient;
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let mut client = ArloClient::new().await.unwrap();
+//!     let mut client = ArloClient::builder()
+//!         .session_cache(".arlo_session.json")
+//!         .build()
+//!         .await
+//!         .unwrap();
+//!
 //!     client.login("user@example.com", "password").await.unwrap();
-//!     
 //!     let devices = client.get_devices().await.unwrap();
 //!     println!("Found {} devices.", devices.len());
 //! }
@@ -41,5 +45,6 @@ pub mod headers;
 /// Pure data structures matching HTTP payload architectures.
 pub mod models;
 
-pub use client::ArloClient;
+pub use client::mfa::{ImapMfaHandler, MfaChallenge, MfaHandler, StaticOtpHandler, StdinMfaHandler};
+pub use client::{ArloClient, ArloClientBuilder};
 pub use error::ArloError;
