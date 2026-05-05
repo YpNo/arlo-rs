@@ -12,7 +12,55 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use reqwest::{Method, RequestBuilder};
 use serde::Serialize;
+use serde_json::Value;
 use tracing::{debug, warn, instrument};
+
+/// JSON keys whose values must never reach the debug log when `debug_mode`
+/// is enabled. Matched case-insensitively.
+const REDACTED_JSON_KEYS: &[&str] = &[
+    "password",
+    "token",
+    "access_token",
+    "accesstoken",
+    "authorization",
+    "otp",
+    "factorauthcode",
+    "refreshtoken",
+];
+
+/// Returns a debug-safe rendering of `raw`. If `raw` is valid JSON, sensitive
+/// keys are replaced with `"***"`. Otherwise the raw string is returned
+/// unchanged (the keys we redact only ever appear inside JSON bodies).
+fn redact_for_log(raw: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
+        return raw.to_string();
+    };
+    redact_in_place(&mut value);
+    serde_json::to_string(&value).unwrap_or_else(|_| raw.to_string())
+}
+
+fn redact_in_place(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if REDACTED_JSON_KEYS
+                    .iter()
+                    .any(|target| k.eq_ignore_ascii_case(target))
+                {
+                    *v = Value::String("***".to_string());
+                } else {
+                    redact_in_place(v);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                redact_in_place(v);
+            }
+        }
+        _ => {}
+    }
+}
 
 impl ArloClient {
     /// Injects standard Arlo Single Page Application (SPA) headers into a `RequestBuilder`.
@@ -103,7 +151,7 @@ impl ArloClient {
             if self.debug_mode
                 && let Ok(json) = serde_json::to_string(data)
             {
-                dump_pay = json;
+                dump_pay = redact_for_log(&json);
             }
         }
 
@@ -125,7 +173,7 @@ impl ArloClient {
         if self.debug_mode {
             debug!(
                 status = %status,
-                body = %body_str,
+                body = %redact_for_log(&body_str),
                 "<-- Response"
             );
         }
@@ -146,6 +194,41 @@ mod tests {
     use super::*;
     use mockito::Server;
     use reqwest::Method;
+
+    #[test]
+    fn redact_replaces_sensitive_top_level_keys() {
+        let input = r#"{"token":"abc","userId":"u1","password":"p"}"#;
+        let redacted = redact_for_log(input);
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        assert_eq!(parsed["token"], Value::String("***".into()));
+        assert_eq!(parsed["password"], Value::String("***".into()));
+        assert_eq!(parsed["userId"], Value::String("u1".into()));
+    }
+
+    #[test]
+    fn redact_replaces_sensitive_nested_keys() {
+        let input = r#"{"meta":{"code":200},"data":{"token":"secret","accessToken":"x","authenticated":1}}"#;
+        let redacted = redact_for_log(input);
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        assert_eq!(parsed["data"]["token"], Value::String("***".into()));
+        assert_eq!(parsed["data"]["accessToken"], Value::String("***".into()));
+        assert_eq!(parsed["data"]["authenticated"], 1);
+    }
+
+    #[test]
+    fn redact_is_case_insensitive() {
+        let input = r#"{"OTP":"123456","FactorAuthCode":"FAC"}"#;
+        let redacted = redact_for_log(input);
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        assert_eq!(parsed["OTP"], Value::String("***".into()));
+        assert_eq!(parsed["FactorAuthCode"], Value::String("***".into()));
+    }
+
+    #[test]
+    fn redact_passes_through_non_json() {
+        let raw = "Unauthorized";
+        assert_eq!(redact_for_log(raw), raw);
+    }
 
     #[tokio::test]
     async fn test_inject_headers_auth_encoding() {

@@ -1,92 +1,113 @@
+//! IMAP OTP-extraction debugger.
+//!
+//! Bypasses the Arlo flow entirely and just connects to the IMAP server
+//! configured in `config.toml`, grabs the most recent UNSEEN Arlo email, and
+//! prints the extracted text + parsed OTP. Useful when the regex layer needs
+//! to be retuned against a new Arlo email template.
+
+use imap_client::credentials::Password;
+use imap_client::search::{SearchKey, SearchQuery};
+use rs_arlo::client::auth_imap::{extract_otp, extract_text};
 use rs_arlo::config::ArloConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), rs_arlo::error::ArloError> {
     env_logger::init();
+    println!("=== Arlo IMAP Extraction Debugger ===");
 
-    println!("=== Arlo IMAP Extraction Debugger (demo3) ===");
-
-    // Load config to grab IMAP credentials
     let config = match ArloConfig::load_from_file("config.toml") {
         Ok(c) => c,
         Err(e) => {
-            println!("Failed to load config.toml: {}", e);
+            println!("Failed to load config.toml: {e}");
             return Ok(());
         }
     };
 
-    if let Some(imap_config) = config.mfa.and_then(|m| m.imap) {
-        let mut host = imap_config.host.clone().unwrap_or_default();
-        if host.is_empty()
-            && let Some(ref provider) = imap_config.provider
-        {
-            match provider.to_lowercase().as_str() {
-                "gmail" => host = "imap.gmail.com".to_string(),
-                "outlook" | "hotmail" => host = "outlook.office365.com".to_string(),
-                "yahoo" => host = "imap.mail.yahoo.com".to_string(),
-                _ => {}
-            }
-        }
-        let port = imap_config.port.unwrap_or(993);
-        let user = imap_config.username.clone().unwrap();
-        let pass = imap_config.password.clone().unwrap();
+    let Some(imap_cfg) = config.mfa.and_then(|m| m.imap) else {
+        println!("No [mfa.imap] section found in config.toml");
+        return Ok(());
+    };
 
-        println!("Connecting to IMAP Server: {}:{}", host, port);
-        println!("Username: {}", user);
-        println!("Polling for UNSEEN Arlo emails...");
+    let mut host = imap_cfg.host.clone().unwrap_or_default();
+    if host.is_empty()
+        && let Some(ref provider) = imap_cfg.provider
+    {
+        host = match provider.to_lowercase().as_str() {
+            "gmail" => "imap.gmail.com".to_string(),
+            "outlook" | "hotmail" => "outlook.office365.com".to_string(),
+            "yahoo" => "imap.mail.yahoo.com".to_string(),
+            _ => String::new(),
+        };
+    }
+    if host.is_empty() {
+        println!("Could not resolve IMAP host (set imap.host or imap.provider).");
+        return Ok(());
+    }
+    let port = imap_cfg.port.unwrap_or(993);
+    let user = imap_cfg.username.clone().unwrap_or_default();
+    let pass = imap_cfg.password.clone().unwrap_or_default();
 
-        // We bypass the "baseline" algorithm entirely here to force it to read an *existing* unread email
-        let result = tokio::task::spawn_blocking(move || {
-            let client_builder = imap::ClientBuilder::new(host.as_str(), port);
-            let client = client_builder.connect().unwrap();
-            let mut session = client.login(user, pass).unwrap();
+    println!("Connecting to IMAP Server: {host}:{port}");
+    println!("Username: {user}");
+    println!("Polling for UNSEEN Arlo emails...");
 
-            session.select("INBOX").unwrap();
+    let unauth = imap_tls::connect_tls(&host, port).await.map_err(|e| {
+        rs_arlo::error::ArloError::AuthError(format!("IMAP TLS connect failed: {e}"))
+    })?;
+    let auth = unauth
+        .login(&user, Password::new(pass))
+        .await
+        .map_err(|e| rs_arlo::error::ArloError::AuthError(format!("IMAP login failed: {e}")))?;
+    let mut selected = auth.select("INBOX").await.map_err(|e| {
+        rs_arlo::error::ArloError::AuthError(format!("Failed to select INBOX: {e}"))
+    })?;
 
-            // Direct fetch of ALL unseen Arlo emails (simulating the timeout drop)
-            let seqs = session.search("UNSEEN FROM arlo.com").unwrap();
+    let query = SearchQuery::new(SearchKey::And(vec![
+        SearchKey::Unseen,
+        SearchKey::From("arlo.com".into()),
+    ]));
+    let seqs = selected.search(query).await.map_err(|e| {
+        rs_arlo::error::ArloError::AuthError(format!("IMAP SEARCH failed: {e}"))
+    })?;
 
-            if seqs.is_empty() {
-                return Err("No UNSEEN emails from arlo.com found right now. Make sure the email is marked as Unread in your inbox!".to_string());
-            }
-
-            println!("Found {} UNSEEN Arlo emails. Grabbing the most recent...", seqs.len());
-            let latest_seq = seqs.iter().max().unwrap();
-
-            println!("Fetching raw payload for Sequence ID {}...", latest_seq);
-            let messages = session.fetch(latest_seq.to_string(), "RFC822").unwrap();
-            let message = messages.iter().next().unwrap();
-            let body = message.body().unwrap();
-
-            let parsed_mail = mailparse::parse_mail(body).unwrap();
-            let raw_text = rs_arlo::client::auth_imap::extract_text(&parsed_mail);
-
-            println!("\n=== RAW EXTRACTED TEXT ENGINE ===");
-            println!("{}", raw_text);
-            println!("=================================\n");
-
-            // Regex Extraction
-            let re_h1 = regex::Regex::new(r"(?is)<h1[^>]*>\s*(\d{6})\s*</h1>").unwrap();
-            let re_fallback = regex::Regex::new(r"(?m)(?:^|[^#=&\w])(\d{6})(?:[^0-9]|$)").unwrap();
-
-            let otp = if let Some(caps) = re_h1.captures(&raw_text) {
-                caps.get(1).map(|m| m.as_str().to_string())
-            } else if let Some(caps) = re_fallback.captures(&raw_text) {
-                caps.get(1).map(|m| m.as_str().to_string())
-            } else {
-                None
-            };
-
-            Ok(otp.unwrap_or_else(|| "Failed to regex OTP from the text payload above!".to_string()))
-        }).await.unwrap();
-
-        match result {
-            Ok(otp) => println!("SUCCESS! Final Extracted OTP: {}", otp),
-            Err(e) => println!("DEBUG FAILED: {}", e),
-        }
-    } else {
-        println!("No [imap] section found in config.toml!");
+    if seqs.is_empty() {
+        println!(
+            "No UNSEEN Arlo emails found. Mark an Arlo email as Unread and re-run."
+        );
+        let _ = selected.logout().await;
+        return Ok(());
     }
 
+    let latest = *seqs.iter().max().unwrap();
+    println!(
+        "Found {} UNSEEN Arlo email(s). Fetching seq {latest}...",
+        seqs.len()
+    );
+
+    let fetched = selected
+        .fetch(&latest.to_string(), "RFC822")
+        .await
+        .map_err(|e| {
+            rs_arlo::error::ArloError::AuthError(format!("IMAP FETCH failed: {e}"))
+        })?;
+
+    let body_bytes = fetched
+        .into_iter()
+        .find_map(|f| f.body)
+        .ok_or_else(|| rs_arlo::error::ArloError::AuthError("Empty IMAP body".into()))?;
+
+    let parsed = mailparse::parse_mail(&body_bytes).map_err(|e| {
+        rs_arlo::error::ArloError::AuthError(format!("MIME parsing failed: {e}"))
+    })?;
+    let raw_text = extract_text(&parsed);
+
+    println!("\n=== RAW EXTRACTED TEXT ===\n{raw_text}\n==========================\n");
+
+    match extract_otp(&raw_text) {
+        Some(otp) => println!("SUCCESS — Extracted OTP: {otp}"),
+        None => println!("FAILURE — Regexes did not match. Inspect the text above."),
+    }
+
+    let _ = selected.logout().await;
     Ok(())
 }
