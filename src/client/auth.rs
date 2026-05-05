@@ -43,6 +43,32 @@ struct AuthCacheSchema {
     device_id: String,
 }
 
+/// Writes `bytes` to `path` with owner-only permissions (`0600`) on Unix.
+/// On non-Unix the file is written with the platform default permissions.
+/// Failures are intentionally swallowed — caching is best-effort.
+async fn write_owner_only(path: &str, bytes: &[u8]) {
+    #[cfg(unix)]
+    {
+        use tokio::io::AsyncWriteExt;
+
+        let open_res = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .await;
+        if let Ok(mut file) = open_res {
+            let _ = file.write_all(bytes).await;
+            let _ = file.flush().await;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fs::write(path, bytes).await;
+    }
+}
+
 impl AuthManager {
     /// Creates a fresh authentication manager with a blank state and a randomly generated tracking device UUID.
     pub fn new() -> Self {
@@ -71,19 +97,24 @@ impl AuthManager {
         None
     }
 
-    /// Flushes the active session tokens to the configured disk path
+    /// Flushes the active session tokens to the configured disk path.
+    ///
+    /// On Unix the cache file is created/truncated with mode `0600` so only
+    /// the owning user can read the persisted access token.
     #[instrument(skip(self))]
     pub async fn save_to_cache(&self) {
-        if let Some(ref path) = self.cache_path {
-            let schema = AuthCacheSchema {
-                access_token: self.access_token.clone(),
-                user_id: self.user_id.clone(),
-                device_id: self.device_id.clone(),
-            };
-            if let Ok(json) = serde_json::to_string_pretty(&schema) {
-                let _ = fs::write(path, json).await;
-            }
-        }
+        let Some(ref path) = self.cache_path else {
+            return;
+        };
+        let schema = AuthCacheSchema {
+            access_token: self.access_token.clone(),
+            user_id: self.user_id.clone(),
+            device_id: self.device_id.clone(),
+        };
+        let Ok(json) = serde_json::to_string_pretty(&schema) else {
+            return;
+        };
+        write_owner_only(path, json.as_bytes()).await;
     }
 }
 
@@ -601,6 +632,25 @@ mod tests {
     async fn test_auth_manager_load_from_missing_file() {
         let result = AuthManager::load_from_cache("/path/that/definitely/does/not/exist.json").await;
         assert!(result.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_session_cache_is_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let cache_path = temp_file.path().to_str().unwrap().to_string();
+        // Drop the NamedTempFile guard so save_to_cache re-creates the file with our mode.
+        drop(temp_file);
+
+        let mut manager = AuthManager::new();
+        manager.access_token = Some("sensitive_token".into());
+        manager.cache_path = Some(cache_path.clone());
+        manager.save_to_cache().await;
+
+        let mode = std::fs::metadata(&cache_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "session cache must be readable only by owner");
     }
 
     #[tokio::test]

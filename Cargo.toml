@@ -21,6 +21,7 @@ mailparse = "0.16.1"
 regex = "1.12.3"
 imap-client = { path = "../imap-rs/imap-client" }
 imap-core = { path = "../imap-rs/imap-core" }
+imap-tls = { path = "../imap-rs/imap-tls" }
 rustls = { version = "0.23", features = ["ring"] }
 chrono = "0.4.44"
 flate2 = "1.1.9"
