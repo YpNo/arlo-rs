@@ -1,7 +1,32 @@
-<!-- rtk-instructions v2 -->
-# RTK (Rust Token Killer) - Token-Optimized Commands
+# Project Context: Arlo's camera library (rs-arlo)
+**Role**: You are a Senior Rust Protocol Engineer & Arlo Specialist.
 
-## Golden Rule
+## Core Directives
+1. **Hexagonal Integrity**: Strictly separate Arlo protocol logic (Domain) from transport/MFA solving (Infrastructure). See `.agents/rules/architecture.md`.
+2. **Protocol Fidelity**: We must mimic the Arlo Web Dashboard exactly. This includes undocumented headers, specific telemetry metrics, and JA4 TLS signatures (via `rs-cloudscraper`).
+3. **Quality & Security Gates**: Every contribution must pass the Zero-Warning and Dependency Audit gates. See `.agents/rules/quality-standards.md`.
+4. **Resilient Session Management**: Use the Rust type system to represent device state machines and handle MFA/Session persistence with zero-leak security.
+
+## Knowledge Map
+- **Architecture**: Guidelines located in [architecture.md](file:///.agents/rules/architecture.md).
+- **Quality & Security**: Standards located in [quality-standards.md](file:///.agents/rules/quality-standards.md).
+- **Workflows**: 
+    - [Feature Cycle](file:///.agents/workflows/feature-cycle.md) for new logic.
+    - [Protocol Update](file:///.agents/workflows/protocol-update.md) for Arlo API changes.
+- **Client Implementation**: Located in `src/client/`. Focus on re-attachment logic.
+- **Event System**: Located in `src/events/`. SSE parsing and broadcasting happens here.
+
+## Memory Anchors
+- **Edition 2024** & standard library preference.
+- **Error Handling**: `thiserror` for library boundaries; no opaque `anyhow` in `src/`.
+- **Instrumentation**: Prefer `tracing` over `log` for all new modules.
+- **Safety**: No `unsafe`. Avoid `unwrap()` in favor of `.expect()` with context.
+- **Stealth Integrity**: TLS handshake signatures MUST be verified against `rs-cloudscraper` profiles when updating the Arlo client.
+
+<!-- rtk-instructions v2 -->
+## RTK (Rust Token Killer) - Token-Optimized Commands
+
+### Golden Rule
 
 **Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
 
@@ -14,9 +39,9 @@ git add . && git commit -m "msg" && git push
 rtk git add . && rtk git commit -m "msg" && rtk git push
 ```
 
-## RTK Commands by Workflow
+### RTK Commands by Workflow
 
-### Build & Compile (80-90% savings)
+#### Build & Compile (80-90% savings)
 ```bash
 rtk cargo build         # Cargo build output
 rtk cargo check         # Cargo check output
@@ -27,7 +52,7 @@ rtk prettier --check    # Files needing format only (70%)
 rtk next build          # Next.js build with route metrics (87%)
 ```
 
-### Test (60-99% savings)
+#### Test (60-99% savings)
 ```bash
 rtk cargo test          # Cargo test failures only (90%)
 rtk go test             # Go test failures only (90%)
@@ -40,7 +65,7 @@ rtk rspec               # RSpec test failures only (60%)
 rtk test <cmd>          # Generic test wrapper - failures only
 ```
 
-### Git (59-80% savings)
+#### Git (59-80% savings)
 ```bash
 rtk git status          # Compact status
 rtk git log             # Compact log (works with all git flags)
@@ -58,7 +83,7 @@ rtk git worktree        # Compact worktree
 
 Note: Git passthrough works for ALL subcommands, even those not explicitly listed.
 
-### GitHub (26-87% savings)
+#### GitHub (26-87% savings)
 ```bash
 rtk gh pr view <num>    # Compact PR view (87%)
 rtk gh pr checks        # Compact PR checks (79%)
@@ -67,7 +92,7 @@ rtk gh issue list       # Compact issue list (80%)
 rtk gh api              # Compact API responses (26%)
 ```
 
-### JavaScript/TypeScript Tooling (70-90% savings)
+#### JavaScript/TypeScript Tooling (70-90% savings)
 ```bash
 rtk pnpm list           # Compact dependency tree (70%)
 rtk pnpm outdated       # Compact outdated packages (80%)
@@ -77,7 +102,7 @@ rtk npx <cmd>           # Compact npx command output
 rtk prisma              # Prisma without ASCII art (88%)
 ```
 
-### Files & Search (60-75% savings)
+#### Files & Search (60-75% savings)
 ```bash
 rtk ls <path>           # Tree format, compact (65%)
 rtk read <file>         # Code reading with filtering (60%)

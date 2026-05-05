@@ -26,6 +26,7 @@ coverage.out
 #.idea/
 
 .vscode
+.rtk/
 
 # Local secrets and session artefacts — never commit
 config.toml
