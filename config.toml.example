@@ -1,0 +1,55 @@
+# ==========================================
+# rs-arlo Client Configuration Template
+# 
+# Rename this file to `config.toml` and 
+# place it in the root of your application.
+# ==========================================
+
+[credentials]
+# Your Arlo account login email
+email = "your_email@example.com"
+# Your Arlo account password
+password = "your-secure-password"
+
+[mfa]
+# Define your preferred Two-Factor Authentication method.
+# Options: "push", "email", "sms"
+preferred_method = "push"
+
+# If using email polling for unattended automated 2FA, 
+# you can define your IMAP credentials here.
+[mfa.imap]
+enabled = false
+# Optional shortcut: Setprovider to "gmail", "outlook", or "yahoo" to automatically map host and port bindings
+provider = "gmail"
+# If not using a shortcut provider, define the custom host and port here:
+host = "imap.example.com"
+port = 993
+username = "your_email@example.com"
+password = "your-app-password"
+# Instantly deletes the Arlo 2FA email from your inbox after scraping it successfully to keep logic clean.
+delete_after_read = true
+
+[client]
+# Enable detailed intercept HTTP logging for every payload sent/received
+debug_mode = true
+
+# Path to serialize active valid tokens to avoid repetitive MFA prompts across restarts
+session_cache_path = ".arlo_session.json"
+
+# Determines if the stealth Chrome browser should launch invisibly or open a visual window for debugging
+# headless = true
+
+# Funnels all stealth traffic through an upstream HTTP/SOCKS proxy (e.g., residential proxies for IP unbanning)
+# upstream_proxy = "http://username:password@my-proxy:8080"
+
+# The User-Agent profile that rs-cloudscraper will spoof to evade Cloudflare
+# user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+[streaming]
+# The protocol you prefer to receive when requesting a live camera feed.
+# Options: "rtsps", "hls", "dash"
+preferred_protocol = "hls"
+
+# Download path for local recordings and snapshots
+media_path = "./media"
