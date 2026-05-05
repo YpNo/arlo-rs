@@ -1,9 +1,22 @@
-//! Server-Sent Events (SSE) Telemetry & Actor Model.
+//! Server-Sent Events (SSE) telemetry bus.
 //!
-//! This module implements the asynchronous Actor pattern used to safely monitor Arlo's
-//! continuous `hmsweb` telemetry stream without blocking the main REST executing thread.
-//! It establishes a resilient WebSocket/SSE connection, parses the raw JSON blobs into
-//! strictly-typed `ArloEvent` enums, and broadcasts them system-wide using Tokio sync channels.
+//! [`EventBus`] owns two background tokio tasks — an SSE listener that
+//! reconnects on disconnect, and a 10-minute keep-alive pinger — and
+//! broadcasts parsed [`ArloEvent`]s on a `tokio::sync::broadcast` channel.
+//! Consumers obtain receivers via [`EventBus::subscribe`]; each call yields
+//! an independent receiver.
+//!
+//! Lifecycle:
+//! - [`EventBus::start`] (crate-internal) is invoked lazily by
+//!   [`crate::ArloClient::events`] on first use.
+//! - [`Drop`] aborts both background tasks, so dropping the owning
+//!   [`crate::ArloClient`] cleans up the listener.
+//!
+//! SSE parsing follows the WHATWG spec strictly: frames are terminated by
+//! `\n\n` (or `\r\n\r\n`); within a frame, `data:` lines are concatenated
+//! with `\n`. The previous implementation split per chunk on `\n` and lost
+//! events that straddled a chunk boundary.
+
 use crate::endpoints::*;
 use crate::error::ArloError;
 use crate::headers::ARLO_API_HOST;
@@ -12,159 +25,294 @@ use reqwest::Client;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
-use tracing::{info, error, warn, debug, instrument, info_span, Instrument};
+use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 
-/// Subscription Engine interpreting Arlo's Server-Sent Events (SSE) telemetry.
-///
-/// The `EventManager` sits on a detached `tokio` thread and monitors `hmsweb` telemetry.
-/// It acts as a router, translating JSON payloads into structured `ArloEvent` enumerations
-/// and buffering them onto a reliable asynchronous multi-producer/multi-consumer broadcast channel.
-pub struct EventManager {
-    token: String,
-    device_id: String,
-    client: Client, // Reqwest client tunneled through the CloudScraper MITM proxy
-    /// A subscribable `tokio` receiver yielding parsed Arlo events in real-time.
-    pub receiver: broadcast::Receiver<ArloEvent>,
-    _sender: broadcast::Sender<ArloEvent>,
-    _loop_handle: Option<JoinHandle<()>>,
-    _ping_handle: Option<JoinHandle<()>>,
+/// Default capacity of the broadcast channel. Slow consumers exceeding this
+/// backlog observe `RecvError::Lagged` and skip ahead.
+const BROADCAST_CAPACITY: usize = 256;
+/// How often to ping the session-v3 endpoint to keep the token live.
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(600);
+/// Backoff between SSE reconnect attempts.
+const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
+
+/// SSE telemetry bus. See module docs.
+pub struct EventBus {
+    sender: broadcast::Sender<ArloEvent>,
+    sse_handle: JoinHandle<()>,
+    ping_handle: JoinHandle<()>,
 }
 
-impl EventManager {
-    /// Connects to the Arlo SSE endpoint and spawns a background tokio task to process events.
+impl EventBus {
+    /// Connects to Arlo's SSE stream and spawns the listener + keep-alive
+    /// background tasks. Crate-internal — applications obtain a bus via
+    /// [`crate::ArloClient::events`].
     #[instrument(skip(client, access_token, device_id))]
-    pub async fn start(
+    pub(crate) async fn start(
         client: Client,
         access_token: String,
         device_id: String,
     ) -> Result<Self, ArloError> {
-        let (tx, rx) = broadcast::channel(100);
+        let (sender, _initial_rx) = broadcast::channel(BROADCAST_CAPACITY);
 
-        let mut manager = Self {
-            token: access_token,
-            device_id,
-            client: client.clone(),
-            receiver: rx,
-            _sender: tx.clone(),
-            _loop_handle: None,
-            _ping_handle: None,
-        };
+        let sse_handle = spawn_sse_listener(
+            client.clone(),
+            access_token.clone(),
+            device_id.clone(),
+            sender.clone(),
+        );
+        let ping_handle = spawn_keep_alive(client, access_token, device_id);
 
-        // Spawn background SSE listener
-        let token_clone = manager.token.clone();
-        let client_clone = manager.client.clone();
-        let device_id_clone = manager.device_id.clone();
+        Ok(Self {
+            sender,
+            sse_handle,
+            ping_handle,
+        })
+    }
 
-        let handle = tokio::spawn(async move {
-            let subscribe_url = format!(
+    /// Returns a fresh receiver. Each call yields an independent
+    /// `broadcast::Receiver`; the first event delivered to it is the next
+    /// one published *after* the call.
+    pub fn subscribe(&self) -> broadcast::Receiver<ArloEvent> {
+        self.sender.subscribe()
+    }
+}
+
+impl Drop for EventBus {
+    fn drop(&mut self) {
+        self.sse_handle.abort();
+        self.ping_handle.abort();
+    }
+}
+
+fn spawn_sse_listener(
+    client: Client,
+    token: String,
+    device_id: String,
+    sender: broadcast::Sender<ArloEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(
+        async move {
+            let url = format!(
                 "{}{}?token={}",
                 ARLO_API_HOST,
                 API_SUBSCRIBE,
-                urlencoding::encode(&token_clone)
+                urlencoding::encode(&token)
             );
-
-            info!("Connecting to SSE Stream: {}", subscribe_url);
+            info!(%url, "Connecting to SSE stream");
 
             loop {
-                // Initialize the connection
-                let out = client_clone
-                    .get(&subscribe_url)
+                match client
+                    .get(&url)
                     .header("Accept", "text/event-stream")
-                    .header("Authorization", &token_clone)
-                    .header("x-user-device-id", &device_id_clone)
+                    .header("Authorization", &token)
+                    .header("x-user-device-id", &device_id)
                     .header("x-service-version", "v3")
                     .send()
-                    .await;
-
-                match out {
+                    .await
+                {
                     Ok(mut response) => {
-                        info!("SSE Connected (Status: {})", response.status());
+                        info!(status = %response.status(), "SSE connected");
+                        let mut framer = SseFramer::default();
                         while let Ok(Some(chunk)) = response.chunk().await {
                             let text = String::from_utf8_lossy(&chunk);
-                            for line in text.lines() {
-                                if line.starts_with("data: ") {
-                                    let json_str = line.trim_start_matches("data: ");
-                                    if let Ok(event) = serde_json::from_str::<ArloEvent>(json_str) {
-                                        // Broadcast the parsed event to any open receivers
-                                        let _ = tx.send(event);
-                                    } else if let Ok(values) =
-                                        serde_json::from_str::<Vec<ArloEvent>>(json_str)
-                                    {
-                                        // Arlo occasionally batches events as a JSON array
-                                        for event in values {
-                                            let _ = tx.send(event);
-                                        }
-                                    }
-                                }
+                            for payload in framer.push(&text) {
+                                dispatch_payload(&payload, &sender);
                             }
                         }
+                        warn!("SSE stream ended; reconnecting");
                     }
                     Err(e) => {
-                        error!("SSE connection error: {}. Reconnecting in 5s...", e);
+                        error!(error = %e, "SSE connection error");
                     }
                 }
 
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
             }
-        }.instrument(info_span!("sse_listener")));
+        }
+        .instrument(info_span!("sse_listener")),
+    )
+}
 
-        manager._loop_handle = Some(handle);
-
-        // Spawn the Ping/KeepAlive Loop
-        let ping_token = manager.token.clone();
-        let ping_client = manager.client.clone();
-        let ping_device = manager.device_id.clone();
-
-        let ping_handle = tokio::spawn(async move {
-            let session_url = format!("{}{}", ARLO_API_HOST, AUTH_SESSION_V3);
+fn spawn_keep_alive(client: Client, token: String, device_id: String) -> JoinHandle<()> {
+    tokio::spawn(
+        async move {
+            let url = format!("{}{}", ARLO_API_HOST, AUTH_SESSION_V3);
             loop {
-                // Arlo tokens expire if idle. Ping every 10 minutes to maintain session state.
-                tokio::time::sleep(Duration::from_secs(600)).await;
-
-                debug!("Sending Keep-Alive Ping to {}", session_url);
-                let out = ping_client
-                    .get(&session_url)
-                    .header("Authorization", &ping_token)
-                    .header("x-user-device-id", &ping_device)
+                tokio::time::sleep(KEEP_ALIVE_INTERVAL).await;
+                debug!(%url, "Sending keep-alive ping");
+                match client
+                    .get(&url)
+                    .header("Authorization", &token)
+                    .header("x-user-device-id", &device_id)
                     .header("x-service-version", "v3")
                     .send()
-                    .await;
-
-                if let Err(e) = out {
-                    warn!("Keep-Alive Ping failed: {}", e);
-                } else if let Ok(resp) = out
-                    && !resp.status().is_success()
+                    .await
                 {
-                    warn!(
-                        "Keep-Alive Ping returned non-success status: {}",
-                        resp.status()
-                    );
+                    Err(e) => warn!(error = %e, "Keep-alive ping failed"),
+                    Ok(resp) if !resp.status().is_success() => {
+                        warn!(status = %resp.status(), "Keep-alive ping non-success")
+                    }
+                    Ok(_) => {}
                 }
             }
-        }.instrument(info_span!("keep_alive_ping")));
+        }
+        .instrument(info_span!("keep_alive_ping")),
+    )
+}
 
-        manager._ping_handle = Some(ping_handle);
+/// Routes a single decoded SSE `data:` payload through the broadcast
+/// channel. Accepts both single-event objects and arrays (Arlo batches
+/// occasionally).
+fn dispatch_payload(payload: &str, sender: &broadcast::Sender<ArloEvent>) {
+    if let Ok(event) = serde_json::from_str::<ArloEvent>(payload) {
+        let _ = sender.send(event);
+        return;
+    }
+    if let Ok(events) = serde_json::from_str::<Vec<ArloEvent>>(payload) {
+        for event in events {
+            let _ = sender.send(event);
+        }
+    }
+}
 
-        Ok(manager)
+/// Stateful SSE frame parser. Accumulates partial chunks across reads and
+/// emits the joined `data:` payload of each complete event.
+#[derive(Default)]
+struct SseFramer {
+    buf: String,
+}
+
+impl SseFramer {
+    /// Append `chunk` to the internal buffer and drain every complete
+    /// frame. A frame is terminated by `\n\n` or `\r\n\r\n`. Within a frame,
+    /// every line starting with `data:` (with an optional leading space)
+    /// contributes one line of the returned payload, joined with `\n`.
+    /// Frames with no `data:` line are skipped.
+    fn push(&mut self, chunk: &str) -> Vec<String> {
+        self.buf.push_str(chunk);
+        let mut payloads = Vec::new();
+
+        loop {
+            let separator = locate_frame_terminator(&self.buf);
+            let Some((idx, term_len)) = separator else {
+                break;
+            };
+            let raw_frame = self.buf[..idx].to_string();
+            self.buf.drain(..idx + term_len);
+
+            let mut data_lines: Vec<&str> = Vec::new();
+            for line in raw_frame.split('\n') {
+                let line = line.trim_end_matches('\r');
+                let Some(rest) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                data_lines.push(rest.strip_prefix(' ').unwrap_or(rest));
+            }
+            if !data_lines.is_empty() {
+                payloads.push(data_lines.join("\n"));
+            }
+        }
+
+        payloads
+    }
+}
+
+/// Returns `(index, terminator_len)` for the first frame separator in
+/// `buf`, preferring `\r\n\r\n` over `\n\n` if both are present at the
+/// same position. Bytes are ASCII so the index is always a UTF-8 boundary.
+fn locate_frame_terminator(buf: &str) -> Option<(usize, usize)> {
+    let crlf = buf.find("\r\n\r\n").map(|i| (i, 4));
+    let lf = buf.find("\n\n").map(|i| (i, 2));
+    match (crlf, lf) {
+        (Some(c), Some(l)) if c.0 <= l.0 => Some(c),
+        (_, Some(l)) => Some(l),
+        (Some(c), None) => Some(c),
+        (None, None) => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::models::events::ArloEvent;
 
     #[test]
-    fn test_parse_sse_event_single() {
-        let json_str = "{\"action\": \"is\", \"resource\": \"cameras/C1\", \"publishResponse\": false, \"properties\": {\"motionDetected\": true}}";
-        let event: Result<ArloEvent, _> = serde_json::from_str(json_str);
-        assert!(event.is_ok());
+    fn parses_single_event() {
+        let json = "{\"action\":\"is\",\"resource\":\"cameras/C1\",\"publishResponse\":false,\"properties\":{\"motionDetected\":true}}";
+        let ev: ArloEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(ev.resource, "cameras/C1");
+        assert_eq!(ev.publish_response, Some(false));
     }
 
     #[test]
-    fn test_parse_sse_event_batch() {
-        let json_str = "[{\"action\": \"is\", \"resource\": \"cameras/C1\", \"publishResponse\": false, \"properties\": {\"motionDetected\": true}}, {\"action\": \"is\", \"resource\": \"cameras/C2\", \"publishResponse\": false, \"properties\": {\"motionDetected\": false}}]";
-        let events: Result<Vec<ArloEvent>, _> = serde_json::from_str(json_str);
-        assert!(events.is_ok());
-        assert_eq!(events.unwrap().len(), 2);
+    fn parses_event_without_publish_response() {
+        let json = "{\"action\":\"is\",\"resource\":\"modes\"}";
+        let ev: ArloEvent = serde_json::from_str(json).unwrap();
+        assert!(ev.publish_response.is_none());
+    }
+
+    #[test]
+    fn parses_event_with_trans_id() {
+        let json = "{\"action\":\"is\",\"resource\":\"cameras/C1\",\"transId\":\"web!abc-123\"}";
+        let ev: ArloEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(ev.trans_id.as_deref(), Some("web!abc-123"));
+    }
+
+    #[test]
+    fn parses_batch() {
+        let json = "[{\"action\":\"is\",\"resource\":\"cameras/C1\"},{\"action\":\"is\",\"resource\":\"cameras/C2\"}]";
+        let events: Vec<ArloEvent> = serde_json::from_str(json).unwrap();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn framer_emits_complete_frame() {
+        let mut f = SseFramer::default();
+        let out = f.push("data: hello\n\n");
+        assert_eq!(out, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn framer_handles_chunk_boundaries() {
+        let mut f = SseFramer::default();
+        // The frame terminator straddles two chunks — the previous \n-only
+        // splitter would have lost the event. Each push must wait for the
+        // full \n\n before emitting.
+        assert!(f.push("data: hel").is_empty());
+        assert!(f.push("lo\n").is_empty());
+        let out = f.push("\nleftover");
+        assert_eq!(out, vec!["hello".to_string()]);
+        // The leftover "leftover" stays buffered for the next frame.
+        assert!(f.push("\n\n").is_empty()); // not prefixed with "data:" — skipped.
+        let out = f.push("data: world\n\n");
+        assert_eq!(out, vec!["world".to_string()]);
+    }
+
+    #[test]
+    fn framer_handles_crlf_terminator() {
+        let mut f = SseFramer::default();
+        let out = f.push("data: hi\r\n\r\n");
+        assert_eq!(out, vec!["hi".to_string()]);
+    }
+
+    #[test]
+    fn framer_concatenates_multiline_data() {
+        let mut f = SseFramer::default();
+        let out = f.push("data: line1\ndata: line2\n\n");
+        assert_eq!(out, vec!["line1\nline2".to_string()]);
+    }
+
+    #[test]
+    fn framer_drains_multiple_frames_in_one_chunk() {
+        let mut f = SseFramer::default();
+        let out = f.push("data: a\n\ndata: b\n\ndata: c\n\n");
+        assert_eq!(out, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn framer_skips_frames_without_data_line() {
+        let mut f = SseFramer::default();
+        let out = f.push(": comment\n\nevent: ping\n\n");
+        assert!(out.is_empty());
     }
 }
