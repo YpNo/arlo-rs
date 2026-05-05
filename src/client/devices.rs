@@ -9,14 +9,20 @@ use crate::client::ArloClient;
 use crate::endpoints::*;
 use crate::error::ArloError;
 use crate::headers::ARLO_API_HOST;
-use crate::models::api::{AmbientSensorData, AmbientSensorHistoryResponse, Device};
+use crate::models::api::{AmbientSensorData, AmbientSensorHistoryResponse, Device, StreamUrl};
 use base64::{Engine as _, engine::general_purpose};
 use flate2::read::ZlibDecoder;
 use reqwest::Method;
 use serde_json::json;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
-use tracing::instrument;
+use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
+use tracing::{debug, instrument, warn};
+
+/// Maximum time we wait for Arlo's SSE-side stream-URL response after the
+/// `/startStream` POST returns 200. Empirically the URL lands within 1–3 s.
+const STREAM_URL_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl ArloClient {
     /// Discovers all devices attached to the user's Arlo account.
@@ -80,15 +86,32 @@ impl ArloClient {
         }
     }
 
-    /// Triggers a video stream on the specified camera.
-    /// Note: Arlo responds asynchronously via the SSE Event Manager with the actual stream URL.
+    /// Triggers a live video stream on the specified camera and returns
+    /// the playable URL.
+    ///
+    /// Arlo's `/startStream` endpoint is asynchronous: the POST itself only
+    /// confirms acceptance, while the actual RTSPS / HLS / DASH URL arrives
+    /// later as an SSE event correlated by `transId`. This method handles
+    /// the full round-trip — it subscribes to the event bus *before*
+    /// issuing the POST (closing the race where the SSE response could land
+    /// faster than the subscription) and then awaits the matching event up
+    /// to [`STREAM_URL_TIMEOUT`]. Returns [`ArloError::Timeout`] if no URL
+    /// arrives in time, or [`ArloError::AuthError`] if the client isn't
+    /// authenticated yet.
     #[instrument(skip(self))]
-    pub async fn start_stream(&self, camera_id: &str) -> Result<(), ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_START_STREAM);
-
-        let user_id = self.auth.user_id.as_deref().unwrap_or("unknown_user");
+    pub async fn start_stream(&self, camera_id: &str) -> Result<StreamUrl, ArloError> {
+        let user_id = self
+            .auth
+            .user_id
+            .as_deref()
+            .ok_or_else(|| ArloError::AuthError("Cannot start stream before login".into()))?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
+        // Attach SSE listener BEFORE the POST.
+        let bus = self.events().await?;
+        let mut rx = bus.subscribe();
+
+        let url = format!("{}{}", ARLO_API_HOST, API_START_STREAM);
         let payload = json!({
             "to": camera_id,
             "from": format!("{}_web", user_id),
@@ -101,11 +124,46 @@ impl ArloClient {
                 "cameraId": camera_id
             }
         });
-
         self.execute_request(Method::POST, &url, Some(&payload))
             .await?;
 
-        Ok(())
+        // Drain the broadcast channel until we see our own transId carrying
+        // a stream URL, or the per-call timeout expires.
+        let deadline = tokio::time::Instant::now() + STREAM_URL_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(ArloError::Timeout(format!(
+                    "startStream({camera_id}) did not receive a URL within {STREAM_URL_TIMEOUT:?}"
+                )));
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(event)) => {
+                    debug!(?event, "SSE event during startStream wait");
+                    if !event_matches_trans_id(&event, &trans_id) {
+                        continue;
+                    }
+                    if let Some(found) = extract_stream_url(&event) {
+                        return Ok(StreamUrl(found));
+                    }
+                }
+                Ok(Err(RecvError::Lagged(n))) => {
+                    warn!(skipped = n, "Event bus lagged during startStream wait");
+                    continue;
+                }
+                Ok(Err(RecvError::Closed)) => {
+                    return Err(ArloError::ApiError {
+                        code: 500,
+                        message: "SSE bus closed before startStream URL arrived".into(),
+                    });
+                }
+                Err(_elapsed) => {
+                    return Err(ArloError::Timeout(format!(
+                        "startStream({camera_id}) did not receive a URL within {STREAM_URL_TIMEOUT:?}"
+                    )));
+                }
+            }
+        }
     }
 
     /// Helper utility to bind a returned stream URL to a local FFmpeg daemon.
@@ -856,10 +914,90 @@ impl ArloClient {
     }
 }
 
+/// True if `event` carries the same `transId` we sent on the `/startStream`
+/// POST. Tolerant of Arlo wrapping the field in nested objects: most
+/// responses put it at the top level, but we also peek inside `properties`
+/// just in case.
+fn event_matches_trans_id(event: &crate::models::events::ArloEvent, trans_id: &str) -> bool {
+    if event.trans_id.as_deref() == Some(trans_id) {
+        return true;
+    }
+    if let Some(props) = event.properties.as_ref()
+        && props.get("transId").and_then(|v| v.as_str()) == Some(trans_id)
+    {
+        return true;
+    }
+    false
+}
+
+/// Extracts the playable stream URL from a stream-response SSE event.
+/// Arlo has used both `properties.url` and `properties.streamUrl` in the
+/// wild; check both before declaring no match.
+fn extract_stream_url(event: &crate::models::events::ArloEvent) -> Option<String> {
+    let props = event.properties.as_ref()?;
+    if let Some(s) = props.get("url").and_then(|v| v.as_str()) {
+        return Some(s.to_string());
+    }
+    if let Some(s) = props.get("streamUrl").and_then(|v| v.as_str()) {
+        return Some(s.to_string());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::events::ArloEvent;
     use mockito::Server;
+    use serde_json::Value;
+
+    fn make_event(trans_id: Option<&str>, properties: Value) -> ArloEvent {
+        ArloEvent {
+            action: "is".into(),
+            resource: "cameras/C1".into(),
+            publish_response: None,
+            properties: Some(properties),
+            source: None,
+            trans_id: trans_id.map(String::from),
+        }
+    }
+
+    #[test]
+    fn trans_id_matches_top_level() {
+        let ev = make_event(Some("tid-1"), json!({}));
+        assert!(event_matches_trans_id(&ev, "tid-1"));
+        assert!(!event_matches_trans_id(&ev, "other"));
+    }
+
+    #[test]
+    fn trans_id_matches_inside_properties() {
+        let ev = make_event(None, json!({ "transId": "tid-nested" }));
+        assert!(event_matches_trans_id(&ev, "tid-nested"));
+    }
+
+    #[test]
+    fn trans_id_no_match_when_absent() {
+        let ev = make_event(None, json!({}));
+        assert!(!event_matches_trans_id(&ev, "anything"));
+    }
+
+    #[test]
+    fn stream_url_extracted_from_url_key() {
+        let ev = make_event(Some("t"), json!({ "url": "rtsps://camera/stream" }));
+        assert_eq!(extract_stream_url(&ev).as_deref(), Some("rtsps://camera/stream"));
+    }
+
+    #[test]
+    fn stream_url_extracted_from_stream_url_key() {
+        let ev = make_event(Some("t"), json!({ "streamUrl": "https://hls/idx.m3u8" }));
+        assert_eq!(extract_stream_url(&ev).as_deref(), Some("https://hls/idx.m3u8"));
+    }
+
+    #[test]
+    fn stream_url_returns_none_when_absent() {
+        let ev = make_event(Some("t"), json!({ "activityState": "idle" }));
+        assert_eq!(extract_stream_url(&ev), None);
+    }
 
     #[tokio::test]
     async fn test_get_devices_dynamic_parsing() {

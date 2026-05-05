@@ -88,7 +88,7 @@ impl ArloClient {
             );
 
         // Inject authorization token if we have one
-        if let Some(token) = &self.auth.access_token {
+        if let Some(token) = self.auth.token() {
             if url.starts_with(ARLO_AUTH_HOST) {
                 // Endpoints targeting `ocapi-app.arlo.com` (MFA, validating tokens) require Base64 encoding.
                 let b64_token = BASE64_STANDARD.encode(token.as_bytes());
@@ -233,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn test_inject_headers_auth_encoding() {
         let mut client = ArloClient::new().await.unwrap();
-        client.auth.access_token = Some("dummy_token".to_string());
+        client.auth.set_token("dummy_token".to_string());
         client.auth.device_id = "test_device".to_string();
 
         let req_builder = client.reqwest_client.request(Method::GET, "https://example.com");
@@ -251,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn test_inject_headers_api_raw() {
         let mut client = ArloClient::new().await.unwrap();
-        client.auth.access_token = Some("dummy_token".to_string());
+        client.auth.set_token("dummy_token".to_string());
 
         let req_builder = client.reqwest_client.request(Method::GET, "https://example.com");
         
