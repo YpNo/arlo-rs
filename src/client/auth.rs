@@ -16,6 +16,7 @@ use crate::models::auth_advanced::*;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use reqwest::Method;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::{info, warn, instrument};
@@ -23,17 +24,19 @@ use tracing::{info, warn, instrument};
 /// Internal credentials caching layer.
 ///
 /// Persists `access_token`, `user_id`, and generating unique `device_id`s
-/// mimicking the telemetry logged by single-page Arlo Web Dashboards.
+/// mimicking the telemetry logged by single-page Arlo Web Dashboards. The
+/// access token is held in a `SecretString` so it isn't accidentally
+/// formatted via `Debug` and is zeroized on drop.
 #[derive(Debug, Default)]
 pub struct AuthManager {
-    /// Optional OAuth token, populated after successful MFA validations
-    pub access_token: Option<String>,
-    /// Secure user verification identifier assigned by Arlo
-    pub user_id: Option<String>,
-    /// Static randomly generated hardware signature for the current instance
-    pub device_id: String,
-    /// Absolute or relative path to the persistent cache disk JSON
-    pub cache_path: Option<String>,
+    /// Optional OAuth token, populated after successful MFA validations.
+    pub(crate) access_token: Option<SecretString>,
+    /// Secure user verification identifier assigned by Arlo.
+    pub(crate) user_id: Option<String>,
+    /// Static randomly generated hardware signature for the current instance.
+    pub(crate) device_id: String,
+    /// Absolute or relative path to the persistent cache disk JSON.
+    pub(crate) cache_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,6 +84,28 @@ impl AuthManager {
         }
     }
 
+    /// Returns the raw access token as `&str`. Use sparingly — every call
+    /// site should be auditable for accidental logging or HTTP-body leaks.
+    pub(crate) fn token(&self) -> Option<&str> {
+        self.access_token.as_ref().map(|s| s.expose_secret())
+    }
+
+    /// True if an access token is currently held.
+    pub(crate) fn has_token(&self) -> bool {
+        self.access_token.is_some()
+    }
+
+    /// Replaces the held access token. The previous value is dropped (and
+    /// zeroized by `secrecy`'s `ZeroizeOnDrop`).
+    pub(crate) fn set_token(&mut self, token: String) {
+        self.access_token = Some(SecretString::from(token));
+    }
+
+    /// Drops the held access token (zeroized by `secrecy`).
+    pub(crate) fn clear_token(&mut self) {
+        self.access_token = None;
+    }
+
     /// Loads the authentication state from a JSON file path if it exists
     #[instrument(skip(path))]
     pub async fn load_from_cache(path: &str) -> Option<Self> {
@@ -88,7 +113,7 @@ impl AuthManager {
             && let Ok(schema) = serde_json::from_str::<AuthCacheSchema>(&contents)
         {
             return Some(Self {
-                access_token: schema.access_token,
+                access_token: schema.access_token.map(SecretString::from),
                 user_id: schema.user_id,
                 device_id: schema.device_id,
                 cache_path: Some(path.to_string()),
@@ -107,7 +132,10 @@ impl AuthManager {
             return;
         };
         let schema = AuthCacheSchema {
-            access_token: self.access_token.clone(),
+            access_token: self
+                .access_token
+                .as_ref()
+                .map(|s| s.expose_secret().to_string()),
             user_id: self.user_id.clone(),
             device_id: self.device_id.clone(),
         };
@@ -130,14 +158,14 @@ impl ArloClient {
         config: &crate::config::ArloConfig,
     ) -> Result<AuthResult, ArloError> {
         // 1. Silent Cached Session Verification
-        if self.auth.access_token.is_some() {
+        if self.auth.has_token() {
             if self.validate_session_v3().await.is_ok() {
                 // The underlying cache token successfully unlocked the active hub session.
                 return Ok(AuthResult::Success);
             } else {
                 // Token expired or invalidated downstream. Delete it.
                 warn!("Cached token failed v3 session validation. Re-authenticating.");
-                self.auth.access_token = None;
+                self.auth.clear_token();
             }
         }
 
@@ -190,54 +218,57 @@ impl ArloClient {
         })
     }
 
-    /// Automated helper that coordinates the `authenticate` state machine with the background
-    /// IMAP poller. 
+    /// Drives the full MFA flow with a pluggable [`MfaHandler`].
     ///
-    /// It automatically captures the inbox baseline timestamp *before* starting auth, triggers the 
-    /// Arlo OTP email dispatch, and sequentially fetches the OTP resolving the MFA state machine 
-    /// entirely headlessly without user intervention.
+    /// Fully end-to-end: captures any pre-dispatch state via
+    /// [`MfaHandler::prepare`], runs [`Self::authenticate`] to trigger the
+    /// OTP, retrieves the OTP via [`MfaHandler::provide_otp`], and
+    /// finalises the session with [`Self::submit_mfa`]. Returns
+    /// [`AuthResult::Success`] when the cached session is already valid
+    /// (no MFA needed) or once MFA completes successfully.
+    #[instrument(skip(self, config, handler))]
+    pub async fn authenticate_with_handler<H: crate::client::mfa::MfaHandler>(
+        &mut self,
+        config: &crate::config::ArloConfig,
+        mut handler: H,
+    ) -> Result<AuthResult, ArloError> {
+        // Phase 1: let the handler establish any pre-dispatch baseline.
+        info!("Preparing MFA handler before OTP dispatch");
+        handler.prepare().await?;
+
+        // Phase 2: run the state machine to trigger the OTP dispatch.
+        let res = self.authenticate(config).await?;
+        let challenge = match crate::client::mfa::MfaChallenge::from_auth_result(&res) {
+            Some(c) => c,
+            None => return Ok(AuthResult::Success),
+        };
+
+        // Phase 3: handler retrieves the OTP, we forward it to Arlo.
+        info!(provider = %challenge.provider, "Awaiting OTP from MFA handler");
+        let otp = handler.provide_otp(&challenge).await?;
+        self.submit_mfa(&challenge.factor_auth_code, &otp).await?;
+        Ok(AuthResult::Success)
+    }
+
+    /// Backwards-compatible shorthand: drives the MFA flow with the IMAP
+    /// handler configured in `[mfa.imap]`. New code should call
+    /// [`Self::authenticate_with_handler`] with an explicit
+    /// [`crate::client::mfa::ImapMfaHandler`].
     #[instrument(skip(self, config))]
     pub async fn authenticate_with_imap(
         &mut self,
         config: &crate::config::ArloConfig,
     ) -> Result<AuthResult, ArloError> {
-        let mfa = config.mfa.as_ref().ok_or_else(|| {
-            ArloError::AuthError("Missing [mfa] configuration block for IMAP auth".into())
-        })?;
-        let imap = mfa
-            .imap
+        let imap = config
+            .mfa
             .as_ref()
-            .ok_or_else(|| ArloError::AuthError("Missing [mfa.imap] configuration block".into()))?;
-
-        if !imap.enabled.unwrap_or(false) {
-            return Err(ArloError::AuthError(
-                "IMAP is disabled in configuration".into(),
-            ));
-        }
-
-        info!("Capturing IMAP inbox baseline BEFORE Arlo dispatches the email...");
-        let imap_baseline = crate::client::auth_imap::get_baseline(imap).await?;
-
-        let res = self.authenticate(config).await?;
-
-        match res {
-            AuthResult::MfaRequired {
-                factor_auth_code, ..
-            } => {
-                info!(
-                    "IMAP automation mode enabled. Halting to poll for arriving Arlo OTP dispatch..."
-                );
-                let otp = crate::client::auth_imap::fetch_otp(imap, imap_baseline).await?;
-                info!(
-                    "OTP received automatically via IMAP: '{}'. Submitting for validation...",
-                    otp
-                );
-
-                self.submit_mfa(&factor_auth_code, &otp).await?;
-                Ok(AuthResult::Success)
-            }
-            AuthResult::Success => Ok(AuthResult::Success),
-        }
+            .and_then(|m| m.imap.as_ref())
+            .ok_or_else(|| {
+                ArloError::AuthError("Missing [mfa.imap] configuration block".into())
+            })?
+            .clone();
+        let handler = crate::client::mfa::ImapMfaHandler::new(imap);
+        self.authenticate_with_handler(config, handler).await
     }
 
     /// Primary Continuation Function: Executed when manual interaction is requested and fulfilled.
@@ -290,7 +321,7 @@ impl ArloClient {
             .ok_or_else(|| ArloError::AuthError("No auth data returned from server".to_string()))?;
 
         // Cache the preliminary token so subsequent factor requests get authorized.
-        self.auth.access_token = Some(auth_data.token.clone());
+        self.auth.set_token(auth_data.token.clone());
         self.auth.user_id = Some(auth_data.user_id.clone());
         self.auth.save_to_cache().await;
 
@@ -391,7 +422,7 @@ impl ArloClient {
         })?;
 
         // Cache the finalized token
-        self.auth.access_token = Some(auth_data.token.clone());
+        self.auth.set_token(auth_data.token.clone());
         self.auth.save_to_cache().await;
 
         Ok(auth_data)
@@ -566,7 +597,7 @@ impl ArloClient {
             ArloError::AuthError("No auth data returned from V2 server".to_string())
         })?;
 
-        self.auth.access_token = Some(auth_data.token.clone());
+        self.auth.set_token(auth_data.token.clone());
         self.auth.user_id = Some(auth_data.user_id.clone());
         self.auth.save_to_cache().await;
 
@@ -581,7 +612,7 @@ impl ArloClient {
         let _body_str = self.execute_request::<()>(Method::PUT, &url, None).await?;
 
         // Wipe local session state
-        self.auth.access_token = None;
+        self.auth.clear_token();
         self.auth.user_id = None;
         self.auth.save_to_cache().await;
 
@@ -598,12 +629,16 @@ mod tests {
     #[test]
     fn test_auth_manager_initialization() {
         let manager = AuthManager::new();
-        assert!(manager.access_token.is_none());
+        assert!(!manager.has_token());
         assert!(manager.user_id.is_none());
         assert!(manager.cache_path.is_none());
         // Device ID should be a generated UUID
         assert!(!manager.device_id.is_empty());
         assert_eq!(manager.device_id.len(), 36);
+    }
+
+    fn token_str(m: &AuthManager) -> Option<&str> {
+        m.token()
     }
 
     #[tokio::test]
@@ -612,7 +647,7 @@ mod tests {
         let cache_path = temp_file.path().to_str().unwrap().to_string();
 
         let mut manager = AuthManager::new();
-        manager.access_token = Some("dummy_token_123".to_string());
+        manager.set_token("dummy_token_123".to_string());
         manager.user_id = Some("user_001".to_string());
         manager.cache_path = Some(cache_path.clone());
 
@@ -623,7 +658,7 @@ mod tests {
         let loaded_manager =
             AuthManager::load_from_cache(&cache_path).await.expect("Failed to load cache from disk");
 
-        assert_eq!(loaded_manager.access_token.unwrap(), "dummy_token_123");
+        assert_eq!(token_str(&loaded_manager), Some("dummy_token_123"));
         assert_eq!(loaded_manager.user_id.unwrap(), "user_001");
         assert_eq!(loaded_manager.device_id, manager.device_id); // Device ID should persist exactly
     }
@@ -645,7 +680,7 @@ mod tests {
         drop(temp_file);
 
         let mut manager = AuthManager::new();
-        manager.access_token = Some("sensitive_token".into());
+        manager.set_token("sensitive_token".into());
         manager.cache_path = Some(cache_path.clone());
         manager.save_to_cache().await;
 
@@ -659,7 +694,7 @@ mod tests {
         let mut client = ArloClient::new().await.unwrap();
         client.reqwest_client = reqwest::Client::new();
         
-        client.auth.access_token = Some("valid_token".to_string());
+        client.auth.set_token("valid_token".to_string());
         
         // Mock session validation success
         let _m = server.mock("GET", mockito::Matcher::Any)
