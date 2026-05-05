@@ -48,6 +48,30 @@ pub struct StreamResponse {
     pub url: String,
 }
 
+/// Live-stream URL returned by [`crate::ArloClient::start_stream`].
+///
+/// Wraps the RTSPS / HLS / DASH URL Arlo asynchronously delivers over SSE
+/// after a successful `/startStream` POST. Use [`StreamUrl::as_str`] to
+/// hand the URL to `ffmpeg`, a player, or a transcoder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamUrl(pub String);
+
+impl StreamUrl {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for StreamUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Dynamic payload received over SSE when `startStream` succeeds
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
