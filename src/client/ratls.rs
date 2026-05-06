@@ -16,7 +16,7 @@ use crate::client::ArloClient;
 use crate::client::local_hub::LocalHubClient;
 use crate::endpoints::*;
 use crate::error::ArloError;
-use crate::headers::ARLO_API_HOST;
+// Endpoints come from self.endpoints (PR 4 transport refactor).
 use crate::models::ratls::*;
 use reqwest::Method;
 use tracing::instrument;
@@ -29,7 +29,7 @@ impl ArloClient {
         &self,
         device_id: &str,
     ) -> Result<CertCreateData, ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_RATLS_CERT);
+        let url = format!("{}{}", self.endpoints.api_host, API_RATLS_CERT);
         let payload = CertCreateRequest {
             name: format!("arlo-{device_id}"),
             cn: "Unknown".to_string(),
@@ -56,7 +56,7 @@ impl ArloClient {
     /// Requests a bearer token authorising the LAN-direct `/hmsls/*`
     /// endpoints on the SmartHub for `device_id`.
     pub async fn get_ratls_token(&self, device_id: &str) -> Result<RatlsTokenData, ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_RATLS_TOKEN);
+        let url = format!("{}{}", self.endpoints.api_host, API_RATLS_TOKEN);
         let payload = RatlsTokenRequest {
             device_id: device_id.to_string(),
         };

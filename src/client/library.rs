@@ -1,7 +1,7 @@
 use crate::client::ArloClient;
 use crate::endpoints::*;
 use crate::error::ArloError;
-use crate::headers::ARLO_API_HOST;
+// Endpoints come from self.endpoints (PR 4 transport refactor).
 use crate::models::library::{LibraryQuery, LibraryResponse, MediaItem};
 use reqwest::Method;
 
@@ -13,7 +13,7 @@ impl ArloClient {
         date_from: &str,
         date_to: &str,
     ) -> Result<Vec<MediaItem>, ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_LIBRARY);
+        let url = format!("{}{}", self.endpoints.api_host, API_LIBRARY);
 
         let payload = LibraryQuery {
             date_from: date_from.to_string(),

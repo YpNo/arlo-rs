@@ -10,7 +10,7 @@
 use crate::client::ArloClient;
 use crate::endpoints::*;
 use crate::error::ArloError;
-use crate::headers::{ARLO_API_HOST, ARLO_AUTH_HOST};
+// Endpoints (auth/api hosts) come from self.endpoints — PR 4 transport refactor.
 use crate::models::auth::*;
 use crate::models::auth_advanced::*;
 use base64::Engine;
@@ -290,7 +290,7 @@ impl ArloClient {
         email: &str,
         password: &str,
     ) -> Result<AuthResponseData, ArloError> {
-        let url = format!("{}{}", ARLO_AUTH_HOST, AUTH_LOGIN);
+        let url = format!("{}{}", self.endpoints.auth_host, AUTH_LOGIN);
         let b64_password = BASE64_STANDARD.encode(password.as_bytes());
         let payload = AuthRequest {
             email: email.to_string(),
@@ -328,7 +328,7 @@ impl ArloClient {
 
     /// Step 2: Retrieves the available 2FA factors for the account
     pub async fn get_factors(&self) -> Result<Vec<FactorData>, ArloError> {
-        let url = format!("{}{}", ARLO_AUTH_HOST, AUTH_GET_FACTORS);
+        let url = format!("{}{}", self.endpoints.auth_host, AUTH_GET_FACTORS);
 
         // Pass a dummy () for options that have no payload
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
@@ -353,7 +353,7 @@ impl ArloClient {
 
     /// Step 3: Starts the MFA flow by requesting an OTP on the specified factor (e.g. Email / Push)
     pub async fn start_auth(&self, factor_id: &str) -> Result<String, ArloError> {
-        let url = format!("{}{}", ARLO_AUTH_HOST, AUTH_START_AUTH);
+        let url = format!("{}{}", self.endpoints.auth_host, AUTH_START_AUTH);
         let payload = FactorRequest {
             factor_id: factor_id.to_string(),
         };
@@ -394,7 +394,7 @@ impl ArloClient {
         factor_auth_code: &str,
         otp: &str,
     ) -> Result<AuthResponseData, ArloError> {
-        let url = format!("{}{}", ARLO_AUTH_HOST, AUTH_FINISH_AUTH);
+        let url = format!("{}{}", self.endpoints.auth_host, AUTH_FINISH_AUTH);
         let payload = VerifyFactorRequest {
             factor_auth_code: factor_auth_code.to_string(),
             otp: otp.to_string(),
@@ -431,7 +431,7 @@ impl ArloClient {
         let timestamp = chrono::Utc::now().timestamp_millis();
         let url = format!(
             "{}{}?data={}",
-            ARLO_AUTH_HOST, AUTH_VALIDATE_ACCESS_TOKEN, timestamp
+            self.endpoints.auth_host, AUTH_VALIDATE_ACCESS_TOKEN, timestamp
         );
 
         let _body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
@@ -441,7 +441,7 @@ impl ArloClient {
     /// Step 4c: (Optional) Starts the pairing factor flow to remember the device.
     /// This emulates the 'Trust this device' browser checkbox.
     pub async fn start_pairing_factor(&self, factor_auth_code: &str) -> Result<(), ArloError> {
-        let url = format!("{}{}", ARLO_AUTH_HOST, AUTH_START_PAIRING_FACTOR);
+        let url = format!("{}{}", self.endpoints.auth_host, AUTH_START_PAIRING_FACTOR);
         let payload = serde_json::json!({
             "factorAuthCode": factor_auth_code,
             "factorData": "",
@@ -463,7 +463,7 @@ impl ArloClient {
         let event_id = format!("FE!{}", uuid::Uuid::new_v4());
         let url = format!(
             "{}{}?eventId={}&time={}",
-            ARLO_API_HOST, AUTH_SESSION_V3, event_id, timestamp
+            self.endpoints.api_host, AUTH_SESSION_V3, event_id, timestamp
         );
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
@@ -485,7 +485,7 @@ impl ArloClient {
         let event_id = format!("FE!{}", uuid::Uuid::new_v4());
         let url = format!(
             "{}{}?eventId={}&time={}",
-            ARLO_API_HOST, AUTH_DEVICE_SUPPORT_V2, event_id, timestamp
+            self.endpoints.api_host, AUTH_DEVICE_SUPPORT_V2, event_id, timestamp
         );
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
@@ -494,7 +494,7 @@ impl ArloClient {
 
     /// Retrieve Details of a Specific 2FA Factor (Requested by workfile.md)
     pub async fn get_factor_id(&self) -> Result<(), ArloError> {
-        let url = format!("{}{}", ARLO_AUTH_HOST, AUTH_GET_FACTOR_ID);
+        let url = format!("{}{}", self.endpoints.auth_host, AUTH_GET_FACTOR_ID);
         let user_id = self.require_user_id()?;
 
         let payload = serde_json::json!({
@@ -519,7 +519,7 @@ impl ArloClient {
         email: &str,
         password: &str,
     ) -> Result<AuthResponseData, ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, AUTH_LOGIN_V2);
+        let url = format!("{}{}", self.endpoints.api_host, AUTH_LOGIN_V2);
 
         let b64_password = BASE64_STANDARD.encode(password.as_bytes());
         let payload = AuthRequest {
@@ -557,7 +557,7 @@ impl ArloClient {
     /// Log the current active session out securely
     #[instrument(skip(self))]
     pub async fn logout(&mut self) -> Result<(), ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, AUTH_LOGOUT);
+        let url = format!("{}{}", self.endpoints.api_host, AUTH_LOGOUT);
 
         let _body_str = self.execute_request::<()>(Method::PUT, &url, None).await?;
 
@@ -573,7 +573,6 @@ impl ArloClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockito::Server;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -641,27 +640,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_authenticate_success_cached() {
-        let mut server = Server::new_async().await;
-        let mut client = ArloClient::new().await.unwrap();
-        client.reqwest_client = reqwest::Client::new();
+    async fn validate_session_v3_succeeds_against_mocked_transport() {
+        // Previously this test was a placeholder — it asserted the call
+        // failed because hosts were hardcoded constants. PR 4's
+        // ArloEndpoints + HttpTransport make it actually testable.
+        use crate::ArloEndpoints;
+        use crate::client::transport::test_support::MockTransport;
+        use std::sync::Arc;
 
+        let mock = Arc::new(MockTransport::new());
+        // session_v3 returns the modern envelope `{ "meta": { "code": 200 }, "data": { ... } }`.
+        mock.expect_ok(r#"{"meta":{"code":200},"data":{"userId":"U1","token":"valid_token"}}"#);
+
+        let endpoints = ArloEndpoints::testing("https://test.example");
+        let mut client = ArloClient::with_transport(mock, endpoints);
         client.auth.set_token("valid_token".to_string());
 
-        // Mock session validation success
-        let _m = server
-            .mock("GET", mockito::Matcher::Any)
-            .with_body(
-                "{\"success\": true, \"data\": {\"userId\": \"U1\", \"token\": \"valid_token\"}}",
-            )
-            .create_async()
-            .await;
-
-        // We need to bypass the actual host to hit mockito
-        // This is tricky without a full refactor, but we can test validate_session_v3 directly
-        let res = client.validate_session_v3().await;
-        // This will fail because it hits myapi.arlo.com, but we can verify it at least tries.
-        // In a real unit test environment, we'd mock the host or use a proxy.
-        assert!(res.is_err()); // Expected failure because of hardcoded host
+        let res = client
+            .validate_session_v3()
+            .await
+            .expect("v3 call succeeds");
+        assert_eq!(res.user_id, "U1");
     }
 }
