@@ -12,7 +12,9 @@ use rs_arlo::config::ArloConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), rs_arlo::error::ArloError> {
-    env_logger::init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,rs_arlo=info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
     println!("=== Arlo IMAP Extraction Debugger ===");
 
     let config = match ArloConfig::load_from_file("config.toml") {
