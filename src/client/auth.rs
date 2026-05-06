@@ -19,7 +19,7 @@ use reqwest::Method;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
-use tracing::{info, warn, instrument};
+use tracing::{info, instrument, warn};
 
 /// Internal credentials caching layer.
 ///
@@ -263,9 +263,7 @@ impl ArloClient {
             .mfa
             .as_ref()
             .and_then(|m| m.imap.as_ref())
-            .ok_or_else(|| {
-                ArloError::AuthError("Missing [mfa.imap] configuration block".into())
-            })?
+            .ok_or_else(|| ArloError::AuthError("Missing [mfa.imap] configuration block".into()))?
             .clone();
         let handler = crate::client::mfa::ImapMfaHandler::new(imap);
         self.authenticate_with_handler(config, handler).await
@@ -457,8 +455,8 @@ impl ArloClient {
 
     /// Step 5: Validate the token against the V3 session endpoint using event tracking.
     ///
-    /// This is a mandatory continuation step in the modern authentication flow. 
-    /// It utilizes dynamic JSON parsing as Arlo arbitrarily structures this 
+    /// This is a mandatory continuation step in the modern authentication flow.
+    /// It utilizes dynamic JSON parsing as Arlo arbitrarily structures this
     /// response using either legacy `{ "success": true }` wrappers or modern `{ "meta": { "code": 200 } }` formats.
     pub async fn validate_session_v3(&self) -> Result<SessionV3Response, ArloError> {
         let timestamp = chrono::Utc::now().timestamp_millis();
@@ -469,36 +467,13 @@ impl ArloClient {
         );
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
-
-        let parsed: serde_json::Value = serde_json::from_str(&body_str)?;
-
-        let is_success = if let Some(success) = parsed.get("success").and_then(|s| s.as_bool()) {
-            success
-        } else if let Some(code) = parsed
-            .get("meta")
-            .and_then(|m| m.get("code"))
-            .and_then(|c| c.as_u64())
-        {
-            code == 200
-        } else {
-            false
-        };
-
-        if !is_success {
-            return Err(ArloError::AuthError(
-                "Failed to validate session v3 (Non-Success Response)".to_string(),
-            ));
+        let data = crate::models::envelope::unwrap_envelope(&body_str)?;
+        if data.is_null() {
+            return Err(ArloError::AuthError("No session data returned".into()));
         }
-
-        let data_val = parsed
-            .get("data")
-            .ok_or_else(|| ArloError::AuthError("No session data returned".to_string()))?;
-        let session_data: SessionV3Response =
-            serde_json::from_value(data_val.clone()).map_err(|e| {
-                ArloError::ParseError(format!("Failed to parse validate_session_v3 data: {}", e))
-            })?;
-
-        Ok(session_data)
+        serde_json::from_value(data).map_err(|e| {
+            ArloError::ParseError(format!("Failed to parse validate_session_v3 data: {e}"))
+        })
     }
 
     /// Step 6: Trigger the Legacy V2 device support endpoint using event tracking.
@@ -514,38 +489,13 @@ impl ArloClient {
         );
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
-
-        // Dynamically parse either `{success: true}` or `{meta: {code: 200}}` wrappers
-        let parsed: serde_json::Value = serde_json::from_str(&body_str)?;
-
-        let is_success = if let Some(success) = parsed.get("success").and_then(|s| s.as_bool()) {
-            success
-        } else if let Some(code) = parsed
-            .get("meta")
-            .and_then(|m| m.get("code"))
-            .and_then(|c| c.as_u64())
-        {
-            code == 200
-        } else {
-            false
-        };
-
-        if !is_success {
-            return Err(ArloError::AuthError(
-                "Failed to validate session v2 (Non-Success Response)".to_string(),
-            ));
-        }
-
-        Ok(parsed
-            .get("data")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
+        crate::models::envelope::unwrap_envelope(&body_str)
     }
 
     /// Retrieve Details of a Specific 2FA Factor (Requested by workfile.md)
     pub async fn get_factor_id(&self) -> Result<(), ArloError> {
         let url = format!("{}{}", ARLO_AUTH_HOST, AUTH_GET_FACTOR_ID);
-        let user_id = self.auth.user_id.as_deref().unwrap_or("");
+        let user_id = self.require_user_id()?;
 
         let payload = serde_json::json!({
             "factorType": "BROWSER",
@@ -655,8 +605,9 @@ mod tests {
         manager.save_to_cache().await;
 
         // Load back from disk into a fresh instance
-        let loaded_manager =
-            AuthManager::load_from_cache(&cache_path).await.expect("Failed to load cache from disk");
+        let loaded_manager = AuthManager::load_from_cache(&cache_path)
+            .await
+            .expect("Failed to load cache from disk");
 
         assert_eq!(token_str(&loaded_manager), Some("dummy_token_123"));
         assert_eq!(loaded_manager.user_id.unwrap(), "user_001");
@@ -665,7 +616,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_manager_load_from_missing_file() {
-        let result = AuthManager::load_from_cache("/path/that/definitely/does/not/exist.json").await;
+        let result =
+            AuthManager::load_from_cache("/path/that/definitely/does/not/exist.json").await;
         assert!(result.is_none());
     }
 
@@ -693,15 +645,18 @@ mod tests {
         let mut server = Server::new_async().await;
         let mut client = ArloClient::new().await.unwrap();
         client.reqwest_client = reqwest::Client::new();
-        
+
         client.auth.set_token("valid_token".to_string());
-        
+
         // Mock session validation success
-        let _m = server.mock("GET", mockito::Matcher::Any)
-            .with_body("{\"success\": true, \"data\": {\"userId\": \"U1\", \"token\": \"valid_token\"}}")
+        let _m = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_body(
+                "{\"success\": true, \"data\": {\"userId\": \"U1\", \"token\": \"valid_token\"}}",
+            )
             .create_async()
             .await;
-            
+
         // We need to bypass the actual host to hit mockito
         // This is tricky without a full refactor, but we can test validate_session_v3 directly
         let res = client.validate_session_v3().await;

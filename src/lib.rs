@@ -45,6 +45,11 @@ pub mod headers;
 /// Pure data structures matching HTTP payload architectures.
 pub mod models;
 
-pub use client::mfa::{ImapMfaHandler, MfaChallenge, MfaHandler, StaticOtpHandler, StdinMfaHandler};
+pub use client::local_hub::LocalHubClient;
+pub use client::mfa::{
+    ImapMfaHandler, MfaChallenge, MfaHandler, StaticOtpHandler, StdinMfaHandler,
+};
 pub use client::{ArloClient, ArloClientBuilder};
 pub use error::ArloError;
+pub use events::{ConnectionState, EventBus};
+pub use models::auth::SessionToken;
