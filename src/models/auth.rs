@@ -1,3 +1,4 @@
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,4 +75,89 @@ pub enum AuthResult {
         factor_auth_code: String,
         provider: String,
     },
+}
+
+/// Re-attachment payload for [`crate::ArloClient::reattach`].
+///
+/// Carries the persistent state needed to bypass login on a subsequent
+/// process start: the access token (held in a [`SecretString`] so it is
+/// zeroized on drop), the Arlo-assigned `user_id`, and the per-instance
+/// `device_id` UUID. The `device_id` field matters because Arlo binds the
+/// "Trust this browser" pairing to it — reusing the same UUID across
+/// restarts is what extends a session token's lifetime from ~2 hours to
+/// ~14 days.
+///
+/// Construct via [`SessionToken::new`] from a vault, env var, or any other
+/// out-of-process secret store. To capture the current state from a live
+/// client, use [`crate::ArloClient::session_token`].
+pub struct SessionToken {
+    pub(crate) access_token: SecretString,
+    pub(crate) user_id: String,
+    pub(crate) device_id: String,
+}
+
+impl SessionToken {
+    /// Builds a session token from raw components. The access token is
+    /// wrapped in a [`SecretString`] for zeroize-on-drop semantics.
+    pub fn new(
+        access_token: impl Into<String>,
+        user_id: impl Into<String>,
+        device_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            access_token: SecretString::from(access_token.into()),
+            user_id: user_id.into(),
+            device_id: device_id.into(),
+        }
+    }
+
+    /// Exposes the raw access token. Use sparingly — every call site is
+    /// auditable for accidental logging or HTTP-body leaks.
+    pub fn access_token(&self) -> &str {
+        self.access_token.expose_secret()
+    }
+
+    /// The Arlo-assigned user ID this token is bound to.
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    /// The per-instance device-tracking UUID. Reusing the same UUID across
+    /// restarts is what keeps Arlo's "Trust this browser" pairing alive.
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+}
+
+impl std::fmt::Debug for SessionToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionToken")
+            .field("access_token", &"***")
+            .field("user_id", &self.user_id)
+            .field("device_id", &self.device_id)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_token_round_trips_components() {
+        let t = SessionToken::new("tok", "user-1", "dev-uuid");
+        assert_eq!(t.access_token(), "tok");
+        assert_eq!(t.user_id(), "user-1");
+        assert_eq!(t.device_id(), "dev-uuid");
+    }
+
+    #[test]
+    fn session_token_debug_redacts_access_token() {
+        let t = SessionToken::new("super-secret-token", "u", "d");
+        let dump = format!("{t:?}");
+        assert!(!dump.contains("super-secret-token"));
+        assert!(dump.contains("***"));
+        assert!(dump.contains("u"));
+        assert!(dump.contains("d"));
+    }
 }

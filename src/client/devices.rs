@@ -27,63 +27,20 @@ const STREAM_URL_TIMEOUT: Duration = Duration::from_secs(30);
 impl ArloClient {
     /// Discovers all devices attached to the user's Arlo account.
     ///
-    /// **Implementation Note:** Arlo's backend APIs for device retrieval are known to be
-    /// inconsistent regarding their JSON wrappers across different accounts. This method 
-    /// dynamically unwraps payloads shaped as raw arrays `[ ... ]`, or wrapped objects like
-    /// `{ success: true, data: [ ... ] }` and `{ data: { devices: [ ... ] } }`.
+    /// Tolerates Arlo's three response shapes via
+    /// [`crate::models::envelope::unwrap_envelope_array`]: a bare array,
+    /// `{ success: true, data: [...] }`, or
+    /// `{ success: true, data: { devices: [...] } }`.
     #[instrument(skip(self))]
     pub async fn get_devices(&self) -> Result<Vec<Device>, ArloError> {
         let url = format!("{}{}", ARLO_API_HOST, API_DEVICES);
-
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
-
-        // Dynamically parse the wrapper
-        let parsed: serde_json::Value = serde_json::from_str(&body_str)?;
-
-        let is_success = if let Some(success) = parsed.get("success").and_then(|s| s.as_bool()) {
-            success
-        } else if let Some(code) = parsed
-            .get("meta")
-            .and_then(|m| m.get("code"))
-            .and_then(|c| c.as_u64())
-        {
-            code == 200
-        } else {
-            parsed.is_array()
-        };
-
-        if !is_success {
-            return Err(ArloError::AuthError(format!(
-                "Failed to fetch devices. Payload: {}",
-                body_str
-            )));
-        }
-
-        let data_array = if parsed.is_array() {
-            Some(&parsed)
-        } else if let Some(data) = parsed.get("data") {
-            if data.is_array() {
-                Some(data)
-            } else if data.is_object() {
-                data.get("devices").filter(|d| d.is_array())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some(array) = data_array {
-            let devices: Vec<Device> = serde_json::from_value(array.clone()).map_err(|e| {
-                ArloError::ParseError(format!(
-                    "Failed to parse devices array: {}. Body: {}",
-                    e, body_str
-                ))
-            })?;
-            Ok(devices)
-        } else {
-            Ok(vec![])
-        }
+        let arr = crate::models::envelope::unwrap_envelope_array(&body_str, "devices")?;
+        serde_json::from_value(arr).map_err(|e| {
+            ArloError::ParseError(format!(
+                "Failed to parse devices array: {e}. Body: {body_str}"
+            ))
+        })
     }
 
     /// Triggers a live video stream on the specified camera and returns
@@ -214,7 +171,7 @@ impl ArloClient {
         mode: &str,
         model_id: Option<&str>,
     ) -> Result<(), ArloError> {
-        let user_id = self.auth.user_id.as_deref().unwrap_or("unknown_user");
+        let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
         let is_v2 = model_id.is_some_and(|m| m.starts_with("VMB"));
@@ -270,69 +227,17 @@ impl ArloClient {
     pub async fn get_locations(
         &self,
     ) -> Result<Vec<crate::models::automation::Location>, ArloError> {
-        let user_id = self
-            .auth
-            .user_id
-            .as_deref()
-            .ok_or_else(|| ArloError::AuthError("User ID not found in session".to_string()))?;
-
-        // Dynamically replace the {user_id} token
+        let user_id = self.require_user_id()?;
         let endpoint_path = API_LOCATIONS.replace("{user_id}", user_id);
         let url = format!("{}{}", ARLO_API_HOST, endpoint_path);
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
-
-        // Dynamically parse the wrapper
-        let parsed: serde_json::Value = serde_json::from_str(&body_str)?;
-
-        let is_success = if let Some(success) = parsed.get("success").and_then(|s| s.as_bool()) {
-            success
-        } else if let Some(code) = parsed
-            .get("meta")
-            .and_then(|m| m.get("code"))
-            .and_then(|c| c.as_u64())
-        {
-            code == 200
-        } else {
-            // Some endpoints don't have wrappers and just return the array
-            parsed.is_array()
-        };
-
-        if !is_success {
-            return Err(ArloError::ApiError {
-                code: 500,
-                message: format!("Failed to fetch user locations. Payload: {}", body_str),
-            });
-        }
-
-        // Extract the location data depending on where it lives
-        let data_array = if parsed.is_array() {
-            Some(&parsed)
-        } else if let Some(data) = parsed.get("data") {
-            if data.is_array() {
-                Some(data)
-            } else if data.is_object() {
-                // Sometimes Arlo responds with { data: { locations: [...] } }
-                data.get("locations").filter(|l| l.is_array())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some(array) = data_array {
-            let locations: Vec<crate::models::automation::Location> =
-                serde_json::from_value(array.clone()).map_err(|e| {
-                    ArloError::ParseError(format!(
-                        "Failed to parse locations array: {}. Body: {}",
-                        e, body_str
-                    ))
-                })?;
-            Ok(locations)
-        } else {
-            Ok(vec![]) // Empty if no locations array was found.
-        }
+        let arr = crate::models::envelope::unwrap_envelope_array(&body_str, "locations")?;
+        serde_json::from_value(arr).map_err(|e| {
+            ArloError::ParseError(format!(
+                "Failed to parse locations array: {e}. Body: {body_str}"
+            ))
+        })
     }
 
     /// Fetches all available modes under the v3 Automation framework for a specific location
@@ -409,7 +314,7 @@ impl ArloClient {
     ) -> Result<(), ArloError> {
         let url = format!("{}{}{}", ARLO_API_HOST, API_NOTIFY, device_id);
 
-        let user_id = self.auth.user_id.as_deref().unwrap_or("unknown_user");
+        let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
         let payload = json!({
@@ -431,7 +336,7 @@ impl ArloClient {
     /// Triggers a thumbnail snapshot from the specified camera
     pub async fn take_snapshot(&self, camera_id: &str) -> Result<(), ArloError> {
         let url = format!("{}{}", ARLO_API_HOST, API_TAKE_SNAPSHOT);
-        let user_id = self.auth.user_id.as_deref().unwrap_or("unknown_user");
+        let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
         let payload = json!({
@@ -454,7 +359,7 @@ impl ArloClient {
     /// Triggers a high-resolution, full-frame snapshot from the specified camera
     pub async fn full_frame_snapshot(&self, camera_id: &str) -> Result<(), ArloError> {
         let url = format!("{}{}", ARLO_API_HOST, API_FULL_SNAPSHOT);
-        let user_id = self.auth.user_id.as_deref().unwrap_or("unknown_user");
+        let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
         let payload = json!({
@@ -477,7 +382,7 @@ impl ArloClient {
     /// Starts manual video recording on the specified camera
     pub async fn start_record(&self, camera_id: &str) -> Result<(), ArloError> {
         let url = format!("{}{}", ARLO_API_HOST, API_START_RECORD);
-        let user_id = self.auth.user_id.as_deref().unwrap_or("unknown_user");
+        let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
         let payload = json!({
@@ -500,7 +405,7 @@ impl ArloClient {
     /// Stops manual video recording on the specified camera
     pub async fn stop_record(&self, camera_id: &str) -> Result<(), ArloError> {
         let url = format!("{}{}", ARLO_API_HOST, API_STOP_RECORD);
-        let user_id = self.auth.user_id.as_deref().unwrap_or("unknown_user");
+        let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
         let payload = json!({
@@ -523,7 +428,7 @@ impl ArloClient {
     /// Reboots the specified device remotely
     pub async fn restart_device(&self, device_id: &str) -> Result<(), ArloError> {
         let url = format!("{}{}", ARLO_API_HOST, API_RESTART);
-        let user_id = self.auth.user_id.as_deref().unwrap_or("unknown_user");
+        let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
         let payload = json!({
@@ -834,7 +739,7 @@ impl ArloClient {
     }
 
     /// Sets the camera brightness via the Arlo `set` notify endpoint.
-    /// 
+    ///
     /// `brightness` value typically expects a range between `-2` and `2` depending on the
     /// camera model.
     pub async fn set_camera_brightness(
@@ -894,7 +799,7 @@ impl ArloClient {
     ) -> Result<(), ArloError> {
         let url = format!("{}{}{}", ARLO_API_HOST, API_NOTIFY, device_id);
 
-        let user_id = self.auth.user_id.as_deref().unwrap_or("unknown_user");
+        let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
         let payload = json!({
@@ -984,13 +889,19 @@ mod tests {
     #[test]
     fn stream_url_extracted_from_url_key() {
         let ev = make_event(Some("t"), json!({ "url": "rtsps://camera/stream" }));
-        assert_eq!(extract_stream_url(&ev).as_deref(), Some("rtsps://camera/stream"));
+        assert_eq!(
+            extract_stream_url(&ev).as_deref(),
+            Some("rtsps://camera/stream")
+        );
     }
 
     #[test]
     fn stream_url_extracted_from_stream_url_key() {
         let ev = make_event(Some("t"), json!({ "streamUrl": "https://hls/idx.m3u8" }));
-        assert_eq!(extract_stream_url(&ev).as_deref(), Some("https://hls/idx.m3u8"));
+        assert_eq!(
+            extract_stream_url(&ev).as_deref(),
+            Some("https://hls/idx.m3u8")
+        );
     }
 
     #[test]
@@ -1005,7 +916,7 @@ mod tests {
         let mut client = ArloClient::new().await.unwrap();
         // Overwrite reqwest client to point to mockito
         client.reqwest_client = reqwest::Client::new();
-        
+
         // Mock Raw array response
         let _m1 = server.mock("GET", "/hmsweb/users/devices")
             .with_body("[{\"deviceId\": \"C1\", \"parentId\": \"B1\", \"deviceType\": \"camera\", \"deviceName\": \"Cam1\", \"uniqueId\": \"U1\", \"state\": \"provisioned\"}]")
@@ -1013,7 +924,10 @@ mod tests {
             .await;
 
         let url = format!("{}/hmsweb/users/devices", server.url());
-        let body_str = client.execute_request::<()>(Method::GET, &url, None).await.unwrap();
+        let body_str = client
+            .execute_request::<()>(Method::GET, &url, None)
+            .await
+            .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body_str).unwrap();
         assert!(parsed.is_array());
     }
