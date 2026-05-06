@@ -8,7 +8,7 @@ use rs_arlo::ArloClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
+    init_tracing();
     println!("=== Scenario 2: Stream & Actuation ===");
 
     let config_path = "config.toml";
@@ -57,4 +57,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.logout().await?;
     println!("Done.");
     Ok(())
+}
+
+/// Initialise a `tracing` subscriber honoring `RUST_LOG`. See
+/// `examples/simple.rs` for the same helper.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,rs_arlo=info"));
+    fmt().with_env_filter(filter).init();
 }

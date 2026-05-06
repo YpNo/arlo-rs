@@ -36,8 +36,11 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Run cargo clippy
-        # We allow dead code during development but deny other warnings
-        run: cargo clippy --all-targets --all-features -- -D warnings -A dead_code
+        # `-D warnings` treats every clippy lint as an error. The previous
+        # blanket `-A dead_code` allowance was dropped in PR 5 — any
+        # genuinely-needed dead code now requires a localised
+        # `#[allow(dead_code)]` with a one-line rationale.
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
     name: Run Tests
@@ -65,6 +68,22 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v2.0.17
         with:
           command: check
+
+  audit:
+    name: cargo audit (RUSTSEC advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Run cargo audit
+        # Blocks the merge on any RUSTSEC advisory affecting our
+        # dependency tree. Run weekly via the scheduled trigger above.
+        run: cargo audit --deny warnings
 
   sonarqube:
     name: SonarQube
@@ -114,8 +133,13 @@ jobs:
           curl -s https://api.github.com/repos/xd009642/tarpaulin/releases/latest | grep browser_download_url | grep x86_64-unknown-linux-musl | cut -d '"' -f 4 | xargs curl -L | tar xz -C /usr/local/bin
 
       - name: Run cargo-tarpaulin
-        run: cargo +nightly tarpaulin --all-features --workspace --timeout 120 --out xml
-        
+        # Stable toolchain is sufficient for current tarpaulin releases —
+        # the previous `cargo +nightly` invocation never installed nightly
+        # in this job and only worked by accident. The 80% line-coverage
+        # gate matches the project standard documented in
+        # `.claude/rules/testing.md`.
+        run: cargo tarpaulin --all-features --workspace --timeout 120 --out xml --fail-under 80
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
         with:
