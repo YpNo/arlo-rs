@@ -8,7 +8,7 @@
 use crate::client::ArloClient;
 use crate::endpoints::*;
 use crate::error::ArloError;
-use crate::headers::ARLO_API_HOST;
+// Endpoints come from self.endpoints (PR 4 transport refactor).
 use crate::models::api::{AmbientSensorData, AmbientSensorHistoryResponse, Device, StreamUrl};
 use base64::{Engine as _, engine::general_purpose};
 use flate2::read::ZlibDecoder;
@@ -33,7 +33,7 @@ impl ArloClient {
     /// `{ success: true, data: { devices: [...] } }`.
     #[instrument(skip(self))]
     pub async fn get_devices(&self) -> Result<Vec<Device>, ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_DEVICES);
+        let url = format!("{}{}", self.endpoints.api_host, API_DEVICES);
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
         let arr = crate::models::envelope::unwrap_envelope_array(&body_str, "devices")?;
         serde_json::from_value(arr).map_err(|e| {
@@ -68,7 +68,7 @@ impl ArloClient {
         let bus = self.events().await?;
         let mut rx = bus.subscribe();
 
-        let url = format!("{}{}", ARLO_API_HOST, API_START_STREAM);
+        let url = format!("{}{}", self.endpoints.api_host, API_START_STREAM);
         let payload = json!({
             "to": camera_id,
             "from": format!("{}_web", user_id),
@@ -178,7 +178,7 @@ impl ArloClient {
 
         if is_v2 {
             // V2 activeAutomations array format
-            let url = format!("{}{}", ARLO_API_HOST, API_SET_MODE);
+            let url = format!("{}{}", self.endpoints.api_host, API_SET_MODE);
             let timestamp = chrono::Utc::now().timestamp_millis() as u64;
 
             let payload = json!({
@@ -197,7 +197,7 @@ impl ArloClient {
         } else {
             // Default to V3 format (via put/notify to activeMode or modes)
             // Note: In V3, modes are usually tied to 'locations', but this is the simplest direct translation of the original.
-            let url = format!("{}{}", ARLO_API_HOST, API_SET_MODE);
+            let url = format!("{}{}", self.endpoints.api_host, API_SET_MODE);
 
             let payload = json!({
                 "active": mode,
@@ -229,7 +229,7 @@ impl ArloClient {
     ) -> Result<Vec<crate::models::automation::Location>, ArloError> {
         let user_id = self.require_user_id()?;
         let endpoint_path = API_LOCATIONS.replace("{user_id}", user_id);
-        let url = format!("{}{}", ARLO_API_HOST, endpoint_path);
+        let url = format!("{}{}", self.endpoints.api_host, endpoint_path);
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
         let arr = crate::models::envelope::unwrap_envelope_array(&body_str, "locations")?;
@@ -248,7 +248,7 @@ impl ArloClient {
     ) -> Result<Vec<crate::models::automation::AutomationMode>, ArloError> {
         let url = format!(
             "{}{}{}?locationId={}",
-            ARLO_API_HOST, API_AUTOMATION_MODES, "", location_id
+            self.endpoints.api_host, API_AUTOMATION_MODES, "", location_id
         );
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
@@ -268,7 +268,7 @@ impl ArloClient {
     /// Retrieves legacy v2 automation definitions
     #[instrument(skip(self))]
     pub async fn get_automation_definitions(&self) -> Result<serde_json::Value, ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_AUTOMATION_DEFINITIONS);
+        let url = format!("{}{}", self.endpoints.api_host, API_AUTOMATION_DEFINITIONS);
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
 
@@ -287,7 +287,7 @@ impl ArloClient {
 
     /// Retrieves emergency service locations
     pub async fn get_emergency_locations(&self) -> Result<serde_json::Value, ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_EMERGENCY_LOCATIONS);
+        let url = format!("{}{}", self.endpoints.api_host, API_EMERGENCY_LOCATIONS);
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
 
@@ -312,7 +312,7 @@ impl ArloClient {
         action: &str,
         properties: Option<serde_json::Value>,
     ) -> Result<(), ArloError> {
-        let url = format!("{}{}{}", ARLO_API_HOST, API_NOTIFY, device_id);
+        let url = format!("{}{}{}", self.endpoints.api_host, API_NOTIFY, device_id);
 
         let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
@@ -335,7 +335,7 @@ impl ArloClient {
 
     /// Triggers a thumbnail snapshot from the specified camera
     pub async fn take_snapshot(&self, camera_id: &str) -> Result<(), ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_TAKE_SNAPSHOT);
+        let url = format!("{}{}", self.endpoints.api_host, API_TAKE_SNAPSHOT);
         let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
@@ -358,7 +358,7 @@ impl ArloClient {
 
     /// Triggers a high-resolution, full-frame snapshot from the specified camera
     pub async fn full_frame_snapshot(&self, camera_id: &str) -> Result<(), ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_FULL_SNAPSHOT);
+        let url = format!("{}{}", self.endpoints.api_host, API_FULL_SNAPSHOT);
         let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
@@ -381,7 +381,7 @@ impl ArloClient {
 
     /// Starts manual video recording on the specified camera
     pub async fn start_record(&self, camera_id: &str) -> Result<(), ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_START_RECORD);
+        let url = format!("{}{}", self.endpoints.api_host, API_START_RECORD);
         let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
@@ -404,7 +404,7 @@ impl ArloClient {
 
     /// Stops manual video recording on the specified camera
     pub async fn stop_record(&self, camera_id: &str) -> Result<(), ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_STOP_RECORD);
+        let url = format!("{}{}", self.endpoints.api_host, API_STOP_RECORD);
         let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
@@ -427,7 +427,7 @@ impl ArloClient {
 
     /// Reboots the specified device remotely
     pub async fn restart_device(&self, device_id: &str) -> Result<(), ArloError> {
-        let url = format!("{}{}", ARLO_API_HOST, API_RESTART);
+        let url = format!("{}{}", self.endpoints.api_host, API_RESTART);
         let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
@@ -598,7 +598,7 @@ impl ArloClient {
     ) -> Result<Option<AmbientSensorData>, ArloError> {
         let url = format!(
             "{}/hmsweb/users/devices/cameras/{}/ambientSensors/history",
-            ARLO_API_HOST, camera_id
+            self.endpoints.api_host, camera_id
         );
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
@@ -797,7 +797,7 @@ impl ArloClient {
         action: &str,
         properties: Option<serde_json::Value>,
     ) -> Result<(), ArloError> {
-        let url = format!("{}{}{}", ARLO_API_HOST, API_NOTIFY, device_id);
+        let url = format!("{}{}{}", self.endpoints.api_host, API_NOTIFY, device_id);
 
         let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
@@ -853,7 +853,6 @@ fn extract_stream_url(event: &crate::models::events::ArloEvent) -> Option<String
 mod tests {
     use super::*;
     use crate::models::events::ArloEvent;
-    use mockito::Server;
     use serde_json::Value;
 
     fn make_event(trans_id: Option<&str>, properties: Value) -> ArloEvent {
@@ -911,25 +910,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_devices_dynamic_parsing() {
-        let mut server = Server::new_async().await;
-        let mut client = ArloClient::new().await.unwrap();
-        // Overwrite reqwest client to point to mockito
-        client.reqwest_client = reqwest::Client::new();
+    async fn get_devices_returns_parsed_array_through_mocked_transport() {
+        // Replaces the previous "test_get_devices_dynamic_parsing" smoke test
+        // that swapped reqwest::Client directly. PR 4 lets us drive the full
+        // get_devices() path against a mocked transport — including the
+        // envelope unwrapper.
+        use crate::ArloEndpoints;
+        use crate::client::transport::test_support::MockTransport;
+        use std::sync::Arc;
 
-        // Mock Raw array response
-        let _m1 = server.mock("GET", "/hmsweb/users/devices")
-            .with_body("[{\"deviceId\": \"C1\", \"parentId\": \"B1\", \"deviceType\": \"camera\", \"deviceName\": \"Cam1\", \"uniqueId\": \"U1\", \"state\": \"provisioned\"}]")
-            .create_async()
-            .await;
+        let mock = Arc::new(MockTransport::new());
+        mock.expect_ok(
+            r#"[{"deviceId":"C1","parentId":"B1","deviceType":"camera","deviceName":"Cam1","uniqueId":"U1","state":"provisioned"}]"#,
+        );
 
-        let url = format!("{}/hmsweb/users/devices", server.url());
-        let body_str = client
-            .execute_request::<()>(Method::GET, &url, None)
-            .await
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&body_str).unwrap();
-        assert!(parsed.is_array());
+        let mut client = ArloClient::with_transport(
+            Arc::clone(&mock) as _,
+            ArloEndpoints::testing("https://test.example"),
+        );
+        client.auth.set_token("dummy".to_string());
+
+        let devices = client.get_devices().await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_id, "C1");
     }
 
     #[tokio::test]

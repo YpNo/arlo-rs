@@ -19,7 +19,6 @@
 
 use crate::endpoints::*;
 use crate::error::ArloError;
-use crate::headers::ARLO_API_HOST;
 use crate::models::events::ArloEvent;
 use reqwest::Client;
 use std::time::Duration;
@@ -68,6 +67,7 @@ impl EventBus {
     #[instrument(skip(client, access_token, device_id))]
     pub(crate) async fn start(
         client: Client,
+        api_host: String,
         access_token: String,
         device_id: String,
     ) -> Result<Self, ArloError> {
@@ -76,12 +76,13 @@ impl EventBus {
 
         let sse_handle = spawn_sse_listener(
             client.clone(),
+            api_host.clone(),
             access_token.clone(),
             device_id.clone(),
             sender.clone(),
             state_tx,
         );
-        let ping_handle = spawn_keep_alive(client, access_token, device_id);
+        let ping_handle = spawn_keep_alive(client, api_host, access_token, device_id);
 
         Ok(Self {
             sender,
@@ -116,6 +117,7 @@ impl Drop for EventBus {
 
 fn spawn_sse_listener(
     client: Client,
+    api_host: String,
     token: String,
     device_id: String,
     sender: broadcast::Sender<ArloEvent>,
@@ -125,7 +127,7 @@ fn spawn_sse_listener(
         async move {
             let url = format!(
                 "{}{}?token={}",
-                ARLO_API_HOST,
+                api_host,
                 API_SUBSCRIBE,
                 urlencoding::encode(&token)
             );
@@ -167,10 +169,15 @@ fn spawn_sse_listener(
     )
 }
 
-fn spawn_keep_alive(client: Client, token: String, device_id: String) -> JoinHandle<()> {
+fn spawn_keep_alive(
+    client: Client,
+    api_host: String,
+    token: String,
+    device_id: String,
+) -> JoinHandle<()> {
     tokio::spawn(
         async move {
-            let url = format!("{}{}", ARLO_API_HOST, AUTH_SESSION_V3);
+            let url = format!("{}{}", api_host, AUTH_SESSION_V3);
             loop {
                 tokio::time::sleep(KEEP_ALIVE_INTERVAL).await;
                 debug!(%url, "Sending keep-alive ping");

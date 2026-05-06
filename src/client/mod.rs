@@ -8,6 +8,8 @@ pub mod auth_imap;
 pub mod builder;
 /// Camera streaming, topology tracking, mode adjustments, and actuations.
 pub mod devices;
+/// Runtime-configurable Arlo host endpoints (auth + api hosts).
+pub mod endpoints;
 /// S3 Video chunk parsing and media decryption logic.
 pub mod library;
 /// Direct LAN client for an Arlo SmartHub with pinned-leaf TLS.
@@ -16,6 +18,8 @@ pub mod local_hub;
 pub mod mfa;
 /// Raw token spoofing for connecting natively to local hubs bypassing Cloudflare.
 pub mod ratls;
+/// HTTP transport abstraction (production CloudScraper impl + test doubles).
+pub mod transport;
 
 use crate::config::{ArloConfig, ClientConfig};
 use crate::error::ArloError;
@@ -23,24 +27,28 @@ use crate::events::EventBus;
 use crate::models::auth::SessionToken;
 pub use auth::AuthManager;
 pub use builder::ArloClientBuilder;
-use reqwest::Client;
-use rs_cloudscraper::CloudScraper;
+pub use endpoints::ArloEndpoints;
+use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tracing::{info, instrument};
+pub use transport::HttpTransport;
 
 /// Core REST API manager for the Arlo ecosystem.
 ///
-/// `ArloClient` wraps a `reqwest::Client` that is configured to proxy its connection
-/// identically through a headless `rs-cloudscraper` browser. This ensures that the user's
-/// TLS footprint and fingerprint remain identical to a human operator, bypassing Cloudflare.
+/// `ArloClient` orchestrates auth-header injection, CORS preflight, and
+/// JSON envelope handling, then delegates the actual HTTP byte-shuffling
+/// to a pluggable [`HttpTransport`]. Production transports route through
+/// the `rs-cloudscraper` headless-browser proxy to forge a JA4 TLS
+/// fingerprint indistinguishable from a real Chrome session; tests
+/// substitute lightweight mocks.
 pub struct ArloClient {
-    /// The tunneled HTTP client used to execute requests.
-    pub(crate) reqwest_client: Client,
-    /// Held purely so the headless-browser MITM proxy stays alive — dropping
-    /// it would tear down the proxy that `reqwest_client` is routed through.
-    /// Never read after construction; `#[allow(dead_code)]` is intentional.
-    #[allow(dead_code)]
-    pub(crate) cloud_scraper: CloudScraper,
+    /// The HTTP transport. Production wires this to a
+    /// [`crate::client::transport::CloudScraperTransport`]; tests use a
+    /// `MockTransport` to dispatch requests without booting the proxy.
+    pub(crate) transport: Arc<dyn HttpTransport>,
+    /// Base hosts the client points at. Defaults to production URLs;
+    /// the builder's [`ArloClientBuilder::endpoints`] overrides them.
+    pub(crate) endpoints: ArloEndpoints,
     /// Secure state storage for tokens and user IDs. Access externally via
     /// [`ArloClient::is_authenticated`] / [`ArloClient::user_id`] /
     /// [`ArloClient::device_id`].
@@ -73,6 +81,24 @@ impl ArloClient {
     #[instrument(skip(config))]
     pub async fn with_config(config: &ClientConfig) -> Result<Self, ArloError> {
         builder::bootstrap(builder::BootstrapConfig::from(config)).await
+    }
+
+    /// Constructs a client backed by a caller-supplied transport, skipping
+    /// the heavyweight `rs-cloudscraper` bootstrap entirely.
+    ///
+    /// This is the entry point for unit tests that want to drive the
+    /// orchestration layer (auth-header injection, OPTIONS preflight,
+    /// JSON envelope handling) against a mock HTTP backend. It is also
+    /// useful for callers whose environment already provides a
+    /// stealth-routed `reqwest::Client` and doesn't need a second proxy.
+    pub fn with_transport(transport: Arc<dyn HttpTransport>, endpoints: ArloEndpoints) -> Self {
+        Self {
+            transport,
+            endpoints,
+            auth: AuthManager::new(),
+            debug_mode: false,
+            event_bus: OnceCell::new(),
+        }
     }
 
     /// Enables full HTTP intercept payload logging.
@@ -125,8 +151,15 @@ impl ArloClient {
                         "Cannot start SSE event bus without an active session".into(),
                     )
                 })?;
+                let streaming = self.transport.streaming_client().ok_or_else(|| {
+                    ArloError::AuthError(
+                        "The active transport does not support streaming (SSE event bus unavailable)"
+                            .into(),
+                    )
+                })?;
                 EventBus::start(
-                    self.reqwest_client.clone(),
+                    streaming,
+                    self.endpoints.api_host.clone(),
                     token.to_string(),
                     self.auth.device_id.clone(),
                 )
