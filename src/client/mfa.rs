@@ -117,9 +117,7 @@ impl MfaHandler for ImapMfaHandler {
 
     async fn provide_otp(&mut self, _challenge: &MfaChallenge) -> Result<String, ArloError> {
         let baseline = self.baseline.take().ok_or_else(|| {
-            ArloError::AuthError(
-                "ImapMfaHandler::provide_otp called before prepare()".into(),
-            )
+            ArloError::AuthError("ImapMfaHandler::provide_otp called before prepare()".into())
         })?;
         auth_imap::fetch_otp(&self.config, baseline).await
     }

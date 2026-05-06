@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Represents a physical Arlo device (Camera, Base Station, Doorbell, Chime).
-/// The fields present in the API response vary drastically depending on the physical 
+/// The fields present in the API response vary drastically depending on the physical
 /// `device_type` (e.g. cameras have MAC addresses, but chimes may not).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,21 +18,21 @@ pub struct Device {
     pub unique_id: String,
     /// Current provision state (e.g., `"provisioned"`).
     pub state: String,
-    
+
     /// Hardware MAC Address. Omitted by Arlo on certain bridge devices or chimes.
     pub mac_address: Option<String>,
-    
+
     /// Firmware revision string. Parsed from either `firmwareVersion` or `firm_version`.
     /// May be omitted if the device is offline or for non-camera types.
     #[serde(alias = "firmwareVersion")]
     pub firm_version: Option<String>,
-    
+
     /// Hardware revision identifier string.
     pub hw_version: Option<String>,
-    
+
     /// Manufacturer model identifier (e.g. `"VMC4041PA"` for Arlo Pro 4).
     pub model_id: Option<String>,
-    
+
     /// An ephemeral AWS S3 pre-signed URL to the latest captured thumbnail.
     pub presigned_last_image_url: Option<String>,
 }

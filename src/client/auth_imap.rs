@@ -79,9 +79,8 @@ fn resolve_host_and_port(config: &ImapConfig) -> Result<(String, u16), ArloError
         };
     }
 
-    let host = host.ok_or_else(|| {
-        ArloError::AuthError("IMAP host or supported provider missing".into())
-    })?;
+    let host =
+        host.ok_or_else(|| ArloError::AuthError("IMAP host or supported provider missing".into()))?;
 
     Ok((host, port))
 }

@@ -18,9 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_path = "config.toml";
     if !std::path::Path::new(config_path).exists() {
-        eprintln!(
-            "Error: config.toml not found. Copy config.toml.example to config.toml first."
-        );
+        eprintln!("Error: config.toml not found. Copy config.toml.example to config.toml first.");
         return Ok(());
     }
     let config = ArloConfig::load_from_file(config_path)?;
