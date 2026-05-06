@@ -23,7 +23,7 @@ use crate::headers::ARLO_API_HOST;
 use crate::models::events::ArloEvent;
 use reqwest::Client;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 
@@ -35,9 +35,28 @@ const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(600);
 /// Backoff between SSE reconnect attempts.
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 
+/// Lifecycle of the SSE listener as observed by callers.
+///
+/// Modelled exhaustively so consumers can `match` on it without a wildcard
+/// arm — adding a new variant is a deliberate breaking change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// Initial state after [`EventBus::start`] returns and during every
+    /// reconnect attempt.
+    Connecting,
+    /// The HTTP request to `/subscribe` returned 2xx and we are reading
+    /// the chunked SSE body.
+    Connected,
+    /// The chunk loop ended (server hung up, network blip, …) or the
+    /// initial connection errored. The listener will sleep
+    /// [`RECONNECT_BACKOFF`] and transition back to `Connecting`.
+    Disconnected,
+}
+
 /// SSE telemetry bus. See module docs.
 pub struct EventBus {
     sender: broadcast::Sender<ArloEvent>,
+    state_rx: watch::Receiver<ConnectionState>,
     sse_handle: JoinHandle<()>,
     ping_handle: JoinHandle<()>,
 }
@@ -53,17 +72,20 @@ impl EventBus {
         device_id: String,
     ) -> Result<Self, ArloError> {
         let (sender, _initial_rx) = broadcast::channel(BROADCAST_CAPACITY);
+        let (state_tx, state_rx) = watch::channel(ConnectionState::Connecting);
 
         let sse_handle = spawn_sse_listener(
             client.clone(),
             access_token.clone(),
             device_id.clone(),
             sender.clone(),
+            state_tx,
         );
         let ping_handle = spawn_keep_alive(client, access_token, device_id);
 
         Ok(Self {
             sender,
+            state_rx,
             sse_handle,
             ping_handle,
         })
@@ -74,6 +96,14 @@ impl EventBus {
     /// one published *after* the call.
     pub fn subscribe(&self) -> broadcast::Receiver<ArloEvent> {
         self.sender.subscribe()
+    }
+
+    /// Returns a clone of the connection-state watch receiver. Callers can
+    /// `await receiver.changed()` to wake on every transition or read
+    /// `*receiver.borrow()` for the current value. Streamer applications
+    /// use this to pause publishing while the bus is `Disconnected`.
+    pub fn connection_state(&self) -> watch::Receiver<ConnectionState> {
+        self.state_rx.clone()
     }
 }
 
@@ -89,6 +119,7 @@ fn spawn_sse_listener(
     token: String,
     device_id: String,
     sender: broadcast::Sender<ArloEvent>,
+    state_tx: watch::Sender<ConnectionState>,
 ) -> JoinHandle<()> {
     tokio::spawn(
         async move {
@@ -101,6 +132,7 @@ fn spawn_sse_listener(
             info!(%url, "Connecting to SSE stream");
 
             loop {
+                let _ = state_tx.send(ConnectionState::Connecting);
                 match client
                     .get(&url)
                     .header("Accept", "text/event-stream")
@@ -112,6 +144,7 @@ fn spawn_sse_listener(
                 {
                     Ok(mut response) => {
                         info!(status = %response.status(), "SSE connected");
+                        let _ = state_tx.send(ConnectionState::Connected);
                         let mut framer = SseFramer::default();
                         while let Ok(Some(chunk)) = response.chunk().await {
                             let text = String::from_utf8_lossy(&chunk);
@@ -126,6 +159,7 @@ fn spawn_sse_listener(
                     }
                 }
 
+                let _ = state_tx.send(ConnectionState::Disconnected);
                 tokio::time::sleep(RECONNECT_BACKOFF).await;
             }
         }
@@ -314,5 +348,24 @@ mod tests {
         let mut f = SseFramer::default();
         let out = f.push(": comment\n\nevent: ping\n\n");
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn connection_state_watch_observes_full_lifecycle() {
+        // Mirror what the SSE listener publishes, without touching the network.
+        let (tx, mut rx) = watch::channel(ConnectionState::Connecting);
+        assert_eq!(*rx.borrow(), ConnectionState::Connecting);
+
+        tx.send(ConnectionState::Connected).unwrap();
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), ConnectionState::Connected);
+
+        tx.send(ConnectionState::Disconnected).unwrap();
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), ConnectionState::Disconnected);
+
+        tx.send(ConnectionState::Connecting).unwrap();
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), ConnectionState::Connecting);
     }
 }

@@ -66,14 +66,13 @@ async fn main() -> Result<(), rs_arlo::error::ArloError> {
         SearchKey::Unseen,
         SearchKey::From("arlo.com".into()),
     ]));
-    let seqs = selected.search(query).await.map_err(|e| {
-        rs_arlo::error::ArloError::AuthError(format!("IMAP SEARCH failed: {e}"))
-    })?;
+    let seqs = selected
+        .search(query)
+        .await
+        .map_err(|e| rs_arlo::error::ArloError::AuthError(format!("IMAP SEARCH failed: {e}")))?;
 
     if seqs.is_empty() {
-        println!(
-            "No UNSEEN Arlo emails found. Mark an Arlo email as Unread and re-run."
-        );
+        println!("No UNSEEN Arlo emails found. Mark an Arlo email as Unread and re-run.");
         let _ = selected.logout().await;
         return Ok(());
     }
@@ -87,18 +86,15 @@ async fn main() -> Result<(), rs_arlo::error::ArloError> {
     let fetched = selected
         .fetch(&latest.to_string(), "RFC822")
         .await
-        .map_err(|e| {
-            rs_arlo::error::ArloError::AuthError(format!("IMAP FETCH failed: {e}"))
-        })?;
+        .map_err(|e| rs_arlo::error::ArloError::AuthError(format!("IMAP FETCH failed: {e}")))?;
 
     let body_bytes = fetched
         .into_iter()
         .find_map(|f| f.body)
         .ok_or_else(|| rs_arlo::error::ArloError::AuthError("Empty IMAP body".into()))?;
 
-    let parsed = mailparse::parse_mail(&body_bytes).map_err(|e| {
-        rs_arlo::error::ArloError::AuthError(format!("MIME parsing failed: {e}"))
-    })?;
+    let parsed = mailparse::parse_mail(&body_bytes)
+        .map_err(|e| rs_arlo::error::ArloError::AuthError(format!("MIME parsing failed: {e}")))?;
     let raw_text = extract_text(&parsed);
 
     println!("\n=== RAW EXTRACTED TEXT ===\n{raw_text}\n==========================\n");

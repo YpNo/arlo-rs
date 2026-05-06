@@ -13,7 +13,7 @@ use base64::prelude::BASE64_STANDARD;
 use reqwest::{Method, RequestBuilder};
 use serde::Serialize;
 use serde_json::Value;
-use tracing::{debug, warn, instrument};
+use tracing::{debug, instrument, warn};
 
 /// JSON keys whose values must never reach the debug log when `debug_mode`
 /// is enabled. Matched case-insensitively.
@@ -236,16 +236,34 @@ mod tests {
         client.auth.set_token("dummy_token".to_string());
         client.auth.device_id = "test_device".to_string();
 
-        let req_builder = client.reqwest_client.request(Method::GET, "https://example.com");
-        
+        let req_builder = client
+            .reqwest_client
+            .request(Method::GET, "https://example.com");
+
         // Test ocapi-app encoding (Base64)
         let auth_url = format!("{}/api/test", ARLO_AUTH_HOST);
         let builder = client.inject_headers(req_builder, &auth_url);
         let request = builder.build().unwrap();
-        
-        let auth_header = request.headers().get("Authorization").unwrap().to_str().unwrap();
-        assert_eq!(auth_header, BASE64_STANDARD.encode("dummy_token".as_bytes()));
-        assert_eq!(request.headers().get("x-user-device-id").unwrap().to_str().unwrap(), "test_device");
+
+        let auth_header = request
+            .headers()
+            .get("Authorization")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            auth_header,
+            BASE64_STANDARD.encode("dummy_token".as_bytes())
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("x-user-device-id")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "test_device"
+        );
     }
 
     #[tokio::test]
@@ -253,14 +271,21 @@ mod tests {
         let mut client = ArloClient::new().await.unwrap();
         client.auth.set_token("dummy_token".to_string());
 
-        let req_builder = client.reqwest_client.request(Method::GET, "https://example.com");
-        
+        let req_builder = client
+            .reqwest_client
+            .request(Method::GET, "https://example.com");
+
         // Test myapi-app raw token
         let api_url = format!("{}/hmsweb/test", ARLO_API_HOST);
         let builder = client.inject_headers(req_builder, &api_url);
         let request = builder.build().unwrap();
-        
-        let auth_header = request.headers().get("Authorization").unwrap().to_str().unwrap();
+
+        let auth_header = request
+            .headers()
+            .get("Authorization")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(auth_header, "dummy_token");
     }
 
@@ -268,22 +293,22 @@ mod tests {
     async fn test_execute_request_with_preflight() {
         let mut server = Server::new_async().await;
         let mut client = ArloClient::new().await.unwrap();
-        
+
         // Point reqwest to the mock server
-        client.reqwest_client = reqwest::Client::builder()
-            .build()
-            .unwrap();
-            
+        client.reqwest_client = reqwest::Client::builder().build().unwrap();
+
         let url = format!("{}/test", server.url());
 
         // Mock OPTIONS preflight
-        let _m_options = server.mock("OPTIONS", "/test")
+        let _m_options = server
+            .mock("OPTIONS", "/test")
             .with_status(200)
             .create_async()
             .await;
 
         // Mock POST request
-        let _m_post = server.mock("POST", "/test")
+        let _m_post = server
+            .mock("POST", "/test")
             .match_header("Content-Type", "application/json")
             .with_status(200)
             .with_body("{\"success\": true}")
@@ -291,7 +316,9 @@ mod tests {
             .await;
 
         let payload = serde_json::json!({"key": "value"});
-        let result = client.execute_request(Method::POST, &url, Some(&payload)).await;
+        let result = client
+            .execute_request(Method::POST, &url, Some(&payload))
+            .await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "{\"success\": true}");
@@ -303,7 +330,8 @@ mod tests {
         let client = ArloClient::new().await.unwrap();
         let url = format!("{}/error", server.url());
 
-        let _m = server.mock("GET", "/error")
+        let _m = server
+            .mock("GET", "/error")
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()

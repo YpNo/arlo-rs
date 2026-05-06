@@ -8,22 +8,25 @@ pub mod auth_imap;
 pub mod builder;
 /// Camera streaming, topology tracking, mode adjustments, and actuations.
 pub mod devices;
-/// Pluggable Multi-Factor-Authentication handler trait + bundled impls.
-pub mod mfa;
 /// S3 Video chunk parsing and media decryption logic.
 pub mod library;
+/// Direct LAN client for an Arlo SmartHub with pinned-leaf TLS.
+pub mod local_hub;
+/// Pluggable Multi-Factor-Authentication handler trait + bundled impls.
+pub mod mfa;
 /// Raw token spoofing for connecting natively to local hubs bypassing Cloudflare.
 pub mod ratls;
 
 use crate::config::{ArloConfig, ClientConfig};
 use crate::error::ArloError;
 use crate::events::EventBus;
+use crate::models::auth::SessionToken;
 pub use auth::AuthManager;
 pub use builder::ArloClientBuilder;
 use reqwest::Client;
 use rs_cloudscraper::CloudScraper;
 use tokio::sync::OnceCell;
-use tracing::instrument;
+use tracing::{info, instrument};
 
 /// Core REST API manager for the Arlo ecosystem.
 ///
@@ -98,6 +101,16 @@ impl ArloClient {
         &self.auth.device_id
     }
 
+    /// Internal helper: returns the active `user_id` or an
+    /// [`ArloError::AuthError`] if the client isn't authenticated.
+    /// Used by every `notify`-style method that needs to stamp the
+    /// `from: "{user_id}_web"` field.
+    pub(crate) fn require_user_id(&self) -> Result<&str, ArloError> {
+        self.auth.user_id.as_deref().ok_or_else(|| {
+            ArloError::AuthError("Operation requires an authenticated session".into())
+        })
+    }
+
     /// Returns a reference to the SSE event bus, booting it on first call.
     ///
     /// The bus subscribes to Arlo's `/hmsweb/client/subscribe` SSE stream
@@ -120,6 +133,49 @@ impl ArloClient {
                 .await
             })
             .await
+    }
+
+    /// Re-attaches a previously-issued session token to a fresh client.
+    ///
+    /// Use this when the access token, `user_id`, and `device_id` are
+    /// persisted outside the process — for example a vault, an env var, or
+    /// the application's own database — instead of via
+    /// [`ArloClientBuilder::session_cache`]. The returned client validates
+    /// the token against the session-v3 endpoint before returning, so a
+    /// stale token surfaces immediately as an [`ArloError::AuthError`].
+    ///
+    /// To capture the state for later re-attachment, call
+    /// [`ArloClient::session_token`] on a live, authenticated client.
+    #[instrument(skip(session))]
+    pub async fn reattach(session: SessionToken) -> Result<Self, ArloError> {
+        let mut client = Self::builder().build().await?;
+        client.auth.set_token(session.access_token().to_string());
+        client.auth.user_id = Some(session.user_id().to_string());
+        client.auth.device_id = session.device_id().to_string();
+
+        client
+            .validate_session_v3()
+            .await
+            .map_err(|e| ArloError::AuthError(format!("reattach: token rejected: {e}")))?;
+
+        info!(user_id = %session.user_id(), "Re-attached existing Arlo session");
+        Ok(client)
+    }
+
+    /// Snapshots the current session as a [`SessionToken`] for persistence
+    /// outside this process. Returns [`ArloError::AuthError`] if the
+    /// client isn't authenticated yet.
+    pub fn session_token(&self) -> Result<SessionToken, ArloError> {
+        let token = self
+            .auth
+            .token()
+            .ok_or_else(|| ArloError::AuthError("No active session to snapshot".into()))?;
+        let user_id = self
+            .auth
+            .user_id
+            .as_deref()
+            .ok_or_else(|| ArloError::AuthError("Session has no user_id".into()))?;
+        Ok(SessionToken::new(token, user_id, &self.auth.device_id))
     }
 
     /// Hydrates the client configuration from a TOML file. Internally a
