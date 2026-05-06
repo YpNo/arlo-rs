@@ -1,16 +1,29 @@
-//! Core REST API transport layer.
+//! Core REST API orchestration layer.
 //!
-//! This module houses the primary HTTP request execution engine for `ArloClient`.
-//! It is strictly responsible for dynamically injecting browser-accurate headers,
-//! managing token Base64 encoding schemes required by the modern `ocapi-app.arlo.com` endpoints,
-//! and orchestrating HTTP OPTIONS CORS preflight requests to mimic authentic browser behavior
-//! and evade Cloudflare's WAF.
+//! Sits on top of [`crate::client::transport::HttpTransport`] and is
+//! responsible for everything *above* the wire:
+//!
+//! - Injecting Arlo's full set of browser-mimicking headers, including
+//!   the dual-token authorization scheme (Base64 for `ocapi-app`, raw
+//!   for `myapi`/`hmsweb`).
+//! - Firing the OPTIONS preflight that real Single-Page-Apps emit
+//!   ahead of any state-mutating cross-origin request.
+//! - Serializing JSON request bodies and surfacing non-2xx responses
+//!   as [`ArloError::HttpError`].
+//! - Redacting secrets from `debug_mode` body dumps before they reach
+//!   the tracing layer.
+//!
+//! The transport itself only sees a fully-formed [`HttpRequest`] and
+//! returns the byte body — auth, retries, and envelope handling all
+//! live here.
+
 use crate::client::ArloClient;
+use crate::client::transport::{HttpRequest, HttpResponse};
 use crate::error::ArloError;
 use crate::headers::*;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
-use reqwest::{Method, RequestBuilder};
+use reqwest::Method;
 use serde::Serialize;
 use serde_json::Value;
 use tracing::{debug, instrument, warn};
@@ -63,71 +76,91 @@ fn redact_in_place(value: &mut Value) {
 }
 
 impl ArloClient {
-    /// Injects standard Arlo Single Page Application (SPA) headers into a `RequestBuilder`.
+    /// Builds the standard set of Arlo Single-Page-Application headers
+    /// for the given URL.
     ///
-    /// This seamlessly handles the dual-token architecture of the Arlo API:
-    /// - Requests routed to the newer `ocapi-app` (MFA/Auth) receive a Base64 encoded token.
-    /// - Requests routed to the legacy `hmsweb` (Devices/Modes) receive the raw telemetry token.
-    fn inject_headers(&self, mut builder: RequestBuilder, url: &str) -> RequestBuilder {
-        builder = builder
-            .header("Accept", "application/json, text/plain, */*")
-            .header("Accept-Language", "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7")
-            .header("Origin", ARLO_ORIGIN)
-            .header("Referer", ARLO_REFERER)
-            .header("DNT", "1")
-            .header("Pragma", "no-cache")
-            .header("Cache-Control", "no-cache")
-            .header("Source", HEADER_SOURCE)
-            .header("auth-version", HEADER_AUTH_VERSION)
-            .header("x-service-version", HEADER_SERVICE_VERSION)
-            .header("x-user-device-type", HEADER_USER_DEVICE_TYPE)
-            .header("x-user-device-id", self.auth.device_id.clone())
-            .header(
-                "x-user-device-automation-name",
-                HEADER_USER_DEVICE_AUTOMATION_NAME,
-            );
+    /// Handles the dual-token architecture:
+    /// - URLs starting with the auth host (`ocapi-app.arlo.com`) get a
+    ///   Base64-encoded token in `Authorization`.
+    /// - Other URLs (the `myapi.arlo.com` / `hmsweb` family) get the
+    ///   raw token.
+    pub(crate) fn build_headers(&self, url: &str) -> Vec<(String, String)> {
+        let mut headers: Vec<(String, String)> = vec![
+            ("Accept".into(), "application/json, text/plain, */*".into()),
+            (
+                "Accept-Language".into(),
+                "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7".into(),
+            ),
+            ("Origin".into(), ARLO_ORIGIN.into()),
+            ("Referer".into(), ARLO_REFERER.into()),
+            ("DNT".into(), "1".into()),
+            ("Pragma".into(), "no-cache".into()),
+            ("Cache-Control".into(), "no-cache".into()),
+            ("Source".into(), HEADER_SOURCE.into()),
+            ("auth-version".into(), HEADER_AUTH_VERSION.into()),
+            ("x-service-version".into(), HEADER_SERVICE_VERSION.into()),
+            ("x-user-device-type".into(), HEADER_USER_DEVICE_TYPE.into()),
+            ("x-user-device-id".into(), self.auth.device_id.clone()),
+            (
+                "x-user-device-automation-name".into(),
+                HEADER_USER_DEVICE_AUTOMATION_NAME.into(),
+            ),
+        ];
 
-        // Inject authorization token if we have one
         if let Some(token) = self.auth.token() {
-            if url.starts_with(ARLO_AUTH_HOST) {
-                // Endpoints targeting `ocapi-app.arlo.com` (MFA, validating tokens) require Base64 encoding.
-                let b64_token = BASE64_STANDARD.encode(token.as_bytes());
-                builder = builder.header("Authorization", b64_token);
+            let value = if url.starts_with(self.endpoints.auth_host.as_str()) {
+                // ocapi-app expects Base64-encoded tokens.
+                BASE64_STANDARD.encode(token.as_bytes())
             } else {
-                // Secondary validation via `hmsweb` endpoints (API_HOST) expects raw tokens.
-                builder = builder.header("Authorization", token);
-            }
+                // hmsweb/myapi expects raw tokens.
+                token.to_string()
+            };
+            headers.push(("Authorization".into(), value));
         }
 
-        builder
+        headers
     }
 
-    /// Executes an OPTIONS preflight request.
-    /// To perfectly emulate a human browser, modern Single Page Applications fire an OPTIONS
-    /// preflight before making a CORS POST/PUT/DELETE request.
+    /// Executes the OPTIONS preflight that real browsers emit before
+    /// state-mutating CORS requests. Failures are logged at WARN but
+    /// do not abort the subsequent main request — Arlo's WAF tolerates
+    /// occasional preflight blips.
     #[instrument(skip(self))]
     async fn perform_options_preflight(&self, method: &Method, url: &str) -> Result<(), ArloError> {
-        let mut builder = self.reqwest_client.request(Method::OPTIONS, url)
-            .header("Access-Control-Request-Method", method.as_str())
-            .header("Access-Control-Request-Headers", "auth-version,content-type,source,x-service-version,x-user-device-automation-name,x-user-device-id,x-user-device-type");
+        let mut headers = self.build_headers(url);
+        headers.push((
+            "Access-Control-Request-Method".into(),
+            method.as_str().to_string(),
+        ));
+        headers.push((
+            "Access-Control-Request-Headers".into(),
+            "auth-version,content-type,source,x-service-version,x-user-device-automation-name,x-user-device-id,x-user-device-type"
+                .into(),
+        ));
 
-        builder = self.inject_headers(builder, url);
+        let response = self
+            .transport
+            .request(HttpRequest {
+                method: Method::OPTIONS,
+                url: url.to_string(),
+                headers,
+                body: None,
+            })
+            .await?;
 
-        let response = builder.send().await?;
-        if !response.status().is_success() {
+        if !response.status.is_success() {
             warn!(
-                "OPTIONS preflight to {} returned non-200 status: {}",
-                url,
-                response.status()
+                url = %url,
+                status = %response.status,
+                "OPTIONS preflight returned non-200 status",
             );
         }
-
         Ok(())
     }
 
     /// Primary engine to execute requests simulating the Web Dashboard.
     /// It automatically fires the OPTIONS preflight if necessary (e.g., POST/PUT).
-    /// Returns the raw Response body text.
+    /// Returns the raw response body text on 2xx.
     #[instrument(skip(self, payload), fields(method = %method, url = %url))]
     pub async fn execute_request<T: Serialize>(
         &self,
@@ -135,65 +168,75 @@ impl ArloClient {
         url: &str,
         payload: Option<&T>,
     ) -> Result<String, ArloError> {
-        // 1. Simulate the browser's CORS OPTIONS pre-flight for state-mutating requests
-        if method == Method::POST || method == Method::PUT || method == Method::DELETE {
+        // 1. Browser-style CORS preflight for state-mutating requests.
+        if matches!(method, Method::POST | Method::PUT | Method::DELETE) {
             self.perform_options_preflight(&method, url).await?;
         }
 
-        // 2. Build the actual request
-        let mut builder = self.reqwest_client.request(method.clone(), url);
-        builder = self.inject_headers(builder, url);
-
-        let mut dump_pay = String::new();
-        // 3. Attach payload if it's a POST/PUT
-        if let Some(data) = payload {
-            builder = builder.json(data);
-            if self.debug_mode
-                && let Ok(json) = serde_json::to_string(data)
-            {
-                dump_pay = redact_for_log(&json);
-            }
-        }
+        // 2. Build headers + body for the actual request.
+        let mut headers = self.build_headers(url);
+        let body = if let Some(data) = payload {
+            let bytes = serde_json::to_vec(data)?;
+            headers.push(("Content-Type".into(), "application/json".into()));
+            Some(bytes)
+        } else {
+            None
+        };
 
         if self.debug_mode {
+            let dump = body
+                .as_ref()
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .map(redact_for_log)
+                .unwrap_or_default();
             debug!(
                 method = %method,
                 url = %url,
-                payload = %dump_pay,
+                payload = %dump,
                 "--> Request"
             );
         }
 
-        // 4. Send and consume body
-        let response = builder.send().await?;
-        let status = response.status();
-
-        let body_str = response.text().await?;
+        // 3. Dispatch through the transport.
+        let HttpResponse { status, body } = self
+            .transport
+            .request(HttpRequest {
+                method: method.clone(),
+                url: url.to_string(),
+                headers,
+                body,
+            })
+            .await?;
 
         if self.debug_mode {
             debug!(
                 status = %status,
-                body = %redact_for_log(&body_str),
+                body = %redact_for_log(&body),
                 "<-- Response"
             );
         }
 
         if !status.is_success() {
-            return Err(ArloError::HttpError {
-                status,
-                body: body_str,
-            });
+            return Err(ArloError::HttpError { status, body });
         }
-
-        Ok(body_str)
+        Ok(body)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::endpoints::ArloEndpoints;
+    use crate::client::transport::test_support::MockTransport;
     use mockito::Server;
-    use reqwest::Method;
+    use std::sync::Arc;
+
+    fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
 
     #[test]
     fn redact_replaces_sensitive_top_level_keys() {
@@ -230,121 +273,160 @@ mod tests {
         assert_eq!(redact_for_log(raw), raw);
     }
 
+    fn test_client(transport: Arc<MockTransport>, endpoints: ArloEndpoints) -> ArloClient {
+        ArloClient::with_transport(transport, endpoints)
+    }
+
     #[tokio::test]
-    async fn test_inject_headers_auth_encoding() {
-        let mut client = ArloClient::new().await.unwrap();
+    async fn build_headers_uses_base64_token_for_auth_host() {
+        let mut client = test_client(Arc::new(MockTransport::new()), ArloEndpoints::default());
         client.auth.set_token("dummy_token".to_string());
         client.auth.device_id = "test_device".to_string();
 
-        let req_builder = client
-            .reqwest_client
-            .request(Method::GET, "https://example.com");
-
-        // Test ocapi-app encoding (Base64)
-        let auth_url = format!("{}/api/test", ARLO_AUTH_HOST);
-        let builder = client.inject_headers(req_builder, &auth_url);
-        let request = builder.build().unwrap();
-
-        let auth_header = request
-            .headers()
-            .get("Authorization")
-            .unwrap()
-            .to_str()
-            .unwrap();
+        let auth_url = format!("{}/api/test", client.endpoints.auth_host);
+        let headers = client.build_headers(&auth_url);
         assert_eq!(
-            auth_header,
-            BASE64_STANDARD.encode("dummy_token".as_bytes())
+            header_value(&headers, "Authorization"),
+            Some(BASE64_STANDARD.encode("dummy_token".as_bytes()).as_str())
         );
         assert_eq!(
-            request
-                .headers()
-                .get("x-user-device-id")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "test_device"
+            header_value(&headers, "x-user-device-id"),
+            Some("test_device")
         );
     }
 
     #[tokio::test]
-    async fn test_inject_headers_api_raw() {
-        let mut client = ArloClient::new().await.unwrap();
+    async fn build_headers_uses_raw_token_for_api_host() {
+        let mut client = test_client(Arc::new(MockTransport::new()), ArloEndpoints::default());
         client.auth.set_token("dummy_token".to_string());
 
-        let req_builder = client
-            .reqwest_client
-            .request(Method::GET, "https://example.com");
-
-        // Test myapi-app raw token
-        let api_url = format!("{}/hmsweb/test", ARLO_API_HOST);
-        let builder = client.inject_headers(req_builder, &api_url);
-        let request = builder.build().unwrap();
-
-        let auth_header = request
-            .headers()
-            .get("Authorization")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert_eq!(auth_header, "dummy_token");
+        let api_url = format!("{}/hmsweb/test", client.endpoints.api_host);
+        let headers = client.build_headers(&api_url);
+        assert_eq!(header_value(&headers, "Authorization"), Some("dummy_token"));
     }
 
     #[tokio::test]
-    async fn test_execute_request_with_preflight() {
-        let mut server = Server::new_async().await;
-        let mut client = ArloClient::new().await.unwrap();
+    async fn build_headers_omits_authorization_when_unauthenticated() {
+        let client = test_client(Arc::new(MockTransport::new()), ArloEndpoints::default());
+        let headers = client.build_headers("https://example.test/api");
+        assert!(header_value(&headers, "Authorization").is_none());
+    }
 
-        // Point reqwest to the mock server
-        client.reqwest_client = reqwest::Client::builder().build().unwrap();
+    #[tokio::test]
+    async fn execute_request_fires_options_preflight_for_post() {
+        let mock = Arc::new(MockTransport::new());
+        // Order matters: queue is a stack popped on each request, so the
+        // last expectation queued is consumed first. We need OPTIONS first,
+        // then POST — so we queue POST, then OPTIONS.
+        mock.expect_ok(r#"{"success":true}"#);
+        mock.expect_ok("");
 
-        let url = format!("{}/test", server.url());
-
-        // Mock OPTIONS preflight
-        let _m_options = server
-            .mock("OPTIONS", "/test")
-            .with_status(200)
-            .create_async()
-            .await;
-
-        // Mock POST request
-        let _m_post = server
-            .mock("POST", "/test")
-            .match_header("Content-Type", "application/json")
-            .with_status(200)
-            .with_body("{\"success\": true}")
-            .create_async()
-            .await;
-
+        let client = test_client(Arc::clone(&mock), ArloEndpoints::default());
         let payload = serde_json::json!({"key": "value"});
-        let result = client
-            .execute_request(Method::POST, &url, Some(&payload))
-            .await;
+        let body = client
+            .execute_request(Method::POST, "https://example.test/api", Some(&payload))
+            .await
+            .unwrap();
+        assert_eq!(body, r#"{"success":true}"#);
 
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "{\"success\": true}");
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 2, "expected OPTIONS preflight then POST");
+        assert_eq!(calls[0].method, Method::OPTIONS);
+        assert_eq!(calls[1].method, Method::POST);
+        assert_eq!(
+            header_value(&calls[1].headers, "Content-Type"),
+            Some("application/json")
+        );
     }
 
     #[tokio::test]
-    async fn test_execute_request_http_error() {
-        let mut server = Server::new_async().await;
-        let client = ArloClient::new().await.unwrap();
-        let url = format!("{}/error", server.url());
+    async fn execute_request_skips_preflight_for_get() {
+        let mock = Arc::new(MockTransport::new());
+        mock.expect_ok(r#"{}"#);
 
-        let _m = server
-            .mock("GET", "/error")
-            .with_status(401)
-            .with_body("Unauthorized")
-            .create_async()
-            .await;
+        let client = test_client(Arc::clone(&mock), ArloEndpoints::default());
+        client
+            .execute_request::<()>(Method::GET, "https://example.test/api", None)
+            .await
+            .unwrap();
 
-        let result = client.execute_request::<()>(Method::GET, &url, None).await;
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, Method::GET);
+    }
 
-        match result {
-            Err(ArloError::HttpError { status, body }) => {
+    #[tokio::test]
+    async fn execute_request_returns_http_error_on_non_success() {
+        let mock = Arc::new(MockTransport::new());
+        mock.expect(HttpResponse {
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            body: "Unauthorized".into(),
+        });
+
+        let client = test_client(Arc::clone(&mock), ArloEndpoints::default());
+        let err = client
+            .execute_request::<()>(Method::GET, "https://example.test/error", None)
+            .await
+            .unwrap_err();
+        match err {
+            ArloError::HttpError { status, body } => {
                 assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
                 assert_eq!(body, "Unauthorized");
             }
-            _ => panic!("Expected HttpError"),
+            other => panic!("expected HttpError, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn execute_request_works_against_real_reqwest_via_mockito() {
+        // Bonus integration-style check: a real `reqwest::Client` driven
+        // through the `HttpTransport` trait against a mockito server.
+        // Proves the orchestration layer (build_headers + preflight +
+        // body serialization) is wire-compatible without booting
+        // CloudScraper.
+        let mut server = Server::new_async().await;
+        let _m_options = server
+            .mock("OPTIONS", "/hmsweb/echo")
+            .with_status(200)
+            .create_async()
+            .await;
+        let _m_post = server
+            .mock("POST", "/hmsweb/echo")
+            .with_status(200)
+            .with_body(r#"{"echoed":true}"#)
+            .create_async()
+            .await;
+
+        #[derive(Debug)]
+        struct ReqwestTransport(reqwest::Client);
+        #[async_trait::async_trait]
+        impl crate::client::transport::HttpTransport for ReqwestTransport {
+            async fn request(&self, request: HttpRequest) -> Result<HttpResponse, ArloError> {
+                let mut b = self.0.request(request.method, &request.url);
+                for (k, v) in request.headers {
+                    b = b.header(k, v);
+                }
+                if let Some(body) = request.body {
+                    b = b.body(body);
+                }
+                let resp = b.send().await?;
+                let status = resp.status();
+                let body = resp.text().await?;
+                Ok(HttpResponse { status, body })
+            }
+        }
+
+        let endpoints = ArloEndpoints::testing(server.url());
+        let client = ArloClient::with_transport(
+            Arc::new(ReqwestTransport(reqwest::Client::new())),
+            endpoints.clone(),
+        );
+
+        let url = format!("{}/hmsweb/echo", endpoints.api_host);
+        let body = client
+            .execute_request(Method::POST, &url, Some(&serde_json::json!({"k":"v"})))
+            .await
+            .unwrap();
+        assert_eq!(body, r#"{"echoed":true}"#);
     }
 }
