@@ -30,8 +30,20 @@ rs-arlo = "0.1.0"
 
 ## 💻 Configuration
 
-Before executing the client, you must provide your base preferences. 
-Copy `config.toml.example` to `config.toml` in your project root:
+Two ways to configure the client:
+
+**Programmatic (recommended for libraries / servers):**
+
+```rust
+let client = rs_arlo::ArloClient::builder()
+    .session_cache(".arlo_session.json")
+    .headless(true)
+    .build()
+    .await?;
+```
+
+**TOML file (convenient for local CLI tooling and the bundled examples):**
+copy `config.toml.example` to `config.toml` in your project root:
 
 ```toml
 [credentials]
@@ -43,6 +55,11 @@ debug_mode = false
 session_cache_path = ".arlo_session.json"
 headless = true # Set to false to visibly debug the browser automation
 ```
+
+> ⚠️ **Never commit `config.toml` or `.arlo_session.json`.** Both are in
+> `.gitignore` and contain credentials / session tokens. Treat them like
+> a `.env` — rotate any secret that ends up in a working copy a teammate
+> could see.
 
 ## 🔐 Multi-Factor Authentication (MFA)
 
@@ -56,20 +73,35 @@ To avoid repeated MFA prompts, `rs-arlo` automatically serializes successful ses
 
 ## 🧪 Scenarios & Examples
 
-To help you validate your deployment and bypass functionality, we've bundled two fully automated testing scenarios in the `examples/` directory. Be sure to configure your `config.toml` first!
+Three runnable examples live in `examples/`. Configure your `config.toml`
+first (see above), then:
 
-### Scenario 1: Authentication & Device Listing (`demo1.rs`)
-This scenario walks you through the initial login process, queries Arlo for your requested 2FA Factor (Push/Email), caches the active token so you don't get prompted repeatedly, and then discovers all attached Hubs and Cameras dynamically. If you enabled IMAP in the config, it will automatically poll your inbox and extract the 6-digit OTP to complete the login seamlessly without user interaction!
+### `simple` — Authentication & Device Listing
+Walks the full login flow: cache hydration, MFA dispatch via
+`MfaHandler` (auto-picks `ImapMfaHandler` if `[mfa.imap]` is enabled,
+else falls back to `StdinMfaHandler`), and a top-level dump of every
+location and device on the account.
 
 ```bash
-RUST_LOG=info cargo run --example demo1
+RUST_LOG=rs_arlo=info cargo run --example simple
 ```
 
-### Scenario 2: Streaming & Actuation (`demo2.rs`)
-Once authenticated and verified by Scenario 1, this script re-attaches to the API using your cached session token (`.arlo_session.json`). It isolates the first camera on your account, requests an authorized live stream URL (containing dynamic AES tokens), and seamlessly initiates the Arlo state machine.
+### `advanced` — Streaming & Actuation
+Reattaches to the cached session and demonstrates `start_stream(id)`
+returning the playable RTSPS / HLS / DASH URL directly — the library
+handles the SSE correlation internally.
 
 ```bash
-RUST_LOG=info cargo run --example demo2
+RUST_LOG=rs_arlo=info cargo run --example advanced
+```
+
+### `imap` — IMAP OTP Extraction Debugger
+Connects to the configured IMAP server, grabs the most recent UNSEEN
+Arlo email, and prints the OTP-extraction trace. Useful when retuning
+the regex layer against a new Arlo email template.
+
+```bash
+RUST_LOG=rs_arlo=info cargo run --example imap
 ```
 
 ## 🛠️ Development & Cargo Commands
