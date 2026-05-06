@@ -11,12 +11,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 uuid = { version = "1.23", features = ["v4", "fast-rng"] }
-log = "0.4"
 urlencoding = "2.1"
 toml = "1.1"
-# rs-cloudscraper = { git = "https://github.com/YpNo/rs-cloudscraper", tag = "v0.2.0" }
+# Once `rs-cloudscraper` v0.2.0 is verified against this crate's call sites, swap to:
+# rs-cloudscraper = { git = "https://github.com/YpNo/rs-cloudscraper", tag = "v0.2.0", features = ["browser"] }
+# (Tracked in CHANGELOG.md under [Unreleased].)
 rs-cloudscraper = { path = "../rs-cloudscraper", features = ["browser"] }
-native-tls = "0.2.18"
 mailparse = "0.16.1"
 regex = "1.12.3"
 imap-client = { path = "../imap-rs/imap-client" }
@@ -34,6 +34,6 @@ async-trait = "0.1"
 
 
 [dev-dependencies]
-env_logger = "0.11"
 tempfile = "3.26.0"
 mockito = "1.6.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

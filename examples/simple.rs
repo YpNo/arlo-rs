@@ -11,9 +11,7 @@ use rs_arlo::{ArloClient, ImapMfaHandler, StdinMfaHandler};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        .init();
+    init_tracing();
     println!("=== Scenario 1: Authentication & Device Listing ===");
 
     let config_path = "config.toml";
@@ -64,4 +62,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.logout().await?;
     println!("Done.");
     Ok(())
+}
+
+/// Initialise a `tracing` subscriber honoring `RUST_LOG`. Defaults to INFO
+/// for `rs_arlo`, WARN elsewhere, so example runs aren't drowned in noisy
+/// dependency logs by default.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,rs_arlo=info"));
+    fmt().with_env_filter(filter).init();
 }
