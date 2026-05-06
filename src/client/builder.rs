@@ -23,11 +23,14 @@
 //! parses the TOML, calls into this builder, and applies the session-cache
 //! restore step.
 
+use crate::client::endpoints::ArloEndpoints;
+use crate::client::transport::CloudScraperTransport;
 use crate::client::{ArloClient, AuthManager};
 use crate::config::ClientConfig;
 use crate::error::ArloError;
 use reqwest::Client;
 use rs_cloudscraper::{BrowserProfile, CloudScraper};
+use std::sync::Arc;
 
 /// Programmatic builder for an [`ArloClient`]. Construct via
 /// [`ArloClient::builder`].
@@ -38,6 +41,7 @@ pub struct ArloClientBuilder {
     upstream_proxy: Option<String>,
     debug_mode: bool,
     session_cache_path: Option<String>,
+    endpoints: Option<ArloEndpoints>,
 }
 
 impl ArloClientBuilder {
@@ -78,6 +82,14 @@ impl ArloClientBuilder {
         self
     }
 
+    /// Override the Arlo host endpoints. Defaults to production
+    /// (`ocapi-app.arlo.com` + `myapi.arlo.com`); unit tests use this
+    /// to point at a mockito server. See [`ArloEndpoints`].
+    pub fn endpoints(mut self, endpoints: ArloEndpoints) -> Self {
+        self.endpoints = Some(endpoints);
+        self
+    }
+
     /// Constructs the [`ArloClient`]. This boots the headless browser
     /// stealth proxy (`rs-cloudscraper`), so it is a heavyweight call
     /// (typically several seconds). If [`Self::session_cache`] was set and
@@ -85,11 +97,13 @@ impl ArloClientBuilder {
     /// invalid cache is wiped and the client returns ready for a fresh
     /// login.
     pub async fn build(self) -> Result<ArloClient, ArloError> {
+        let endpoints = self.endpoints.clone().unwrap_or_default();
         let mut client = bootstrap(BootstrapConfig {
             user_agent: self.user_agent,
             headless: self.headless,
             upstream_proxy: self.upstream_proxy,
             debug_mode: self.debug_mode,
+            endpoints,
         })
         .await?;
 
@@ -109,6 +123,7 @@ pub(crate) struct BootstrapConfig {
     pub headless: Option<bool>,
     pub upstream_proxy: Option<String>,
     pub debug_mode: bool,
+    pub endpoints: ArloEndpoints,
 }
 
 impl From<&ClientConfig> for BootstrapConfig {
@@ -118,6 +133,7 @@ impl From<&ClientConfig> for BootstrapConfig {
             headless: c.headless,
             upstream_proxy: c.upstream_proxy.clone(),
             debug_mode: c.debug_mode.unwrap_or(false),
+            endpoints: ArloEndpoints::default(),
         }
     }
 }
@@ -161,10 +177,11 @@ pub(crate) async fn bootstrap(cfg: BootstrapConfig) -> Result<ArloClient, ArloEr
         req_builder = req_builder.danger_accept_invalid_certs(true);
     }
     let reqwest_client = req_builder.build()?;
+    let transport = Arc::new(CloudScraperTransport::new(reqwest_client, cloud_scraper));
 
     Ok(ArloClient {
-        reqwest_client,
-        cloud_scraper,
+        transport,
+        endpoints: cfg.endpoints,
         auth: AuthManager::new(),
         debug_mode: cfg.debug_mode,
         event_bus: tokio::sync::OnceCell::new(),

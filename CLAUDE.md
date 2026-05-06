@@ -3,25 +3,61 @@
 
 ## Core Directives
 1. **Hexagonal Integrity**: Strictly separate Arlo protocol logic (Domain) from transport/MFA solving (Infrastructure). See `.agents/rules/architecture.md`.
-2. **Protocol Fidelity**: We must mimic the Arlo Web Dashboard exactly. This includes undocumented headers, specific telemetry metrics, and JA4 TLS signatures (via `rs-cloudscraper`).
+2. **Protocol Fidelity**: We must mimic the Arlo Web Dashboard exactly. This includes undocumented headers, the 6-step OAuth ceremony (login → get_factors → start_auth → finish_auth → validate_access_token → validate_session_v3), and JA4 TLS signatures (via `rs-cloudscraper`).
 3. **Quality & Security Gates**: Every contribution must pass the Zero-Warning and Dependency Audit gates. See `.agents/rules/quality-standards.md`.
-4. **Resilient Session Management**: Use the Rust type system to represent device state machines and handle MFA/Session persistence with zero-leak security.
+4. **Resilient Session Management**: Use `secrecy::SecretString` for all tokens (zeroized on drop). Session state is snapshotted via `SessionToken` / `ArloClient::reattach()`. Cache files are `0600` on Unix.
+
+## Module Map
+
+### `src/client/` — Core orchestration layer
+| File | Responsibility |
+|---|---|
+| `mod.rs` | `ArloClient` struct: transport injection, lazy `EventBus` init, `reattach()` / `session_token()` |
+| `builder.rs` | `ArloClientBuilder` (fluent) + internal `bootstrap()` that boots `rs-cloudscraper` |
+| `auth.rs` | `AuthManager` (token+cache) + full 6-step OAuth state machine on `ArloClient` |
+| `auth_imap.rs` | IMAP OTP fetcher using workspace `imap-client` / `imap-core` crates |
+| `mfa.rs` | `MfaHandler` trait + `ImapMfaHandler`, `StdinMfaHandler`, `StaticOtpHandler` |
+| `transport.rs` | `HttpTransport` trait + `CloudScraperTransport` (prod) + `MockTransport` (tests) |
+| `api.rs` | Generic REST helpers: `execute_request`, OPTIONS preflight, JSON envelope unwrap |
+| `devices.rs` | Camera topology, mode management, actuations, `local_hub()` factory |
+| `local_hub.rs` | `LocalHubClient`: LAN-direct SmartHub client with rustls leaf-cert pinning (RATLS) |
+| `ratls.rs` | Raw RATLS token spoofing for Cloudflare-bypass on local hub connections |
+| `library.rs` | S3 video chunk parsing and media decryption |
+| `endpoints.rs` | `ArloEndpoints`: overrideable auth + API hosts (mockito-friendly) |
+
+### `src/events/` — SSE telemetry bus
+- `EventBus`: two background tokio tasks (SSE listener with auto-reconnect + 10-min keep-alive pinger), `broadcast::Sender<ArloEvent>`, `watch::Receiver<ConnectionState>`
+- `SseFramer`: WHATWG-compliant stateful frame parser (handles chunk-boundary splits, `\r\n\r\n` and `\n\n`, multi-line `data:`, batch JSON arrays)
+- `ConnectionState`: `Connecting | Connected | Disconnected` — exhaustive enum, no wildcard arms
+
+### `src/models/` — Pure data layer (no I/O)
+`auth.rs`, `auth_advanced.rs`, `events.rs`, `envelope.rs`, `automation.rs`, `library.rs`, `ratls.rs`, `api.rs`
+
+### Other modules
+- `src/error.rs` — `ArloError` (9 `thiserror` variants)
+- `src/config.rs` — TOML `ArloConfig` (`credentials`, `client`, `mfa`, `mfa.imap`)
+- `src/endpoints.rs` — Static Arlo URL constants
+- `src/headers.rs` — Host constants
 
 ## Knowledge Map
-- **Architecture**: Guidelines located in [architecture.md](file:///.agents/rules/architecture.md).
-- **Quality & Security**: Standards located in [quality-standards.md](file:///.agents/rules/quality-standards.md).
-- **Workflows**: 
-    - [Feature Cycle](file:///.agents/workflows/feature-cycle.md) for new logic.
-    - [Protocol Update](file:///.agents/workflows/protocol-update.md) for Arlo API changes.
-- **Client Implementation**: Located in `src/client/`. Focus on re-attachment logic.
-- **Event System**: Located in `src/events/`. SSE parsing and broadcasting happens here.
+- **Architecture**: `.agents/rules/architecture.md`
+- **Quality & Security**: `.agents/rules/quality-standards.md`
+- **Coding Style**: `.agents/rules/coding-style.md`
+- **Patterns**: `.agents/rules/patterns.md`
+- **Workflows**:
+    - `.agents/workflows/feature-cycle.md` for new logic
+    - `.agents/workflows/protocol-update.md` for Arlo API changes
 
 ## Memory Anchors
-- **Edition 2024** & standard library preference.
-- **Error Handling**: `thiserror` for library boundaries; no opaque `anyhow` in `src/`.
-- **Instrumentation**: Prefer `tracing` over `log` for all new modules.
-- **Safety**: No `unsafe`. Avoid `unwrap()` in favor of `.expect()` with context.
-- **Stealth Integrity**: TLS handshake signatures MUST be verified against `rs-cloudscraper` profiles when updating the Arlo client.
+- **Edition 2024** & stdlib-first preference.
+- **Error Handling**: `thiserror` for library boundaries; `anyhow` only in binaries/integration tests.
+- **Instrumentation**: `log` crate present (legacy migration in progress) — all **new** code must use `tracing` only; never add new `log::` call sites.
+- **Safety**: No `unsafe`. `unwrap()` banned; use `.expect("SAFETY: <reason>")`.
+- **Tokens**: `secrecy::SecretString` wraps all access tokens — zeroized on drop, never formatted via `Debug`.
+- **Testing**: Use `ArloClient::with_transport(Arc<dyn HttpTransport>, endpoints)` + `MockTransport` from `transport::test_support`; use `ArloClientBuilder::endpoints()` to point at a `mockito` server. Never boot the real browser proxy in unit tests.
+- **IMAP MFA**: `ImapMfaHandler::prepare()` captures UNSEEN-baseline **before** OTP dispatch. Uses workspace crates `imap-client`, `imap-core`, `imap-tls`.
+- **RATLS / Local Hub**: `LocalHubClient` uses a custom rustls `PinnedLeafVerifier` — fails closed on cert mismatch.
+- **Stealth Integrity**: TLS handshake signatures MUST be verified against `rs-cloudscraper` profiles when updating the Arlo client. `BrowserProfile::random()` is selected at bootstrap.
 
 <!-- rtk-instructions v2 -->
 ## RTK (Rust Token Killer) - Token-Optimized Commands
@@ -110,7 +146,7 @@ rtk grep <pattern>      # Search grouped by file (75%)
 rtk find <pattern>      # Find grouped by directory (70%)
 ```
 
-### Analysis & Debug (70-90% savings)
+#### Analysis & Debug (70-90% savings)
 ```bash
 rtk err <cmd>           # Filter errors only from any command
 rtk log <file>          # Deduplicated logs with counts
@@ -121,7 +157,7 @@ rtk summary <cmd>       # Smart summary of command output
 rtk diff                # Ultra-compact diffs
 ```
 
-### Infrastructure (85% savings)
+#### Infrastructure (85% savings)
 ```bash
 rtk docker ps           # Compact container list
 rtk docker images       # Compact image list
@@ -130,13 +166,13 @@ rtk kubectl get         # Compact resource list
 rtk kubectl logs        # Deduplicated pod logs
 ```
 
-### Network (65-70% savings)
+#### Network (65-70% savings)
 ```bash
 rtk curl <url>          # Compact HTTP responses (70%)
 rtk wget <url>          # Compact download output (65%)
 ```
 
-### Meta Commands
+#### Meta Commands
 ```bash
 rtk gain                # View token savings statistics
 rtk gain --history      # View command history with savings
@@ -146,7 +182,7 @@ rtk init                # Add RTK instructions to CLAUDE.md
 rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 ```
 
-## Token Savings Overview
+### Token Savings Overview
 
 | Category | Commands | Typical Savings |
 |----------|----------|-----------------|
