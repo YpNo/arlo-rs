@@ -942,4 +942,486 @@ mod tests {
         assert_eq!(ArloClient::parse_statistic(&[0, 200], 1), Some(20.0));
         assert_eq!(ArloClient::parse_statistic(&[128, 0], 1), None); // 32768 (0x8000) is None
     }
+
+    // -----------------------------------------------------------------
+    // Device-facing API coverage (PR 6).
+    // -----------------------------------------------------------------
+
+    use crate::client::test_helpers::{authenticated_mocked_client, parse_body_json};
+    use crate::client::transport::test_support::MockTransport;
+    use std::sync::Arc;
+
+    fn arc_mock() -> Arc<MockTransport> {
+        Arc::new(MockTransport::new())
+    }
+
+    #[tokio::test]
+    async fn get_devices_handles_wrapped_data_array() {
+        let mock = arc_mock();
+        mock.queue_get(
+            r#"{"success":true,"data":[
+                {"deviceId":"C1","parentId":"B1","deviceType":"camera","deviceName":"Cam1","uniqueId":"U1","state":"provisioned"}
+            ]}"#,
+        );
+        let client = authenticated_mocked_client(mock);
+        let devices = client.get_devices().await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_id, "C1");
+    }
+
+    #[tokio::test]
+    async fn get_devices_handles_double_wrapped_data_devices_array() {
+        let mock = arc_mock();
+        mock.queue_get(
+            r#"{"success":true,"data":{"devices":[
+                {"deviceId":"D2","parentId":"B1","deviceType":"basestation","deviceName":"Hub","uniqueId":"U2","state":"provisioned"}
+            ]}}"#,
+        );
+        let client = authenticated_mocked_client(mock);
+        let devices = client.get_devices().await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_type, "basestation");
+    }
+
+    #[tokio::test]
+    async fn get_locations_returns_parsed_locations() {
+        let mock = arc_mock();
+        mock.queue_get(
+            r#"{"success":true,"data":[
+                {"id":"loc-1","name":"Home","longitude":-1.23,"latitude":4.56}
+            ]}"#,
+        );
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let locs = client.get_locations().await.unwrap();
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].id, "loc-1");
+        // URL templating fills in {user_id}.
+        assert!(mock.calls()[0].url.contains("/U-test/locations"));
+    }
+
+    #[tokio::test]
+    async fn get_locations_handles_nested_locations_key() {
+        let mock = arc_mock();
+        mock.queue_get(
+            r#"{"success":true,"data":{"locations":[
+                {"id":"loc-1","name":"Home"}
+            ]}}"#,
+        );
+        let client = authenticated_mocked_client(mock);
+        let locs = client.get_locations().await.unwrap();
+        assert_eq!(locs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_locations_errors_when_unauthenticated() {
+        let mock = arc_mock();
+        // Don't queue a response — request shouldn't reach the transport.
+        let client = crate::client::test_helpers::mocked_client(Arc::clone(&mock));
+        let err = client.get_locations().await.unwrap_err();
+        assert!(matches!(err, ArloError::AuthError(_)));
+        assert!(mock.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_automation_modes_returns_typed_modes() {
+        let mock = arc_mock();
+        mock.queue_get(
+            r#"{"success":true,"data":[
+                {"id":"mode1","name":"Armed","features":{"alarm":true}}
+            ]}"#,
+        );
+        let client = authenticated_mocked_client(mock);
+        let modes = client.get_automation_modes("loc-1").await.unwrap();
+        assert_eq!(modes.len(), 1);
+        assert_eq!(modes[0].name, "Armed");
+    }
+
+    #[tokio::test]
+    async fn get_automation_modes_errors_on_failure() {
+        let mock = arc_mock();
+        mock.queue_get(r#"{"success":false,"data":[]}"#);
+        let client = authenticated_mocked_client(mock);
+        assert!(matches!(
+            client.get_automation_modes("loc-1").await,
+            Err(ArloError::ApiError { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_automation_definitions_returns_raw_value() {
+        let mock = arc_mock();
+        mock.queue_get(r#"{"success":true,"data":{"foo":"bar"}}"#);
+        let client = authenticated_mocked_client(mock);
+        let v = client.get_automation_definitions().await.unwrap();
+        assert_eq!(v["foo"], "bar");
+    }
+
+    #[tokio::test]
+    async fn get_emergency_locations_returns_raw_value() {
+        let mock = arc_mock();
+        mock.queue_get(r#"{"success":true,"data":["address-1"]}"#);
+        let client = authenticated_mocked_client(mock);
+        let v = client.get_emergency_locations().await.unwrap();
+        assert!(v.is_array());
+    }
+
+    #[tokio::test]
+    async fn set_mode_v3_path_emits_notify_payload() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.set_mode("base-1", "mode1", None).await.unwrap();
+
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["active"], "mode1");
+        assert_eq!(body["to"], "base-1");
+        assert_eq!(body["from"], "U-test_web");
+        assert_eq!(body["resource"], "modes");
+        assert_eq!(body["action"], "set");
+    }
+
+    #[tokio::test]
+    async fn set_mode_v2_path_emits_active_automations_array() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client
+            .set_mode("base-1", "mode1", Some("VMB4500"))
+            .await
+            .unwrap();
+
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert!(body["activeAutomations"].is_array());
+        assert_eq!(body["activeAutomations"][0]["deviceId"], "base-1");
+        assert_eq!(body["activeAutomations"][0]["activeModes"][0], "mode1");
+    }
+
+    /// Asserts the standard `notify`-style payload shape that every
+    /// camera-control command emits: `to`, `from`, `resource`,
+    /// `action`, `publishResponse`, `transId`, plus `properties`
+    /// matching `expected_props`.
+    fn assert_notify_payload(
+        body: &Value,
+        camera_id: &str,
+        expected_action: &str,
+        expected_props: &Value,
+    ) {
+        assert_eq!(body["to"], camera_id);
+        assert_eq!(body["from"], "U-test_web");
+        assert_eq!(body["resource"], format!("cameras/{camera_id}"));
+        assert_eq!(body["action"], expected_action);
+        assert_eq!(body["publishResponse"], true);
+        assert!(body["transId"].is_string());
+        assert_eq!(&body["properties"], expected_props);
+    }
+
+    #[tokio::test]
+    async fn take_snapshot_emits_full_frame_snapshot_property() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.take_snapshot("CAM-1").await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_notify_payload(
+            &body,
+            "CAM-1",
+            "set",
+            &json!({"activityState":"fullFrameSnapshot"}),
+        );
+    }
+
+    #[tokio::test]
+    async fn full_frame_snapshot_emits_same_property() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.full_frame_snapshot("CAM-1").await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["properties"]["activityState"], "fullFrameSnapshot");
+    }
+
+    #[tokio::test]
+    async fn start_record_emits_start_record_property() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.start_record("CAM-1").await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["properties"]["activityState"], "startRecord");
+    }
+
+    #[tokio::test]
+    async fn stop_record_emits_stop_record_property() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.stop_record("CAM-1").await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["properties"]["activityState"], "stopRecord");
+    }
+
+    #[tokio::test]
+    async fn restart_device_emits_empty_properties() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.restart_device("CAM-1").await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert!(body["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn notify_routes_through_options_then_post_with_payload() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client
+            .notify("CAM-1", "set", Some(json!({"motionDetected":false})))
+            .await
+            .unwrap();
+
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].method, Method::OPTIONS);
+        assert_eq!(calls[1].method, Method::POST);
+        let body = parse_body_json(calls[1].body.as_ref());
+        assert_eq!(body["properties"]["motionDetected"], false);
+    }
+
+    #[tokio::test]
+    async fn siren_on_emits_alarm_pattern() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.siren_on("BS-1", 30, 8).await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["properties"]["sirenState"], "on");
+        assert_eq!(body["properties"]["duration"], 30);
+        assert_eq!(body["properties"]["volume"], 8);
+        assert_eq!(body["properties"]["pattern"], "alarm");
+    }
+
+    #[tokio::test]
+    async fn siren_off_emits_off_state() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.siren_off("BS-1").await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["properties"]["sirenState"], "off");
+    }
+
+    #[tokio::test]
+    async fn turn_on_disables_privacy_shield() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.turn_on("CAM-1").await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["properties"]["privacyActive"], false);
+    }
+
+    #[tokio::test]
+    async fn turn_off_enables_privacy_shield() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.turn_off("CAM-1").await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["properties"]["privacyActive"], true);
+    }
+
+    #[tokio::test]
+    async fn set_spotlight_with_brightness_remaps_to_intensity_0_100() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client
+            .set_spotlight("CAM-1", true, Some(255))
+            .await
+            .unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        let spot = &body["properties"]["spotlight"];
+        assert_eq!(spot["enabled"], true);
+        assert_eq!(spot["intensity"], 100); // 255 → 100%
+    }
+
+    #[tokio::test]
+    async fn set_spotlight_without_brightness_omits_intensity() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.set_spotlight("CAM-1", false, None).await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        let spot = &body["properties"]["spotlight"];
+        assert_eq!(spot["enabled"], false);
+        assert!(spot.get("intensity").is_none());
+    }
+
+    #[tokio::test]
+    async fn set_floodlight_dual_brightness_fields() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client
+            .set_floodlight("CAM-1", true, Some(128))
+            .await
+            .unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        let flood = &body["properties"]["floodlight"];
+        assert_eq!(flood["on"], true);
+        assert_eq!(flood["brightness1"], flood["brightness2"]);
+        assert!(flood["brightness1"].as_u64().unwrap() <= 100);
+    }
+
+    #[tokio::test]
+    async fn set_nightlight_combines_optional_fields() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client
+            .set_nightlight(
+                "CAM-1",
+                true,
+                Some(200),
+                Some((10, 20, 30)),
+                Some("3500"),
+                Some("rainbow"),
+            )
+            .await
+            .unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        let nl = &body["properties"]["nightLight"];
+        assert_eq!(nl["enabled"], true);
+        assert_eq!(nl["brightness"], 200);
+        assert_eq!(nl["mode"], "rainbow");
+        assert_eq!(nl["temperature"], "3500");
+        assert_eq!(nl["rgb"]["red"], 10);
+        assert_eq!(nl["rgb"]["green"], 20);
+        assert_eq!(nl["rgb"]["blue"], 30);
+    }
+
+    #[tokio::test]
+    async fn set_volume_clamps_to_100() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.set_volume("CAM-1", false, 250).await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        let speaker = &body["properties"]["speaker"];
+        assert_eq!(speaker["mute"], false);
+        assert_eq!(speaker["volume"], 100);
+    }
+
+    #[tokio::test]
+    async fn set_camera_brightness_passes_signed_value() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.set_camera_brightness("CAM-1", -2).await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["properties"]["brightness"], -2);
+    }
+
+    #[tokio::test]
+    async fn set_power_save_mode_sends_mode_value() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.set_power_save_mode("CAM-1", 3).await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["properties"]["powerSaveMode"], 3);
+    }
+
+    #[tokio::test]
+    async fn set_image_invert_sends_flip_flag() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.set_image_invert("CAM-1", true).await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["properties"]["flip"], true);
+    }
+
+    #[tokio::test]
+    async fn play_track_with_track_id_emits_play_track_action() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client
+            .play_track("BABY-1", Some("track-9"), 42)
+            .await
+            .unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["resource"], "audioPlayback/player");
+        assert_eq!(body["action"], "playTrack");
+        assert_eq!(body["properties"]["trackId"], "track-9");
+        assert_eq!(body["properties"]["position"], 42);
+    }
+
+    #[tokio::test]
+    async fn play_track_without_track_id_resumes_with_play_action() {
+        let mock = arc_mock();
+        mock.queue_post("{}");
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.play_track("BABY-1", None, 0).await.unwrap();
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["action"], "play");
+        // properties is the default empty object
+        assert!(body["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pause_next_prev_track_emit_correct_actions() {
+        for (op, expected) in [
+            ("pause", "pause"),
+            ("next", "nextTrack"),
+            ("prev", "prevTrack"),
+        ] {
+            let mock = arc_mock();
+            mock.queue_post("{}");
+            let client = authenticated_mocked_client(Arc::clone(&mock));
+            match op {
+                "pause" => client.pause_track("BABY-1").await.unwrap(),
+                "next" => client.next_track("BABY-1").await.unwrap(),
+                "prev" => client.previous_track("BABY-1").await.unwrap(),
+                _ => unreachable!(),
+            }
+            let body = parse_body_json(mock.calls()[1].body.as_ref());
+            assert_eq!(body["resource"], "audioPlayback/player");
+            assert_eq!(body["action"], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn start_stream_errors_before_login() {
+        let mock = arc_mock();
+        let client = crate::client::test_helpers::mocked_client(Arc::clone(&mock));
+        // No user_id set — start_stream short-circuits before any HTTP.
+        let err = client.start_stream("CAM-1").await.unwrap_err();
+        assert!(matches!(err, ArloError::AuthError(_)));
+        assert!(mock.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_ambient_sensor_history_returns_none_for_empty_payload() {
+        let mock = arc_mock();
+        mock.queue_get(r#"{"success":true,"properties":{"payload":[]}}"#);
+        let client = authenticated_mocked_client(mock);
+        let res = client.get_ambient_sensor_history("CAM-1").await.unwrap();
+        assert!(res.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_ambient_sensor_history_errors_on_non_success() {
+        let mock = arc_mock();
+        mock.queue_get(r#"{"success":false}"#);
+        let client = authenticated_mocked_client(mock);
+        assert!(matches!(
+            client.get_ambient_sensor_history("CAM-1").await,
+            Err(ArloError::ApiError { .. })
+        ));
+    }
 }

@@ -97,3 +97,117 @@ impl ArloClient {
         LocalHubClient::new(&cert.certificate, hub_ip, &token.token)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::test_helpers::{authenticated_mocked_client, parse_body_json};
+    use crate::client::transport::test_support::MockTransport;
+    use std::sync::Arc;
+
+    /// Minimal self-signed PEM certificate copied verbatim from
+    /// `local_hub::tests::SAMPLE_CERT_PEM`. Used as the cloud-issued
+    /// certificate Arlo would return on `/security/cert/create`. The
+    /// pinned-leaf verifier accepts any well-formed PEM here — we don't
+    /// open a real TLS connection in this test.
+    const PINNED_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBhTCCASugAwIBAgIUcDdqPKL5e7wMpQX+Tw7SWxxSlzowCgYIKoZIzj0EAwIw\n\
+EjEQMA4GA1UEAwwHdGVzdC1jYTAeFw0yNTAxMDEwMDAwMDBaFw0zNTAxMDEwMDAw\n\
+MDBaMBIxEDAOBgNVBAMMB3Rlc3QtY2EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNC\n\
+AAS4dEPHc/B5n9pVYaUdU1JL2P2oH9MzPJgU6GhO8r+jJFmBkOtRCqCK2hY3sOxy\n\
+LKy3bhPwXqbiPkoH3W3dLqWso2gwZjAdBgNVHQ4EFgQUL/0eJp0pPv6X1JSgGmgL\n\
+mQzd5K0wHwYDVR0jBBgwFoAUL/0eJp0pPv6X1JSgGmgLmQzd5K0wDwYDVR0TAQH/\n\
+BAUwAwEB/zATBgNVHSUEDDAKBggrBgEFBQcDATAKBggqhkjOPQQDAgNHADBEAiAh\n\
+Sl/2gKR6QqZ3UKt/Tn6gwOWzLnQI3JxgRC3qAVi24wIgGBmuQDg/oM4l0MUL1xRH\n\
+nIYANCqJYEogTQfBuZJ8KB8=\n\
+-----END CERTIFICATE-----\n";
+
+    #[tokio::test]
+    async fn create_local_connection_cert_returns_typed_data() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(
+            r#"{"success":true,"data":{"certificate":"-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----","serialNumber":"01:02"}}"#,
+        );
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let data = client.create_local_connection_cert("dev-1").await.unwrap();
+        assert!(data.certificate.contains("BEGIN CERTIFICATE"));
+        assert_eq!(data.serial_number, "01:02");
+
+        // Wire payload spoofs the iOS-style cert request shape.
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["name"], "arlo-dev-1");
+        assert_eq!(body["cn"], "Unknown");
+        assert_eq!(body["o"], "Arlo");
+        assert_eq!(body["c"], "US");
+    }
+
+    #[tokio::test]
+    async fn create_local_connection_cert_errors_on_failure() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(r#"{"success":false,"data":null}"#);
+        let client = authenticated_mocked_client(mock);
+        assert!(matches!(
+            client.create_local_connection_cert("dev-1").await,
+            Err(ArloError::ApiError { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_local_connection_cert_errors_when_data_missing() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(r#"{"success":true,"data":null}"#);
+        let client = authenticated_mocked_client(mock);
+        assert!(matches!(
+            client.create_local_connection_cert("dev-1").await,
+            Err(ArloError::ApiError { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_ratls_token_returns_typed_data() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(
+            r#"{"success":true,"data":{"token":"ratls-tok","exp":"2026-12-31T00:00:00Z","certSerialNumber":"01:02"}}"#,
+        );
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let data = client.get_ratls_token("dev-1").await.unwrap();
+        assert_eq!(data.token, "ratls-tok");
+        assert_eq!(data.cert_serial_number.as_deref(), Some("01:02"));
+
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["device_id"], "dev-1");
+    }
+
+    #[tokio::test]
+    async fn get_ratls_token_errors_on_failure() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(r#"{"success":false,"data":null}"#);
+        let client = authenticated_mocked_client(mock);
+        assert!(matches!(
+            client.get_ratls_token("dev-1").await,
+            Err(ArloError::ApiError { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_hub_composes_cert_then_token_then_lan_client() {
+        let mock = Arc::new(MockTransport::new());
+        // create_local_connection_cert (POST → OPTIONS + body)
+        mock.queue_post(format!(
+            r#"{{"success":true,"data":{{"certificate":{cert:?},"serialNumber":"01"}}}}"#,
+            cert = PINNED_PEM
+        ));
+        // get_ratls_token (POST → OPTIONS + body)
+        mock.queue_post(
+            r#"{"success":true,"data":{"token":"ratls-tok","exp":"2026-12-31T00:00:00Z"}}"#,
+        );
+
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let lan = client.local_hub("dev-1", "192.168.1.42").await.unwrap();
+        // We don't poke at LocalHubClient internals here — the full
+        // pinned-TLS path is covered in client/local_hub.rs. We just
+        // confirm the composition succeeded and both cloud calls fired.
+        let _ = lan;
+        assert_eq!(mock.calls().len(), 4, "2 OPTIONS + 2 POST");
+    }
+}
