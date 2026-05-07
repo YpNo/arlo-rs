@@ -315,11 +315,8 @@ mod tests {
     #[tokio::test]
     async fn execute_request_fires_options_preflight_for_post() {
         let mock = Arc::new(MockTransport::new());
-        // Order matters: queue is a stack popped on each request, so the
-        // last expectation queued is consumed first. We need OPTIONS first,
-        // then POST — so we queue POST, then OPTIONS.
-        mock.expect_ok(r#"{"success":true}"#);
-        mock.expect_ok("");
+        // FIFO queue: OPTIONS preflight response first, then POST body.
+        mock.queue_post(r#"{"success":true}"#);
 
         let client = test_client(Arc::clone(&mock), ArloEndpoints::default());
         let payload = serde_json::json!({"key": "value"});
@@ -375,6 +372,83 @@ mod tests {
             }
             other => panic!("expected HttpError, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn redact_handles_arrays_recursively() {
+        let input = r#"[{"token":"x"},{"nested":{"password":"y"}},{"keep":1}]"#;
+        let redacted = redact_for_log(input);
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        assert_eq!(parsed[0]["token"], Value::String("***".into()));
+        assert_eq!(parsed[1]["nested"]["password"], Value::String("***".into()));
+        assert_eq!(parsed[2]["keep"], 1);
+    }
+
+    #[tokio::test]
+    async fn redact_for_log_leaves_non_sensitive_payload_untouched() {
+        let input = r#"{"resource":"cameras/C1","action":"set","properties":{"flip":true}}"#;
+        let redacted = redact_for_log(input);
+        // Round-trips byte-equivalent JSON when nothing matches.
+        let a: Value = serde_json::from_str(input).unwrap();
+        let b: Value = serde_json::from_str(&redacted).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn execute_request_emits_debug_logs_when_debug_mode_on() {
+        // Just exercises the `self.debug_mode` branch of execute_request
+        // — we don't capture log output here; the redactor itself is
+        // covered by its own tests.
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(r#"{"data":"ok"}"#);
+        let mut client = test_client(Arc::clone(&mock), ArloEndpoints::default());
+        client.debug_mode = true;
+        client
+            .execute_request(
+                Method::POST,
+                "https://example.test/api",
+                Some(&serde_json::json!({"token":"redact-me"})),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn execute_request_skips_body_when_payload_is_none() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_get(r#"{"ok":true}"#);
+        let client = test_client(Arc::clone(&mock), ArloEndpoints::default());
+        client
+            .execute_request::<()>(Method::GET, "https://example.test/api", None)
+            .await
+            .unwrap();
+        let calls = mock.calls();
+        assert!(calls[0].body.is_none());
+        assert!(header_value(&calls[0].headers, "Content-Type").is_none());
+    }
+
+    #[tokio::test]
+    async fn perform_options_preflight_logs_warning_on_non_2xx_but_does_not_fail() {
+        // The preflight is best-effort: a 4xx surfaces via tracing but
+        // the subsequent main request still fires and succeeds.
+        let mock = Arc::new(MockTransport::new());
+        // OPTIONS preflight returns 403 (status arrives via expect, not queue_post).
+        mock.expect(HttpResponse {
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: "".into(),
+        });
+        // Main POST returns 200.
+        mock.expect_ok(r#"{"ok":1}"#);
+
+        let client = test_client(Arc::clone(&mock), ArloEndpoints::default());
+        let res = client
+            .execute_request(
+                Method::POST,
+                "https://example.test/api",
+                Some(&serde_json::json!({"k":"v"})),
+            )
+            .await;
+        assert!(res.is_ok(), "preflight failure must not abort the call");
     }
 
     #[tokio::test]

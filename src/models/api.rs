@@ -99,3 +99,34 @@ pub struct AmbientSensorHistoryResponse {
 pub struct AmbientSensorHistoryProperties {
     pub payload: Option<Vec<String>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_url_as_str_returns_inner_slice() {
+        let s = StreamUrl("rtsps://camera/stream".into());
+        assert_eq!(s.as_str(), "rtsps://camera/stream");
+    }
+
+    #[test]
+    fn stream_url_into_inner_consumes_to_owned_string() {
+        let s = StreamUrl("https://hls/play.m3u8".into());
+        let owned: String = s.into_inner();
+        assert_eq!(owned, "https://hls/play.m3u8");
+    }
+
+    #[test]
+    fn stream_url_display_emits_inner_string() {
+        let s = StreamUrl("dash://manifest.mpd".into());
+        assert_eq!(format!("{s}"), "dash://manifest.mpd");
+    }
+
+    #[test]
+    fn stream_url_clone_and_partial_eq() {
+        let a = StreamUrl("rtsp://a".into());
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+}

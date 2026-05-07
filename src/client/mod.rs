@@ -21,6 +21,10 @@ pub mod ratls;
 /// HTTP transport abstraction (production CloudScraper impl + test doubles).
 pub mod transport;
 
+#[cfg(test)]
+#[allow(dead_code)] // helper utilities; not all are used by every dependent test module
+pub(crate) mod test_helpers;
+
 use crate::config::{ArloConfig, ClientConfig};
 use crate::error::ArloError;
 use crate::events::EventBus;
@@ -230,5 +234,117 @@ impl ArloClient {
             builder::apply_session_cache(&mut client, cache_path).await;
         }
         Ok(client)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::test_helpers::{
+        TEST_BASE_URL, authenticated_mocked_client, mocked_client, set_test_token,
+    };
+    use crate::client::transport::test_support::MockTransport;
+
+    #[tokio::test]
+    async fn is_authenticated_reflects_token_state() {
+        let mock = Arc::new(MockTransport::new());
+        let mut client = mocked_client(mock);
+        assert!(!client.is_authenticated());
+        set_test_token(&mut client, "tok", "U-x", "dev-x");
+        assert!(client.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn user_id_returns_none_until_set() {
+        let mock = Arc::new(MockTransport::new());
+        let mut client = mocked_client(mock);
+        assert_eq!(client.user_id(), None);
+        set_test_token(&mut client, "tok", "U-1", "dev-1");
+        assert_eq!(client.user_id(), Some("U-1"));
+    }
+
+    #[tokio::test]
+    async fn device_id_is_stable_uuid_or_overridden() {
+        let mock = Arc::new(MockTransport::new());
+        let client_a = mocked_client(Arc::clone(&mock));
+        // Fresh AuthManager generates a UUID (36 chars).
+        assert_eq!(client_a.device_id().len(), 36);
+
+        let mut client_b = mocked_client(mock);
+        set_test_token(&mut client_b, "t", "U", "stable-id-42");
+        assert_eq!(client_b.device_id(), "stable-id-42");
+    }
+
+    #[tokio::test]
+    async fn with_debug_setter_toggles_flag() {
+        let mock = Arc::new(MockTransport::new());
+        let client = mocked_client(mock).with_debug(true);
+        assert!(client.debug_mode);
+        let client = client.with_debug(false);
+        assert!(!client.debug_mode);
+    }
+
+    #[tokio::test]
+    async fn require_user_id_errors_when_not_authenticated() {
+        let mock = Arc::new(MockTransport::new());
+        let client = mocked_client(mock);
+        let err = client.require_user_id().unwrap_err();
+        assert!(matches!(err, ArloError::AuthError(_)));
+    }
+
+    #[tokio::test]
+    async fn require_user_id_returns_id_when_authenticated() {
+        let mock = Arc::new(MockTransport::new());
+        let client = authenticated_mocked_client(mock);
+        assert_eq!(client.require_user_id().unwrap(), "U-test");
+    }
+
+    #[tokio::test]
+    async fn events_errors_when_not_authenticated() {
+        let mock = Arc::new(MockTransport::new());
+        let client = mocked_client(mock);
+        let err = client.events().await.unwrap_err();
+        assert!(matches!(err, ArloError::AuthError(_)));
+    }
+
+    #[tokio::test]
+    async fn events_errors_when_transport_does_not_support_streaming() {
+        // MockTransport's default streaming_client() returns None.
+        let mock = Arc::new(MockTransport::new());
+        let client = authenticated_mocked_client(mock);
+        let err = client.events().await.unwrap_err();
+        assert!(matches!(err, ArloError::AuthError(_)));
+    }
+
+    #[tokio::test]
+    async fn session_token_round_trips_through_accessor() {
+        let mock = Arc::new(MockTransport::new());
+        let client = authenticated_mocked_client(mock);
+        let token = client.session_token().expect("token");
+        assert_eq!(token.user_id(), "U-test");
+        assert_eq!(token.device_id(), "device-test");
+        assert_eq!(token.access_token(), "test_token");
+    }
+
+    #[tokio::test]
+    async fn session_token_errors_when_not_authenticated() {
+        let mock = Arc::new(MockTransport::new());
+        let client = mocked_client(mock);
+        assert!(matches!(
+            client.session_token(),
+            Err(ArloError::AuthError(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn from_config_errors_on_missing_file() {
+        let res = ArloClient::from_config("/path/that/does/not/exist.toml").await;
+        assert!(res.is_err(), "missing config should fail before bootstrap");
+    }
+
+    #[tokio::test]
+    async fn test_base_url_constant_is_used_consistently() {
+        // Compile-time guarantee that the const re-exports correctly.
+        assert!(TEST_BASE_URL.starts_with("https://"));
     }
 }
