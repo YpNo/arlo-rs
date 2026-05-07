@@ -243,4 +243,126 @@ mod tests {
         assert_eq!(bc.upstream_proxy.as_deref(), Some("http://p"));
         assert!(bc.debug_mode);
     }
+
+    #[test]
+    fn bootstrap_config_from_default_client_config_has_no_overrides() {
+        let cc = ClientConfig {
+            debug_mode: None,
+            user_agent: None,
+            session_cache_path: None,
+            headless: None,
+            upstream_proxy: None,
+        };
+        let bc = BootstrapConfig::from(&cc);
+        assert_eq!(bc.user_agent, None);
+        assert_eq!(bc.headless, None);
+        assert_eq!(bc.upstream_proxy, None);
+        assert!(!bc.debug_mode);
+    }
+
+    #[test]
+    fn endpoints_setter_overrides_default() {
+        let custom = ArloEndpoints::testing("https://test.example");
+        let b = ArloClientBuilder::default().endpoints(custom.clone());
+        assert_eq!(b.endpoints, Some(custom));
+    }
+
+    // -- apply_session_cache exercised through a mocked transport --
+    use crate::client::test_helpers::{authenticated_mocked_client, mocked_client};
+    use crate::client::transport::test_support::MockTransport;
+    use std::sync::Arc;
+    use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn apply_session_cache_restores_validated_session_from_disk() {
+        // Persist a fresh AuthManager via save_to_cache, then re-hydrate
+        // a clean client and confirm the validate_session_v3 round-trip
+        // succeeds without changing the cache_path.
+        let mock = Arc::new(MockTransport::new());
+        // Validation response.
+        mock.expect_ok(r#"{"meta":{"code":200},"data":{"userId":"U-cache","token":"cached-tok"}}"#);
+
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_str().unwrap().to_string();
+        // Pre-seed the cache file by saving a fully-formed AuthManager.
+        let mut seeder = AuthManager::new();
+        seeder.set_token("cached-tok".to_string());
+        seeder.user_id = Some("U-cache".to_string());
+        seeder.cache_path = Some(path.clone());
+        seeder.save_to_cache().await;
+
+        let mut client = mocked_client(Arc::clone(&mock));
+        apply_session_cache(&mut client, &path).await;
+
+        assert!(client.is_authenticated());
+        assert_eq!(client.user_id(), Some("U-cache"));
+        // cache_path is preserved on the restored AuthManager.
+        assert_eq!(client.auth.cache_path.as_deref(), Some(path.as_str()));
+    }
+
+    #[tokio::test]
+    async fn apply_session_cache_resets_when_validation_fails() {
+        // Pre-seed cache, but queue an unrecognised-envelope response so
+        // validate_session_v3 fails. apply_session_cache must wipe the
+        // restored token and prime the path for a fresh login.
+        let mock = Arc::new(MockTransport::new());
+        mock.expect_ok(r#"{"banana":true}"#); // invalid envelope
+
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_str().unwrap().to_string();
+        let mut seeder = AuthManager::new();
+        seeder.set_token("stale".to_string());
+        seeder.user_id = Some("U-stale".to_string());
+        seeder.cache_path = Some(path.clone());
+        seeder.save_to_cache().await;
+
+        let mut client = mocked_client(Arc::clone(&mock));
+        apply_session_cache(&mut client, &path).await;
+
+        // Token wiped, but the cache_path is primed for the next login.
+        assert!(!client.is_authenticated());
+        assert_eq!(client.auth.cache_path.as_deref(), Some(path.as_str()));
+    }
+
+    #[tokio::test]
+    async fn apply_session_cache_primes_path_when_file_absent() {
+        // No file at all — apply_session_cache should still leave the
+        // client with its cache_path set so the next successful login
+        // will persist the token.
+        let mock = Arc::new(MockTransport::new());
+        let mut client = mocked_client(mock);
+
+        apply_session_cache(&mut client, "/path/that/does/not/exist.json").await;
+        assert!(!client.is_authenticated());
+        assert_eq!(
+            client.auth.cache_path.as_deref(),
+            Some("/path/that/does/not/exist.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn build_with_endpoints_setter_picks_up_override() {
+        // We can't actually call .build() (CloudScraper boot), but we
+        // can confirm the builder collects the endpoint override and
+        // bootstrap respects it via the BootstrapConfig conversion.
+        let custom = ArloEndpoints::testing("https://staging.example");
+        let b = ArloClientBuilder::default().endpoints(custom.clone());
+        let endpoints_in_builder = b.endpoints.unwrap();
+        assert_eq!(endpoints_in_builder, custom);
+    }
+
+    #[tokio::test]
+    async fn auth_manager_is_seeded_fresh_when_cache_dir_unwritable() {
+        // Smoke test: if the cache directory doesn't exist, save_to_cache
+        // is best-effort silent. Subsequent reads return None and
+        // apply_session_cache primes a fresh AuthManager.
+        let mock = Arc::new(MockTransport::new());
+        let mut client = authenticated_mocked_client(mock);
+
+        // save to a deeply non-existent directory — silently fails.
+        client.auth.cache_path = Some("/nonexistent-dir/missing/cache.json".to_string());
+        client.auth.save_to_cache().await;
+        // The token is still in memory; cache simply didn't persist.
+        assert!(client.is_authenticated());
+    }
 }

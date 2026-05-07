@@ -152,15 +152,22 @@ pub(crate) mod test_support {
     //! [`crate::client::api`] is exercised against real headers,
     //! preflight logic, and JSON envelopes — not stubbed away.
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    /// Records every dispatched request and returns canned responses in
-    /// the order they were queued. Matches mockito's stricter "expect
-    /// exactly N calls" semantics by panicking if the queue runs dry.
+    /// Records every dispatched request and returns canned responses
+    /// **in FIFO order** — queue them in the order the code under test
+    /// will consume them. For state-mutating requests (POST/PUT/DELETE)
+    /// the orchestration layer issues an OPTIONS preflight first, then
+    /// the main request: queue the empty-body OPTIONS response first,
+    /// then the main response.
+    ///
+    /// Use [`MockTransport::queue_post`] / [`MockTransport::queue_get`]
+    /// helpers to avoid getting the ordering wrong by hand.
     #[derive(Debug, Default)]
     pub struct MockTransport {
         calls: Mutex<Vec<HttpRequest>>,
-        responses: Mutex<Vec<HttpResponse>>,
+        responses: Mutex<VecDeque<HttpResponse>>,
     }
 
     impl MockTransport {
@@ -169,8 +176,9 @@ pub(crate) mod test_support {
         }
 
         /// Queues `response` to be returned on the next [`request`] call.
+        /// FIFO — first-queued is first-consumed.
         pub fn expect(&self, response: HttpResponse) {
-            self.responses.lock().unwrap().push(response);
+            self.responses.lock().unwrap().push_back(response);
         }
 
         /// Convenience for the common "200 OK with this body" case.
@@ -179,6 +187,26 @@ pub(crate) mod test_support {
                 status: StatusCode::OK,
                 body: body.into(),
             });
+        }
+
+        /// Convenience for "200 OK with no body" — used for OPTIONS
+        /// preflight responses.
+        pub fn expect_empty(&self) {
+            self.expect_ok("");
+        }
+
+        /// Queue the response pair for a state-mutating request: an
+        /// empty OPTIONS preflight response followed by `body` for the
+        /// real call. Equivalent to `expect_empty(); expect_ok(body)`.
+        pub fn queue_post(&self, body: impl Into<String>) {
+            self.expect_empty();
+            self.expect_ok(body);
+        }
+
+        /// Queue the single response for a GET (no preflight). Same as
+        /// [`Self::expect_ok`]; named for symmetry with `queue_post`.
+        pub fn queue_get(&self, body: impl Into<String>) {
+            self.expect_ok(body);
         }
 
         /// Returns every recorded request in dispatch order.
@@ -197,6 +225,15 @@ pub(crate) mod test_support {
             }
             drained
         }
+
+        /// True if every queued response was consumed. Useful as a
+        /// trailing assertion in tests — kept `pub` even when unused so
+        /// new tests can reach for it without having to refactor the
+        /// helper module.
+        #[allow(dead_code)]
+        pub fn responses_drained(&self) -> bool {
+            self.responses.lock().unwrap().is_empty()
+        }
     }
 
     #[async_trait]
@@ -211,7 +248,7 @@ pub(crate) mod test_support {
             self.responses
                 .lock()
                 .unwrap()
-                .pop()
+                .pop_front()
                 .ok_or_else(|| ArloError::ApiError {
                     code: 500,
                     message: "MockTransport: no canned response queued".into(),

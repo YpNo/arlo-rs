@@ -53,6 +53,7 @@ pub enum ConnectionState {
 }
 
 /// SSE telemetry bus. See module docs.
+#[derive(Debug)]
 pub struct EventBus {
     sender: broadcast::Sender<ArloEvent>,
     state_rx: watch::Receiver<ConnectionState>,
