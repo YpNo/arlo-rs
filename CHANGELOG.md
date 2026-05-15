@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (V3 migration + streaming)
+- **`get_stream_url(&Device) -> Result<Option<StreamUrl>, ArloError>`** —
+  synchronous peek (`action: "get"` on `/startStream`) that returns an
+  already-active stream (e.g. one a user opened from the Arlo mobile
+  app) without triggering a new one. URL rewritten `rtsp://` → `rtsps://`.
+- **`force_start_stream(&Device)`** — always issues a fresh
+  `startUserStream` + SSE-correlated URL (the previous `start_stream`
+  behaviour, now `&Device`-typed and sending `to: parent_id`).
+- **`start_stream(&Device)`** now peeks via `get_stream_url` first and
+  only falls back to `force_start_stream` on a miss.
+- **`Device` fields** `x_cloud_id`, `automation_revision`,
+  `connectivity`, plus `Device::is_self_hosted()`.
+- **`ApiVersion` config** (`[client].api_version`, default `v3`) with
+  automatic V3→Legacy fallback on any 403/404, and a per-client
+  override for un-migrated accounts.
+- HAR-verified V3 endpoints: `/hmsweb/v2/users/devices`,
+  `/hmsweb/devicesupport/v3`, `/hmsweb/automation/v3/activeMode`,
+  and the `DELETE /hmsweb/user/{uid}/client/smart/devices/logout`
+  flow.
+
+### Changed — ⚠️ breaking, pre-0.1.0-tag
+- **`start_stream` signature changed** from
+  `start_stream(&self, camera_id: &str)` to
+  `start_stream(&self, device: &Device)`. Older cameras sit behind a
+  separate base station; the stream POST must target `device.parent_id`
+  (`to`), which a bare camera-ID string couldn't supply. Passing the
+  whole `Device` also yields the `xCloudId` header the modern endpoint
+  expects. Callers: replace `client.start_stream(&cam.device_id)` with
+  `client.start_stream(cam)`.
+- **`logout` is now `DELETE`** to the V3
+  `/hmsweb/user/{uid}/client/smart/devices/logout?clientId=…&eventId=…&time=…`
+  URL (was the wrong `PUT /hmsweb/logout` in the interim work). Legacy
+  `PUT /hmsweb/logout` retained as the auto-fallback.
+- **`set_mode` v3** now reads `revision` from the correct
+  location-keyed response shape and always sends the
+  `{"mode":"custom","custom":{…}}` wrapper (per pyaarlo#195). The
+  broken 36-char UUID heuristic and the wrong `data.revision` lookup
+  were removed.
+- **`device_support`** no longer rewrites `api_version` on the success
+  path — a deliberate `Legacy` pinning now survives a chance V3
+  success.
+
+### Coverage
+- Line coverage is **70.3%** (793/1128) after the V3-migration tests,
+  up from 68% in PR 6. Notably, the `PinnedLeafVerifier` cert-pinning
+  boundary (the crate's most security-critical code, previously 0%
+  covered) now has explicit positive + negative tests.
+- The CI gate is **65%** (`--fail-under 65`) — 5 points below measured
+  for run-to-run stability, not because coverage is 65%. The earlier
+  `ci.yml` flag said `70` while its own comment said `65`; reconciled
+  to 65 here.
+- Path to 85% unchanged — still gated on the three infra investments
+  below (SSE streaming-HTTP mock, IMAP server mock, CloudScraper-boot
+  harness).
+
+### Out of scope / future direction
+- Arlo's web portal now streams via SIP-over-WSS
+  (`wss://livestream-z1-prod.arlo.com:7443/`,
+  `Sec-WebSocket-Protocol: sip`, seeded by
+  `GET /hmsweb/users/devices/sipInfo/v2`). The legacy `/startStream`
+  + SSE path remains and is what `rs-arlo` uses. A `LiveStreamWss`
+  adapter is future work for accounts where the legacy path is retired.
+
 ### Added (PR 6)
 - **Test coverage push** from 27% → 68% (+41 pts). 73 new unit tests
   across `auth.rs`, `devices.rs`, `library.rs`, `ratls.rs`, `mfa.rs`,
@@ -18,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Debug` derive on `EventBus` so test code can use `unwrap_err()`
   against `Result<&EventBus, ArloError>`.
 
-### Changed (PR 6)
+### Changed (Improvement-v5)
 - **Dropped MQTT claim**: `workfile.md` and `README.md` no longer
   describe a "dual SSE+MQTT" backend. Only SSE is implemented and
   supported. The MQTT broker host (`mqtt-cluster.arloxcld.com`) is

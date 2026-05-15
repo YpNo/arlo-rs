@@ -277,7 +277,7 @@ impl ArloClient {
         self.validate_access_token().await?;
         let _ = self.start_pairing_factor(factor_auth_code).await; // Optional Trust factor
         self.validate_session_v3().await?;
-        let _ = self.device_support_v2().await; // Secondary check to complete validation emulation
+        let _ = self.device_support().await; // Secondary check to complete validation emulation
 
         Ok(())
     }
@@ -476,20 +476,60 @@ impl ArloClient {
         })
     }
 
-    /// Step 6: Trigger the Legacy V2 device support endpoint using event tracking.
+    /// Step 6: Trigger the device support endpoint using event tracking.
     ///
     /// Triggers secondary telemetry required for full session initialization.
-    /// Like `validate_session_v3`, it dynamically handles missing `meta` field variants.
-    pub async fn device_support_v2(&self) -> Result<serde_json::Value, ArloError> {
+    /// Respects the per-instance [`crate::config::ApiVersion`]: starts on
+    /// `V3` (the default), auto-downgrades to `Legacy` on a single 403/404,
+    /// and on subsequent calls goes directly to V2 if previously pinned.
+    ///
+    /// On the **success path** we deliberately do NOT touch `api_version`
+    /// — the caller's deliberate `Legacy` setting must survive a chance
+    /// V3 success, and rewriting V3→V3 on every call is just noise.
+    pub async fn device_support(&self) -> Result<serde_json::Value, ArloError> {
         let timestamp = chrono::Utc::now().timestamp_millis();
         let event_id = format!("FE!{}", uuid::Uuid::new_v4());
+
+        // Respect a previously-pinned Legacy setting so we skip the V3 probe.
+        let pinned_legacy = *self.api_version.read().unwrap() == crate::config::ApiVersion::Legacy;
+        if pinned_legacy {
+            return self.device_support_legacy(&event_id, timestamp).await;
+        }
+
+        let url_v3 = format!(
+            "{}{}?eventId={}&time={}",
+            self.endpoints.api_host, AUTH_DEVICE_SUPPORT_V3, event_id, timestamp
+        );
+        match self.execute_request::<()>(Method::GET, &url_v3, None).await {
+            Ok(body) => crate::models::envelope::unwrap_envelope(&body),
+            Err(ArloError::HttpError { status, .. })
+                if status == reqwest::StatusCode::FORBIDDEN
+                    || status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                warn!(
+                    "device_support v3 returned {}. Pinning client to Legacy and retrying v2.",
+                    status
+                );
+                *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+                self.device_support_legacy(&event_id, timestamp).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Legacy V2 device-support call. Extracted so the V3 fallback and
+    /// the pinned-Legacy short-circuit share one code path.
+    async fn device_support_legacy(
+        &self,
+        event_id: &str,
+        timestamp: i64,
+    ) -> Result<serde_json::Value, ArloError> {
         let url = format!(
             "{}{}?eventId={}&time={}",
             self.endpoints.api_host, AUTH_DEVICE_SUPPORT_V2, event_id, timestamp
         );
-
-        let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
-        crate::models::envelope::unwrap_envelope(&body_str)
+        let body = self.execute_request::<()>(Method::GET, &url, None).await?;
+        crate::models::envelope::unwrap_envelope(&body)
     }
 
     /// Retrieve Details of a Specific 2FA Factor (Requested by workfile.md)
@@ -554,14 +594,63 @@ impl ArloClient {
         Ok(auth_data)
     }
 
-    /// Log the current active session out securely
+    /// Log the current active session out securely.
+    ///
+    /// V3 logout (verified against the May-2026 portal HAR):
+    /// `DELETE /hmsweb/user/{user_id}/client/smart/devices/logout
+    ///         ?clientId={x-user-device-id}&eventId=FE!{uuid}&time={ms}`
+    ///
+    /// The `clientId` query parameter equals the `x-user-device-id`
+    /// header value — i.e. our locally-generated [`AuthManager::device_id`].
+    /// `eventId` and `time` are the same telemetry params other v3 GETs
+    /// (`validate_session_v3`, `device_support`) emit.
+    ///
+    /// Falls back to the legacy `PUT /hmsweb/logout` when:
+    /// - the client has no `user_id` yet (rare, only if invoked before
+    ///   any auth call), or
+    /// - the per-instance `api_version` is pinned to [`ApiVersion::Legacy`].
+    ///
+    /// The local session state (token, user_id) is wiped **regardless**
+    /// of the HTTP outcome — a network-level logout failure must not
+    /// leave the client believing it's still logged in.
     #[instrument(skip(self))]
     pub async fn logout(&mut self) -> Result<(), ArloError> {
-        let url = format!("{}{}", self.endpoints.api_host, AUTH_LOGOUT);
+        let api_version = *self.api_version.read().unwrap();
+        let use_legacy =
+            api_version == crate::config::ApiVersion::Legacy || self.auth.user_id.is_none();
 
-        let _body_str = self.execute_request::<()>(Method::PUT, &url, None).await?;
+        let logout_attempt = if use_legacy {
+            let url = format!("{}{}", self.endpoints.api_host, AUTH_LOGOUT);
+            self.execute_request::<()>(Method::PUT, &url, None).await
+        } else {
+            // V3 path — `unwrap()` of user_id is safe because `use_legacy`
+            // is true whenever it's `None`.
+            let uid = self.auth.user_id.as_deref().expect("checked above");
+            let event_id = format!("FE!{}", uuid::Uuid::new_v4());
+            let time_ms = chrono::Utc::now().timestamp_millis();
+            let url = format!(
+                "{}/hmsweb/user/{}/client/smart/devices/logout?clientId={}&eventId={}&time={}",
+                self.endpoints.api_host, uid, self.auth.device_id, event_id, time_ms
+            );
+            self.execute_request::<()>(Method::DELETE, &url, None).await
+        };
 
-        // Wipe local session state
+        // V3 → Legacy auto-fallback on 403/404, mirroring get_devices /
+        // device_support. We don't retry inside the fallback branch
+        // because the local state is being wiped anyway.
+        if let Err(ArloError::HttpError { status, .. }) = &logout_attempt
+            && !use_legacy
+            && (*status == reqwest::StatusCode::FORBIDDEN
+                || *status == reqwest::StatusCode::NOT_FOUND)
+        {
+            warn!(
+                "v3 logout returned {}. Pinning client to Legacy and continuing local wipe.",
+                status
+            );
+            *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+        }
+
+        // Wipe local session state regardless of HTTP outcome.
         self.auth.clear_token();
         self.auth.user_id = None;
         self.auth.save_to_cache().await;
@@ -846,35 +935,97 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_support_v2_accepts_modern_meta_envelope() {
+    async fn device_support_does_not_overwrite_api_version_on_success() {
+        // A successful V3 round-trip must leave the per-client
+        // api_version untouched — the caller's deliberate Legacy
+        // setting must survive a chance V3 success, and rewriting
+        // V3→V3 on every call is just noise.
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_get(r#"{"meta":{"code":200},"data":{}}"#);
+
+        let client = authenticated_mocked_client(mock);
+        // Start from a non-default pinning to make the assertion meaningful.
+        *client.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+        // Pinned Legacy short-circuits to V2 — that's the documented
+        // behaviour and the api_version stays put.
+        let _ = client.device_support().await;
+        assert_eq!(
+            *client.api_version.read().unwrap(),
+            crate::config::ApiVersion::Legacy
+        );
+
+        // Round-trip the other direction: V3 success on a default client.
+        let mock2 = Arc::new(MockTransport::new());
+        mock2.queue_get(r#"{"meta":{"code":200},"data":{}}"#);
+        let client2 = authenticated_mocked_client(mock2);
+        assert_eq!(
+            *client2.api_version.read().unwrap(),
+            crate::config::ApiVersion::V3
+        );
+        client2.device_support().await.unwrap();
+        assert_eq!(
+            *client2.api_version.read().unwrap(),
+            crate::config::ApiVersion::V3,
+            "successful V3 call must not rewrite api_version"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_support_pins_legacy_on_v3_403_then_succeeds_with_v2() {
+        let mock = Arc::new(MockTransport::new());
+        // V3 attempt → 403
+        mock.expect(crate::client::transport::HttpResponse {
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: "".into(),
+        });
+        // V2 retry → 200 with data
+        mock.queue_get(r#"{"meta":{"code":200},"data":{"foo":1}}"#);
+
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let v = client.device_support().await.unwrap();
+        assert_eq!(v["foo"], 1);
+        assert_eq!(
+            *client.api_version.read().unwrap(),
+            crate::config::ApiVersion::Legacy,
+            "403 from V3 must pin the client to Legacy"
+        );
+
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].url.contains("/devicesupport/v3"));
+        assert!(calls[1].url.contains("/devicesupport/v2"));
+    }
+
+    #[tokio::test]
+    async fn device_support_accepts_modern_meta_envelope() {
         let mock = Arc::new(MockTransport::new());
         mock.queue_get(r#"{"meta":{"code":200},"data":{"foo":1}}"#);
 
         let client = authenticated_mocked_client(mock);
-        let v = client.device_support_v2().await.unwrap();
+        let v = client.device_support().await.unwrap();
         assert_eq!(v["foo"], 1);
     }
 
     #[tokio::test]
-    async fn device_support_v2_accepts_legacy_success_with_no_data() {
+    async fn device_support_accepts_legacy_success_with_no_data() {
         let mock = Arc::new(MockTransport::new());
         mock.queue_get(r#"{"success":true}"#);
 
         let client = authenticated_mocked_client(mock);
         // No `data` key — call returns Null.
-        let v = client.device_support_v2().await.unwrap();
+        let v = client.device_support().await.unwrap();
         assert!(v.is_null());
     }
 
     #[tokio::test]
-    async fn device_support_v2_rejects_failure() {
+    async fn device_support_rejects_failure() {
         let mock = Arc::new(MockTransport::new());
         mock.queue_get(r#"{"success":false}"#);
 
         let client = authenticated_mocked_client(mock);
         // The unified envelope helper raises ApiError on explicit failure.
         assert!(matches!(
-            client.device_support_v2().await,
+            client.device_support().await,
             Err(ArloError::ApiError { .. })
         ));
     }
@@ -893,15 +1044,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logout_wipes_local_state() {
+    async fn logout_v3_uses_delete_with_telemetry_query() {
         let mock = Arc::new(MockTransport::new());
-        mock.queue_post("{}"); // PUT /logout flows through the same OPTIONS preflight
+        // DELETE goes through the same OPTIONS preflight as POST/PUT.
+        mock.queue_post("{}");
 
-        let mut client = authenticated_mocked_client(mock);
+        let mut client = authenticated_mocked_client(Arc::clone(&mock));
         assert!(client.is_authenticated());
         client.logout().await.unwrap();
         assert!(!client.is_authenticated());
         assert_eq!(client.user_id(), None);
+
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 2, "OPTIONS preflight + DELETE main call");
+        // Both calls hit the v3 URL; the DELETE one carries the wire body.
+        let main = &calls[1];
+        assert_eq!(main.method, reqwest::Method::DELETE);
+        assert!(
+            main.url
+                .contains("/hmsweb/user/U-test/client/smart/devices/logout"),
+            "expected v3 logout URL, got {}",
+            main.url
+        );
+        assert!(main.url.contains("clientId=device-test"));
+        assert!(
+            main.url.contains("eventId=FE!"),
+            "telemetry eventId param missing: {}",
+            main.url
+        );
+        assert!(main.url.contains("time="));
+    }
+
+    #[tokio::test]
+    async fn logout_falls_back_to_legacy_when_pinned_legacy() {
+        let mock = Arc::new(MockTransport::new());
+        // PUT /hmsweb/logout (legacy) — preflight + main.
+        mock.queue_post("{}");
+
+        let mut client = authenticated_mocked_client(Arc::clone(&mock));
+        *client.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+
+        client.logout().await.unwrap();
+        let calls = mock.calls();
+        let main = &calls[1];
+        assert_eq!(main.method, reqwest::Method::PUT);
+        assert!(
+            main.url.ends_with("/hmsweb/logout"),
+            "legacy URL expected, got {}",
+            main.url
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_wipes_local_state_even_when_http_call_fails() {
+        let mock = Arc::new(MockTransport::new());
+        // OPTIONS preflight then a 500 on the DELETE.
+        mock.expect_ok(""); // preflight
+        mock.expect(crate::client::transport::HttpResponse {
+            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            body: "boom".into(),
+        });
+
+        let mut client = authenticated_mocked_client(mock);
+        assert!(client.is_authenticated());
+        // logout must succeed at the API surface regardless of HTTP outcome.
+        client.logout().await.unwrap();
+        assert!(!client.is_authenticated());
+        assert_eq!(client.user_id(), None);
+    }
+
+    #[tokio::test]
+    async fn logout_pins_legacy_on_v3_404() {
+        let mock = Arc::new(MockTransport::new());
+        mock.expect_ok(""); // OPTIONS preflight
+        mock.expect(crate::client::transport::HttpResponse {
+            status: reqwest::StatusCode::NOT_FOUND,
+            body: "".into(),
+        });
+
+        let mut client = authenticated_mocked_client(Arc::clone(&mock));
+        client.logout().await.unwrap();
+        // V3 → Legacy auto-downgrade fires.
+        assert_eq!(
+            *client.api_version.read().unwrap(),
+            crate::config::ApiVersion::Legacy
+        );
     }
 
     #[tokio::test]

@@ -3,6 +3,14 @@ use crate::error::ArloError;
 use serde::{Deserialize, Serialize};
 use std::fs;
 
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiVersion {
+    Legacy,
+    #[default]
+    V3,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ArloConfig {
     pub credentials: Option<CredentialsConfig>,
@@ -41,6 +49,7 @@ pub struct ClientConfig {
     pub session_cache_path: Option<String>,
     pub headless: Option<bool>,
     pub upstream_proxy: Option<String>,
+    pub api_version: Option<ApiVersion>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

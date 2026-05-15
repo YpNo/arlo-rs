@@ -35,6 +35,38 @@ pub struct Device {
 
     /// An ephemeral AWS S3 pre-signed URL to the latest captured thumbnail.
     pub presigned_last_image_url: Option<String>,
+
+    /// Cloud-zone identifier. The struct's `rename_all = "camelCase"`
+    /// maps this to the wire key `xCloudId`. Required as the `xcloudId`
+    /// request header by the modern stream/SIP endpoints. Present on
+    /// every device in `/hmsweb/v2/users/devices` since the 2025 v3
+    /// migration; absent on the older `/hmsweb/users/devices` payload.
+    pub x_cloud_id: Option<String>,
+
+    /// Monotonic revision counter for this device's automation/mode
+    /// state (wire key `automationRevision`). Reading it from the
+    /// device list avoids an extra `activeMode` GET inside
+    /// [`crate::ArloClient::set_mode`].
+    pub automation_revision: Option<u64>,
+
+    /// Free-form connectivity object (signal strength, online state, …).
+    /// Shape varies by device class, so it's surfaced as raw JSON until
+    /// a concrete consumer needs typed access.
+    pub connectivity: Option<serde_json::Value>,
+}
+
+impl Device {
+    /// True when this device hosts its own stream (no separate base
+    /// station) — i.e. `parent_id == device_id`. Modern cameras
+    /// (Arlo Pro 4, Essential, …) are self-hosted; older cameras hang
+    /// off a `VMB*` base station whose ID is the `parent_id`.
+    ///
+    /// Stream/mode calls send `to: parent_id`, so callers that only
+    /// have a camera ID can use this to decide whether the two are
+    /// interchangeable.
+    pub fn is_self_hosted(&self) -> bool {
+        self.parent_id == self.device_id
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -128,5 +160,64 @@ mod tests {
         let a = StreamUrl("rtsp://a".into());
         let b = a.clone();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn device_deserializes_v2_payload_with_new_fields() {
+        // Trimmed shape from the May-2026 /hmsweb/v2/users/devices HAR.
+        let json = r#"{
+            "deviceId": "A0A0000PA0E00",
+            "parentId": "A0A0000PA0E00",
+            "deviceType": "camera",
+            "deviceName": "outdoor-camera",
+            "uniqueId": "UXXX-000-00000000_A0A0000PA0E00",
+            "state": "provisioned",
+            "modelId": "VMC4041PA",
+            "xCloudId": "z1-cloud-abc",
+            "automationRevision": 1778155346339,
+            "connectivity": { "signalStrength": 4, "connected": true }
+        }"#;
+        let dev: Device = serde_json::from_str(json).unwrap();
+        assert_eq!(dev.x_cloud_id.as_deref(), Some("z1-cloud-abc"));
+        assert_eq!(dev.automation_revision, Some(1778155346339));
+        assert_eq!(dev.connectivity.unwrap()["signalStrength"], 4);
+    }
+
+    #[test]
+    fn device_deserializes_legacy_payload_without_new_fields() {
+        // Legacy /hmsweb/users/devices omits xCloudId/automationRevision.
+        let json = r#"{
+            "deviceId": "C1",
+            "parentId": "B1",
+            "deviceType": "camera",
+            "deviceName": "Cam1",
+            "uniqueId": "U1",
+            "state": "provisioned"
+        }"#;
+        let dev: Device = serde_json::from_str(json).unwrap();
+        assert_eq!(dev.x_cloud_id, None);
+        assert_eq!(dev.automation_revision, None);
+        assert_eq!(dev.connectivity, None);
+    }
+
+    fn device_with_parent(device_id: &str, parent_id: &str) -> Device {
+        let json = format!(
+            r#"{{"deviceId":"{device_id}","parentId":"{parent_id}",
+                 "deviceType":"camera","deviceName":"n","uniqueId":"u",
+                 "state":"provisioned"}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn is_self_hosted_true_when_parent_equals_device() {
+        let dev = device_with_parent("CAM-1", "CAM-1");
+        assert!(dev.is_self_hosted());
+    }
+
+    #[test]
+    fn is_self_hosted_false_when_behind_base_station() {
+        let dev = device_with_parent("CAM-1", "VMB4500-BASE");
+        assert!(!dev.is_self_hosted());
     }
 }

@@ -158,8 +158,8 @@ async fn public_api_full_authenticated_flow_via_static_otp() {
         Method::GET,     // get_locations
         Method::OPTIONS, // take_snapshot
         Method::POST,
-        Method::OPTIONS, // logout
-        Method::PUT,
+        Method::OPTIONS, // logout (V3: DELETE /hmsweb/user/{uid}/client/smart/devices/logout)
+        Method::DELETE,
     ];
     assert_eq!(
         calls.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>(),

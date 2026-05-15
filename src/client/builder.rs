@@ -185,6 +185,7 @@ pub(crate) async fn bootstrap(cfg: BootstrapConfig) -> Result<ArloClient, ArloEr
         auth: AuthManager::new(),
         debug_mode: cfg.debug_mode,
         event_bus: tokio::sync::OnceCell::new(),
+        api_version: std::sync::RwLock::new(crate::config::ApiVersion::default()),
     })
 }
 
@@ -236,6 +237,7 @@ mod tests {
             session_cache_path: Some(".cache".into()),
             headless: Some(false),
             upstream_proxy: Some("http://p".into()),
+            api_version: None,
         };
         let bc = BootstrapConfig::from(&cc);
         assert_eq!(bc.user_agent.as_deref(), Some("ua"));
@@ -252,6 +254,7 @@ mod tests {
             session_cache_path: None,
             headless: None,
             upstream_proxy: None,
+            api_version: None,
         };
         let bc = BootstrapConfig::from(&cc);
         assert_eq!(bc.user_agent, None);

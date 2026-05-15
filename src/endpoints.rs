@@ -9,15 +9,19 @@ pub const AUTH_START_PAIRING_FACTOR: &str = "/api/startPairingFactor";
 pub const AUTH_LOGIN_V2: &str = "/hmsweb/login/v2";
 pub const AUTH_SESSION_V3: &str = "/hmsweb/users/session/v3";
 pub const AUTH_DEVICE_SUPPORT_V2: &str = "/hmsweb/devicesupport/v2";
+pub const AUTH_DEVICE_SUPPORT_V3: &str = "/hmsweb/devicesupport/v3";
 pub const AUTH_LOGOUT: &str = "/hmsweb/logout";
 
 pub const API_DEVICES: &str = "/hmsweb/users/devices";
+pub const API_DEVICES_V2: &str = "/hmsweb/v2/users/devices";
 pub const API_START_STREAM: &str = "/hmsweb/users/devices/startStream";
 pub const API_SET_MODE: &str = "/hmsweb/users/devices/automation/active";
 pub const API_SUBSCRIBE: &str = "/hmsweb/client/subscribe";
 
 pub const API_LOCATIONS: &str = "/hmsdevicemanagement/users/{user_id}/locations";
+pub const API_AUTOMATION_V3: &str = "/hmsweb/automation/v3";
 pub const API_AUTOMATION_MODES: &str = "/hmsweb/automation/v3/modes";
+pub const API_AUTOMATION_ACTIVE_MODE: &str = "/hmsweb/automation/v3/activeMode";
 pub const API_AUTOMATION_DEFINITIONS: &str = "/hmsweb/users/automation/definitions";
 pub const API_EMERGENCY_LOCATIONS: &str = "/hmsweb/users/emergency/locations";
 

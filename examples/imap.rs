@@ -12,6 +12,13 @@ use rs_arlo::config::ArloConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), rs_arlo::error::ArloError> {
+    // Explicitly install the ring crypto provider as the process-wide default.
+    // This resolves the ambiguity panic in rustls 0.23+ when multiple providers
+    // (like aws-lc-rs from reqwest) are present in the build.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,rs_arlo=info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();

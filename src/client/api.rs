@@ -168,6 +168,24 @@ impl ArloClient {
         url: &str,
         payload: Option<&T>,
     ) -> Result<String, ArloError> {
+        self.execute_request_with_headers(method, url, payload, &[])
+            .await
+    }
+
+    /// Like [`Self::execute_request`] but appends `extra_headers` to the
+    /// standard browser header set on the **main** request (the OPTIONS
+    /// preflight is unaffected — Arlo's WAF tolerates a preflight that
+    /// doesn't enumerate every actual header). Used by the stream
+    /// endpoints, which require an `xcloudId` header derived from the
+    /// target [`crate::models::api::Device`].
+    #[instrument(skip(self, payload, extra_headers), fields(method = %method, url = %url))]
+    pub(crate) async fn execute_request_with_headers<T: Serialize>(
+        &self,
+        method: Method,
+        url: &str,
+        payload: Option<&T>,
+        extra_headers: &[(String, String)],
+    ) -> Result<String, ArloError> {
         // 1. Browser-style CORS preflight for state-mutating requests.
         if matches!(method, Method::POST | Method::PUT | Method::DELETE) {
             self.perform_options_preflight(&method, url).await?;
@@ -175,6 +193,7 @@ impl ArloClient {
 
         // 2. Build headers + body for the actual request.
         let mut headers = self.build_headers(url);
+        headers.extend_from_slice(extra_headers);
         let body = if let Some(data) = payload {
             let bytes = serde_json::to_vec(data)?;
             headers.push(("Content-Type".into(), "application/json".into()));
@@ -334,6 +353,60 @@ mod tests {
             header_value(&calls[1].headers, "Content-Type"),
             Some("application/json")
         );
+    }
+
+    #[tokio::test]
+    async fn execute_request_with_headers_appends_extra_headers_to_main_request_only() {
+        // The PR-7 seam used by the stream endpoints (xcloudId header).
+        // Extra headers land on the main POST, not the OPTIONS preflight.
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(r#"{"ok":true}"#);
+
+        let client = test_client(Arc::clone(&mock), ArloEndpoints::default());
+        let payload = serde_json::json!({"k": "v"});
+        let extra = vec![("xcloudId".to_string(), "z1-cloud".to_string())];
+        client
+            .execute_request_with_headers(
+                Method::POST,
+                "https://example.test/api",
+                Some(&payload),
+                &extra,
+            )
+            .await
+            .unwrap();
+
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 2, "OPTIONS preflight + POST");
+        // Preflight (calls[0]) must NOT carry the extra header.
+        assert_eq!(header_value(&calls[0].headers, "xcloudId"), None);
+        assert_eq!(calls[0].method, Method::OPTIONS);
+        // Main POST (calls[1]) carries both the extra header and the
+        // auto-added Content-Type.
+        assert_eq!(header_value(&calls[1].headers, "xcloudId"), Some("z1-cloud"));
+        assert_eq!(
+            header_value(&calls[1].headers, "Content-Type"),
+            Some("application/json")
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_request_with_headers_no_body_omits_content_type() {
+        let mock = Arc::new(MockTransport::new());
+        mock.expect_ok("{}");
+        let client = test_client(Arc::clone(&mock), ArloEndpoints::default());
+        client
+            .execute_request_with_headers::<()>(
+                Method::GET,
+                "https://example.test/api",
+                None,
+                &[("X-Probe".into(), "1".into())],
+            )
+            .await
+            .unwrap();
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 1, "GET → no preflight");
+        assert_eq!(header_value(&calls[0].headers, "X-Probe"), Some("1"));
+        assert_eq!(header_value(&calls[0].headers, "Content-Type"), None);
     }
 
     #[tokio::test]

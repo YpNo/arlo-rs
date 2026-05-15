@@ -274,4 +274,56 @@ nIYANCqJYEogTQfBuZJ8KB8=\n\
     fn new_rejects_empty_pem() {
         assert!(LocalHubClient::new("", "192.168.1.42", "tok").is_err());
     }
+
+    // --- PinnedLeafVerifier: the cert-pinning security boundary ---
+    //
+    // These exercise the verifier logic directly (no TLS handshake
+    // needed). It's the single most security-critical piece of code in
+    // the crate, so it gets explicit positive + negative coverage.
+
+    fn pinned_verifier(pem: &str) -> PinnedLeafVerifier {
+        let pinned = CertificateDer::from_pem_slice(pem.as_bytes())
+            .unwrap()
+            .into_owned();
+        PinnedLeafVerifier {
+            pinned,
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+        }
+    }
+
+    #[test]
+    fn verifier_accepts_byte_identical_pinned_cert() {
+        let v = pinned_verifier(SAMPLE_CERT_PEM);
+        let presented = CertificateDer::from_pem_slice(SAMPLE_CERT_PEM.as_bytes())
+            .unwrap()
+            .into_owned();
+        let name = ServerName::try_from("hub.local").unwrap();
+        let res = v.verify_server_cert(&presented, &[], &name, &[], UnixTime::now());
+        assert!(res.is_ok(), "exact pinned cert must be accepted");
+    }
+
+    #[test]
+    fn verifier_rejects_any_other_cert() {
+        let v = pinned_verifier(SAMPLE_CERT_PEM);
+        // Arbitrary non-matching DER bytes — the SmartHub presenting
+        // anything other than the pinned cloud-issued cert must fail
+        // closed (the MITM-resistance guarantee).
+        let other = CertificateDer::from(vec![0x30u8, 0x82, 0x01, 0x00, 0xde, 0xad]);
+        let name = ServerName::try_from("hub.local").unwrap();
+        let res = v.verify_server_cert(&other, &[], &name, &[], UnixTime::now());
+        let err = res.expect_err("mismatched cert must be rejected");
+        assert!(
+            format!("{err:?}").contains("does not match the pinned"),
+            "error should explain the pin mismatch: {err:?}"
+        );
+    }
+
+    #[test]
+    fn verifier_advertises_supported_schemes() {
+        let v = pinned_verifier(SAMPLE_CERT_PEM);
+        assert!(
+            !v.supported_verify_schemes().is_empty(),
+            "verifier must advertise the provider's signature schemes"
+        );
+    }
 }

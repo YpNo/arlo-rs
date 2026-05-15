@@ -34,6 +34,7 @@ pub(crate) fn mocked_client(mock: Arc<MockTransport>) -> ArloClient {
         auth: AuthManager::new(),
         debug_mode: false,
         event_bus: OnceCell::new(),
+        api_version: std::sync::RwLock::new(crate::config::ApiVersion::default()),
     }
 }
 

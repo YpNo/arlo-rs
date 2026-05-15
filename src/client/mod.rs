@@ -25,7 +25,7 @@ pub mod transport;
 #[allow(dead_code)] // helper utilities; not all are used by every dependent test module
 pub(crate) mod test_helpers;
 
-use crate::config::{ArloConfig, ClientConfig};
+use crate::config::{ApiVersion, ArloConfig, ClientConfig};
 use crate::error::ArloError;
 use crate::events::EventBus;
 use crate::models::auth::SessionToken;
@@ -62,6 +62,8 @@ pub struct ArloClient {
     /// Lazy SSE event bus. First [`Self::events`] call boots it; the bus
     /// is dropped (and its tasks aborted) when the client is dropped.
     pub(crate) event_bus: OnceCell<EventBus>,
+    /// Tracks the detected API version for fallback logic.
+    pub(crate) api_version: std::sync::RwLock<ApiVersion>,
 }
 
 impl ArloClient {
@@ -102,6 +104,7 @@ impl ArloClient {
             auth: AuthManager::new(),
             debug_mode: false,
             event_bus: OnceCell::new(),
+            api_version: std::sync::RwLock::new(ApiVersion::default()),
         }
     }
 
@@ -227,9 +230,13 @@ impl ArloClient {
             session_cache_path: None,
             headless: None,
             upstream_proxy: None,
+            api_version: None,
         });
 
         let mut client = Self::with_config(&client_conf).await?;
+        if let Some(ver) = client_conf.api_version {
+            *client.api_version.write().unwrap() = ver;
+        }
         if let Some(ref cache_path) = client_conf.session_cache_path {
             builder::apply_session_cache(&mut client, cache_path).await;
         }

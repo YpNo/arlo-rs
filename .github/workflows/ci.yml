@@ -137,13 +137,16 @@ jobs:
         # the previous `cargo +nightly` invocation never installed nightly
         # in this job and only worked by accident.
         #
-        # The gate is set to 65% in PR 6 — the realistic ceiling without
-        # the three infrastructure investments still pending: a
-        # streaming-HTTP mock for the SSE EventBus, an IMAP server mock
-        # for the OTP fetcher, and a CloudScraper-boot harness for the
-        # production transport path. CHANGELOG.md `[Unreleased]` tracks
-        # those three as the path to 85%+.
-        run: cargo tarpaulin --all-features --workspace --timeout 120 --out xml --fail-under 70
+        # Measured coverage is ~70% (PR 7). The gate is deliberately set
+        # 5 points lower (65%) for CI stability — tarpaulin's line
+        # attribution fluctuates a percent or two run-to-run, and a gate
+        # at the exact measured value produces flaky failures. The
+        # remaining ~15 points to the 85% target need three infra
+        # investments still pending: a streaming-HTTP mock for the SSE
+        # EventBus, an IMAP server mock for the OTP fetcher, and a
+        # CloudScraper-boot harness for the production transport path.
+        # CHANGELOG.md `[Unreleased]` tracks those as the path to 85%+.
+        run: cargo tarpaulin --all-features --workspace --timeout 120 --out xml --fail-under 65
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6

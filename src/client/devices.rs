@@ -33,8 +33,37 @@ impl ArloClient {
     /// `{ success: true, data: { devices: [...] } }`.
     #[instrument(skip(self))]
     pub async fn get_devices(&self) -> Result<Vec<Device>, ArloError> {
-        let url = format!("{}{}", self.endpoints.api_host, API_DEVICES);
-        let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
+        let is_v3 = *self.api_version.read().unwrap() == crate::config::ApiVersion::V3;
+
+        let url_primary = if is_v3 {
+            format!("{}{}", self.endpoints.api_host, API_DEVICES_V2)
+        } else {
+            format!("{}{}", self.endpoints.api_host, API_DEVICES)
+        };
+
+        let res = self
+            .execute_request::<()>(Method::GET, &url_primary, None)
+            .await;
+
+        let body_str = match res {
+            Ok(body) => body,
+            Err(ArloError::HttpError { status, .. })
+                if is_v3
+                    && (status == reqwest::StatusCode::FORBIDDEN
+                        || status == reqwest::StatusCode::NOT_FOUND) =>
+            {
+                warn!(
+                    "get_devices v2 returned {}. Pinning client to Legacy and retrying.",
+                    status
+                );
+                *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+                let url_fallback = format!("{}{}", self.endpoints.api_host, API_DEVICES);
+                self.execute_request::<()>(Method::GET, &url_fallback, None)
+                    .await?
+            }
+            Err(e) => return Err(e),
+        };
+
         let arr = crate::models::envelope::unwrap_envelope_array(&body_str, "devices")?;
         serde_json::from_value(arr).map_err(|e| {
             ArloError::ParseError(format!(
@@ -43,25 +72,87 @@ impl ArloClient {
         })
     }
 
-    /// Triggers a live video stream on the specified camera and returns
-    /// the playable URL.
+    /// Returns the URL of an **already-active** live stream for `device`,
+    /// or `Ok(None)` if nothing is currently streaming.
     ///
-    /// Arlo's `/startStream` endpoint is asynchronous: the POST itself only
-    /// confirms acceptance, while the actual RTSPS / HLS / DASH URL arrives
-    /// later as an SSE event correlated by `transId`. This method handles
-    /// the full round-trip — it subscribes to the event bus *before*
-    /// issuing the POST (closing the race where the SSE response could land
-    /// faster than the subscription) and then awaits the matching event up
-    /// to [`STREAM_URL_TIMEOUT`]. Returns [`ArloError::Timeout`] if no URL
-    /// arrives in time, or [`ArloError::AuthError`] if the client isn't
-    /// authenticated yet.
-    #[instrument(skip(self))]
-    pub async fn start_stream(&self, camera_id: &str) -> Result<StreamUrl, ArloError> {
+    /// This is a synchronous peek (`action: "get"` on `/startStream`):
+    /// it does **not** trigger a new stream and the URL — if any —
+    /// comes back in the POST response itself, not over SSE. Use it to
+    /// pick up a stream a user started from the Arlo mobile app.
+    ///
+    /// Mirrors pyaarlo's `_get_stream_url`: `to` is the device's
+    /// `parent_id` (the base station — equals `device_id` for
+    /// self-hosted cameras), and an `xcloudId` header derived from
+    /// `device.x_cloud_id` is attached. The returned URL is rewritten
+    /// `rtsp://` → `rtsps://`.
+    #[instrument(skip(self), fields(device = %device.device_id))]
+    pub async fn get_stream_url(&self, device: &Device) -> Result<Option<StreamUrl>, ArloError> {
+        let user_id = self.require_user_id()?;
+        let trans_id = uuid::Uuid::new_v4().to_string();
+        let url = format!("{}{}", self.endpoints.api_host, API_START_STREAM);
+
+        let payload = json!({
+            "action": "get",
+            "from": format!("{user_id}_web"),
+            "to": device.parent_id,
+            "resource": format!("cameras/{}", device.device_id),
+            "publishResponse": true,
+            "responseUrl": "",
+            "transId": trans_id,
+            "properties": { "cameraId": device.device_id },
+        });
+
+        let body = self
+            .execute_request_with_headers(
+                Method::POST,
+                &url,
+                Some(&payload),
+                &xcloud_header(device),
+            )
+            .await?;
+
+        let parsed: serde_json::Value = serde_json::from_str(&body)?;
+        Ok(extract_post_response_stream_url(&parsed)
+            .map(|raw| StreamUrl(rewrite_rtsp_to_rtsps(&raw))))
+    }
+
+    /// Triggers a live stream for `device` and returns its playable URL,
+    /// **reusing an already-active stream when one exists** (e.g. opened
+    /// from the Arlo mobile app).
+    ///
+    /// Cheap peek first via [`Self::get_stream_url`]; on a miss, defers
+    /// to [`Self::force_start_stream`] (fresh `startUserStream` +
+    /// SSE-correlated URL). Use `force_start_stream` directly to skip
+    /// the reuse check.
+    #[instrument(skip(self), fields(device = %device.device_id))]
+    pub async fn start_stream(&self, device: &Device) -> Result<StreamUrl, ArloError> {
+        if let Some(existing) = self.get_stream_url(device).await? {
+            debug!(device = %device.device_id, "Reusing already-active stream");
+            return Ok(existing);
+        }
+        self.force_start_stream(device).await
+    }
+
+    /// Always issues a fresh `startUserStream` regardless of any
+    /// already-active stream, and awaits the SSE-correlated URL.
+    ///
+    /// Arlo's `/startStream` (`action: "set"`) is asynchronous: the
+    /// POST only confirms acceptance; the real RTSPS / HLS / DASH URL
+    /// arrives later as an SSE event correlated by `transId`. This
+    /// subscribes to the event bus *before* the POST (closing the race
+    /// where the SSE response could beat the subscription) and waits up
+    /// to [`STREAM_URL_TIMEOUT`]. Returns [`ArloError::Timeout`] if no
+    /// URL arrives in time, or [`ArloError::AuthError`] if not yet
+    /// authenticated.
+    #[instrument(skip(self), fields(device = %device.device_id))]
+    pub async fn force_start_stream(&self, device: &Device) -> Result<StreamUrl, ArloError> {
         let user_id = self
             .auth
             .user_id
             .as_deref()
-            .ok_or_else(|| ArloError::AuthError("Cannot start stream before login".into()))?;
+            .ok_or_else(|| ArloError::AuthError("Cannot start stream before login".into()))?
+            .to_string();
+        let camera_id = &device.device_id;
         let trans_id = uuid::Uuid::new_v4().to_string();
 
         // Attach SSE listener BEFORE the POST.
@@ -70,9 +161,9 @@ impl ArloClient {
 
         let url = format!("{}{}", self.endpoints.api_host, API_START_STREAM);
         let payload = json!({
-            "to": camera_id,
-            "from": format!("{}_web", user_id),
-            "resource": format!("cameras/{}", camera_id),
+            "to": device.parent_id,
+            "from": format!("{user_id}_web"),
+            "resource": format!("cameras/{camera_id}"),
             "action": "set",
             "publishResponse": true,
             "transId": trans_id,
@@ -81,8 +172,13 @@ impl ArloClient {
                 "cameraId": camera_id
             }
         });
-        self.execute_request(Method::POST, &url, Some(&payload))
-            .await?;
+        self.execute_request_with_headers(
+            Method::POST,
+            &url,
+            Some(&payload),
+            &xcloud_header(device),
+        )
+        .await?;
 
         // Drain the broadcast channel until we see our own transId carrying
         // a stream URL, or the per-call timeout expires.
@@ -101,7 +197,7 @@ impl ArloClient {
                         continue;
                     }
                     if let Some(found) = extract_stream_url(&event) {
-                        return Ok(StreamUrl(found));
+                        return Ok(StreamUrl(rewrite_rtsp_to_rtsps(&found)));
                     }
                 }
                 Ok(Err(RecvError::Lagged(n))) => {
@@ -162,8 +258,39 @@ impl ArloClient {
         Ok(child)
     }
 
-    /// Sets the mode of a Base Station (e.g., "mode1" = armed, "mode0" = disarmed).
-    /// Defaults to V3 locations-based mode setting unless a V2 Base Station is detected.
+    /// Sets the mode of a Base Station (e.g., `"armed"`, `"disarmed"`,
+    /// or a user-defined mode UUID).
+    ///
+    /// **Default path is V3 (`/hmsweb/automation/v3/activeMode`).**
+    /// Falls back to the legacy `/hmsweb/users/devices/automation/active`
+    /// path on 403/404, or unconditionally when:
+    /// - `model_id` starts with `"VMB"` (older base stations that
+    ///   never supported v3), or
+    /// - the per-instance `api_version` is pinned to
+    ///   [`crate::config::ApiVersion::Legacy`].
+    ///
+    /// ## V3 payload shape
+    ///
+    /// Per the May-2026 Arlo portal HAR and
+    /// <https://github.com/twrecked/pyaarlo/issues/195>, every V3
+    /// activeMode PUT wraps the target mode in the `"custom"` envelope:
+    ///
+    /// ```jsonc
+    /// { "mode": "custom",
+    ///   "custom": { "<device_id>": "<mode_name_or_uuid>" } }
+    /// ```
+    ///
+    /// Both predefined modes (`"armed"`, `"disarmed"`) and user-defined
+    /// mode UUIDs are valid values inside `custom.<device_id>`.
+    ///
+    /// ## Single-device scope (known limitation)
+    ///
+    /// In the wild, the `custom` map can cover every device at the
+    /// location. This implementation only sets the mode for
+    /// `base_station_id`; siblings keep their prior mode. A multi-device
+    /// signature (`set_modes(&[(device_id, mode), …])`) is on the
+    /// roadmap once we have a real multi-camera test account.
+    /// TODO(streamer-app): expose a `set_modes` batch API.
     #[instrument(skip(self))]
     pub async fn set_mode(
         &self,
@@ -171,48 +298,149 @@ impl ArloClient {
         mode: &str,
         model_id: Option<&str>,
     ) -> Result<(), ArloError> {
+        let is_v3 = *self.api_version.read().unwrap() == crate::config::ApiVersion::V3;
+        let is_v2_model = model_id.is_some_and(|m| m.starts_with("VMB"));
+
+        if is_v3 && !is_v2_model {
+            match self.try_set_mode_v3(base_station_id, mode).await {
+                Ok(()) => return Ok(()),
+                Err(SetModeV3Outcome::Fallback) => {
+                    // Already logged + api_version downgraded inside the helper.
+                }
+                Err(SetModeV3Outcome::Error(e)) => return Err(e),
+            }
+        }
+
+        // ----- Legacy path -----
+        self.set_mode_legacy(base_station_id, mode, is_v2_model)
+            .await
+    }
+
+    /// Inner V3 attempt. Returns:
+    /// - `Ok(())` if the PUT succeeded.
+    /// - `Err(SetModeV3Outcome::Fallback)` if the V3 endpoints returned
+    ///   403/404 or the location couldn't be resolved — caller continues
+    ///   on the legacy path with `api_version` already pinned to Legacy.
+    /// - `Err(SetModeV3Outcome::Error(_))` to bubble up real transport
+    ///   / parse errors.
+    async fn try_set_mode_v3(
+        &self,
+        base_station_id: &str,
+        mode: &str,
+    ) -> Result<(), SetModeV3Outcome> {
+        let locations = match self.get_locations().await {
+            Ok(l) => l,
+            Err(_) => return Err(SetModeV3Outcome::Fallback),
+        };
+        let Some(loc) = locations.first() else {
+            return Err(SetModeV3Outcome::Fallback);
+        };
+
+        let get_url = format!(
+            "{}{}?locationId={}",
+            self.endpoints.api_host, API_AUTOMATION_ACTIVE_MODE, loc.id
+        );
+
+        let revision = match self
+            .execute_request::<()>(Method::GET, &get_url, None)
+            .await
+        {
+            Ok(body) => match extract_active_mode_revision(&body, &loc.id) {
+                Some(r) => r,
+                None => {
+                    warn!(
+                        "V3 activeMode GET succeeded but revision could not be extracted; \
+                         falling back to legacy."
+                    );
+                    *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+                    return Err(SetModeV3Outcome::Fallback);
+                }
+            },
+            Err(ArloError::HttpError { status, .. })
+                if status == reqwest::StatusCode::FORBIDDEN
+                    || status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                warn!(
+                    "V3 activeMode GET returned {}. Pinning client to Legacy.",
+                    status
+                );
+                *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+                return Err(SetModeV3Outcome::Fallback);
+            }
+            Err(e) => return Err(SetModeV3Outcome::Error(e)),
+        };
+
+        let put_url = format!(
+            "{}{}?locationId={}&revision={}",
+            self.endpoints.api_host, API_AUTOMATION_ACTIVE_MODE, loc.id, revision
+        );
+        // V3 wire shape — always `{"mode":"custom","custom":{<id>:<mode>}}`.
+        // The leaf value is the mode name (`"armed"`/`"disarmed"`) or a
+        // user-defined mode UUID; Arlo accepts both.
+        let payload = json!({
+            "mode": "custom",
+            "custom": { base_station_id: mode },
+        });
+
+        match self
+            .execute_request(Method::PUT, &put_url, Some(&payload))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(ArloError::HttpError { status, .. })
+                if status == reqwest::StatusCode::FORBIDDEN
+                    || status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                warn!(
+                    "V3 activeMode PUT returned {}. Pinning client to Legacy.",
+                    status
+                );
+                *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+                Err(SetModeV3Outcome::Fallback)
+            }
+            Err(e) => Err(SetModeV3Outcome::Error(e)),
+        }
+    }
+
+    /// Legacy `set_mode` path retained for backward compatibility.
+    /// Two payload shapes:
+    /// - V2 base stations (`VMB*` models) use the `activeAutomations`
+    ///   array format on `/hmsweb/users/devices/automation/active`.
+    /// - Everything else uses the notify-style payload on the same path.
+    async fn set_mode_legacy(
+        &self,
+        base_station_id: &str,
+        mode: &str,
+        is_v2_model: bool,
+    ) -> Result<(), ArloError> {
         let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
+        let url = format!("{}{}", self.endpoints.api_host, API_SET_MODE);
 
-        let is_v2 = model_id.is_some_and(|m| m.starts_with("VMB"));
-
-        if is_v2 {
-            // V2 activeAutomations array format
-            let url = format!("{}{}", self.endpoints.api_host, API_SET_MODE);
+        let payload = if is_v2_model {
             let timestamp = chrono::Utc::now().timestamp_millis() as u64;
-
-            let payload = json!({
-                "activeAutomations": [
-                    {
-                        "deviceId": base_station_id,
-                        "timestamp": timestamp,
-                        "activeModes": [mode],
-                        "inactiveModes": []
-                    }
-                ]
-            });
-
-            self.execute_request(Method::POST, &url, Some(&payload))
-                .await?;
+            json!({
+                "activeAutomations": [{
+                    "deviceId": base_station_id,
+                    "timestamp": timestamp,
+                    "activeModes": [mode],
+                    "inactiveModes": []
+                }]
+            })
         } else {
-            // Default to V3 format (via put/notify to activeMode or modes)
-            // Note: In V3, modes are usually tied to 'locations', but this is the simplest direct translation of the original.
-            let url = format!("{}{}", self.endpoints.api_host, API_SET_MODE);
-
-            let payload = json!({
+            json!({
                 "active": mode,
-                "from": format!("{}_web", user_id),
+                "from": format!("{user_id}_web"),
                 "to": base_station_id,
                 "resource": "modes",
                 "action": "set",
                 "publishResponse": true,
                 "transId": trans_id,
-            });
+            })
+        };
 
-            self.execute_request(Method::POST, &url, Some(&payload))
-                .await?;
-        }
-
+        self.execute_request(Method::POST, &url, Some(&payload))
+            .await?;
         Ok(())
     }
 
@@ -819,6 +1047,91 @@ impl ArloClient {
     }
 }
 
+/// Outcome of a `set_mode` V3 attempt.
+///
+/// `Fallback` means the caller should continue on the legacy path with
+/// `api_version` already pinned to [`crate::config::ApiVersion::Legacy`].
+/// `Error` propagates a real transport/parse failure straight to the
+/// caller of `set_mode`.
+enum SetModeV3Outcome {
+    Fallback,
+    Error(ArloError),
+}
+
+/// Extracts the `revision` from a v3 `activeMode` GET response.
+///
+/// The wire shape (verified May-2026 HAR) keys `data` by automation
+/// UUID — typically the `locationId` is one of the keys, but Arlo also
+/// returns sibling automation UUIDs:
+///
+/// ```jsonc
+/// { "success": true, "data": {
+///     "<location_id>": { "properties": {…}, "revision": 1778… },
+///     "<sibling_uuid>": { "properties": {…}, "revision": 1778… }
+/// }}
+/// ```
+///
+/// Strategy: prefer the exact `data.<location_id>.revision`. If Arlo
+/// has issued a different keying (e.g. an automation UUID that isn't
+/// the location ID), fall back to the **first** child object's
+/// `revision`. Returns `None` if no revision can be found.
+fn extract_active_mode_revision(body: &str, location_id: &str) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let data = value.get("data")?;
+
+    if let Some(rev) = data
+        .get(location_id)
+        .and_then(|v| v.get("revision"))
+        .and_then(|v| v.as_u64())
+    {
+        return Some(rev);
+    }
+    // Fallback: scan any keyed object for a `revision` field.
+    data.as_object()?
+        .values()
+        .find_map(|v| v.get("revision").and_then(|r| r.as_u64()))
+}
+
+/// Builds the `xcloudId` header pair for stream requests, mirroring
+/// pyaarlo. If the device has no `xCloudId` (legacy `/users/devices`
+/// payload) the header is omitted entirely — Arlo tolerates its
+/// absence on the legacy stream path.
+fn xcloud_header(device: &Device) -> Vec<(String, String)> {
+    match device.x_cloud_id.as_deref() {
+        Some(id) if !id.is_empty() => vec![("xcloudId".to_string(), id.to_string())],
+        _ => Vec::new(),
+    }
+}
+
+/// Rewrites a leading `rtsp://` to `rtsps://` (TLS), matching the Arlo
+/// web client. Leaves `rtsps://`, `https://` (HLS/DASH), and anything
+/// else untouched. `strip_prefix` guarantees we only touch the exact
+/// `rtsp://` scheme, never `rtsps://`.
+fn rewrite_rtsp_to_rtsps(url: &str) -> String {
+    match url.strip_prefix("rtsp://") {
+        Some(rest) => format!("rtsps://{rest}"),
+        None => url.to_string(),
+    }
+}
+
+/// Extracts a stream URL from a synchronous `action: "get"` /startStream
+/// response. Tolerant of the same envelope variants as the rest of the
+/// API: a bare `{"url": …}`, `{"data": {"url": …}}`, or
+/// `{"success": true, "data": {"url": …}}`. An empty or missing `url`
+/// means "no active stream" → `None`.
+fn extract_post_response_stream_url(value: &serde_json::Value) -> Option<String> {
+    let pick = |v: &serde_json::Value| -> Option<String> {
+        v.get("url")
+            .and_then(|u| u.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+    if let Some(u) = pick(value) {
+        return Some(u);
+    }
+    pick(value.get("data")?)
+}
+
 /// True if `event` carries the same `transId` we sent on the `/startStream`
 /// POST. Tolerant of Arlo wrapping the field in nested objects: most
 /// responses put it at the top level, but we also peek inside `properties`
@@ -1066,11 +1379,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_mode_v3_path_emits_notify_payload() {
+    async fn set_mode_legacy_v3_path_emits_notify_payload() {
         let mock = arc_mock();
         mock.queue_post("{}");
 
         let client = authenticated_mocked_client(Arc::clone(&mock));
+        *client.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
         client.set_mode("base-1", "mode1", None).await.unwrap();
 
         let body = parse_body_json(mock.calls()[1].body.as_ref());
@@ -1079,6 +1393,149 @@ mod tests {
         assert_eq!(body["from"], "U-test_web");
         assert_eq!(body["resource"], "modes");
         assert_eq!(body["action"], "set");
+    }
+
+    #[tokio::test]
+    async fn set_mode_v3_active_mode_emits_put_payload() {
+        // Verifies the V3 happy path using the **real** wire shape from
+        // the May-2026 portal HAR:
+        //   - `data` is keyed by automation UUID (typically the location
+        //     ID); `revision` is one nested level down.
+        //   - PUT body always wraps in `{"mode":"custom","custom":{…}}`.
+        let mock = arc_mock();
+        // 1. get_locations -> bare array data
+        mock.queue_get(r#"{"meta":{"code":200},"data":[{"id":"loc-123","name":"Home"}]}"#);
+        // 2. GET activeMode -> data keyed by location UUID, with revision nested
+        mock.queue_get(
+            r#"{"meta":{"code":200},"data":{
+                "loc-123": {"properties":{"mode":"custom","custom":{"base-1":"disarmed"}},"revision":42},
+                "sibling-uuid": {"properties":{"mode":"standby"},"revision":99}
+            }}"#,
+        );
+        // 3. PUT activeMode -> OPTIONS preflight + PUT body
+        mock.queue_post(r#"{"meta":{"code":200}}"#);
+
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.set_mode("base-1", "armed", None).await.unwrap();
+
+        let calls = mock.calls();
+        assert_eq!(
+            calls.len(),
+            4,
+            "GET locations, GET activeMode, OPTIONS, PUT"
+        );
+
+        assert!(calls[0].url.contains("/locations"));
+        assert!(calls[1].url.contains("/activeMode?locationId=loc-123"));
+        let put_call = &calls[3];
+        assert_eq!(put_call.method, Method::PUT);
+        assert!(
+            put_call
+                .url
+                .contains("/activeMode?locationId=loc-123&revision=42"),
+            "PUT URL must carry the location's revision: {}",
+            put_call.url
+        );
+        let body = parse_body_json(put_call.body.as_ref());
+        // The mandatory v3 `custom` envelope — never the bare `{"mode": …}`.
+        assert_eq!(body["mode"], "custom");
+        assert_eq!(body["custom"]["base-1"], "armed");
+    }
+
+    #[tokio::test]
+    async fn set_mode_v3_emits_custom_envelope_for_user_defined_uuid() {
+        // Same wire shape regardless of whether `mode` is a predefined
+        // name ("armed"/"disarmed") or a 36-char user-defined UUID.
+        let mock = arc_mock();
+        mock.queue_get(r#"{"meta":{"code":200},"data":[{"id":"loc-x","name":"Home"}]}"#);
+        mock.queue_get(
+            r#"{"meta":{"code":200},"data":{"loc-x":{"properties":{"mode":"custom"},"revision":5}}}"#,
+        );
+        mock.queue_post(r#"{"meta":{"code":200}}"#);
+
+        let custom_mode_uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client
+            .set_mode("base-x", custom_mode_uuid, None)
+            .await
+            .unwrap();
+
+        let body = parse_body_json(mock.calls()[3].body.as_ref());
+        assert_eq!(body["mode"], "custom");
+        assert_eq!(body["custom"]["base-x"], custom_mode_uuid);
+    }
+
+    #[tokio::test]
+    async fn set_mode_v3_pins_legacy_on_404_and_runs_legacy_path() {
+        // The V3 activeMode GET returns 404 → api_version flips to
+        // Legacy → set_mode falls through to the legacy notify-style
+        // POST. Confirms the fallback works end-to-end.
+        let mock = arc_mock();
+        mock.queue_get(r#"{"meta":{"code":200},"data":[{"id":"loc-1","name":"Home"}]}"#);
+        // GET activeMode 404
+        mock.expect(crate::client::transport::HttpResponse {
+            status: reqwest::StatusCode::NOT_FOUND,
+            body: "".into(),
+        });
+        // Legacy POST (preflight + body)
+        mock.queue_post("{}");
+
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        client.set_mode("base-1", "armed", None).await.unwrap();
+
+        // Per-client api_version is now Legacy.
+        assert_eq!(
+            *client.api_version.read().unwrap(),
+            crate::config::ApiVersion::Legacy
+        );
+        let calls = mock.calls();
+        // get_locations(GET) + activeMode(GET 404) + legacy(OPTIONS + POST) = 4
+        assert_eq!(calls.len(), 4);
+        let legacy_body = parse_body_json(calls[3].body.as_ref());
+        assert_eq!(legacy_body["resource"], "modes");
+        assert_eq!(legacy_body["action"], "set");
+    }
+
+    #[test]
+    fn extract_active_mode_revision_prefers_exact_location_match() {
+        let body = r#"{"data":{
+            "loc-A":{"revision":100},
+            "loc-B":{"revision":200}
+        }}"#;
+        assert_eq!(
+            super::extract_active_mode_revision(body, "loc-A"),
+            Some(100)
+        );
+        assert_eq!(
+            super::extract_active_mode_revision(body, "loc-B"),
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn extract_active_mode_revision_falls_back_to_any_sibling() {
+        // Arlo sometimes keys data by an automation UUID that isn't the
+        // location ID we passed. Helper should still find a revision.
+        let body = r#"{"data":{
+            "some-other-uuid":{"revision":777}
+        }}"#;
+        assert_eq!(
+            super::extract_active_mode_revision(body, "loc-missing"),
+            Some(777)
+        );
+    }
+
+    #[test]
+    fn extract_active_mode_revision_returns_none_when_absent() {
+        assert_eq!(super::extract_active_mode_revision(r#"{}"#, "x"), None);
+        assert_eq!(
+            super::extract_active_mode_revision(r#"{"data":null}"#, "x"),
+            None
+        );
+        assert_eq!(
+            super::extract_active_mode_revision(r#"{"data":{"x":{}}}"#, "x"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1395,14 +1852,179 @@ mod tests {
         }
     }
 
+    /// Builds a `Device` fixture. `parent` defaults to `device_id`
+    /// (self-hosted) when `None`; `x_cloud` controls the optional
+    /// `xCloudId` field.
+    fn make_device(device_id: &str, parent: Option<&str>, x_cloud: Option<&str>) -> Device {
+        let parent_id = parent.unwrap_or(device_id);
+        let xc = x_cloud
+            .map(|x| format!(r#","xCloudId":"{x}""#))
+            .unwrap_or_default();
+        let json = format!(
+            r#"{{"deviceId":"{device_id}","parentId":"{parent_id}",
+                 "deviceType":"camera","deviceName":"Cam","uniqueId":"u",
+                 "state":"provisioned"{xc}}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
     #[tokio::test]
     async fn start_stream_errors_before_login() {
         let mock = arc_mock();
         let client = crate::client::test_helpers::mocked_client(Arc::clone(&mock));
-        // No user_id set — start_stream short-circuits before any HTTP.
-        let err = client.start_stream("CAM-1").await.unwrap_err();
+        let dev = make_device("CAM-1", None, None);
+        // No user_id set — get_stream_url short-circuits before any HTTP.
+        let err = client.start_stream(&dev).await.unwrap_err();
         assert!(matches!(err, ArloError::AuthError(_)));
         assert!(mock.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_stream_url_returns_url_with_action_get_and_xcloud_header() {
+        let mock = arc_mock();
+        // Synchronous get response — URL in the POST body itself.
+        mock.queue_post(r#"{"url":"rtsp://stream.example/cam.sdp"}"#);
+
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let dev = make_device("CAM-9", Some("BASE-9"), Some("z1-cloud"));
+        let got = client.get_stream_url(&dev).await.unwrap();
+
+        // rtsp:// rewritten to rtsps://
+        assert_eq!(
+            got.as_ref().map(|s| s.as_str()),
+            Some("rtsps://stream.example/cam.sdp")
+        );
+
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 2, "OPTIONS preflight + POST");
+        let post = &calls[1];
+        let body = parse_body_json(post.body.as_ref());
+        assert_eq!(body["action"], "get");
+        assert_eq!(body["to"], "BASE-9"); // parent_id, not device_id
+        assert_eq!(body["resource"], "cameras/CAM-9");
+        assert_eq!(body["properties"]["cameraId"], "CAM-9");
+        assert_eq!(body["responseUrl"], "");
+        // xcloudId header derived from the device.
+        let xc = post
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("xcloudId"))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(xc, Some("z1-cloud"));
+    }
+
+    #[tokio::test]
+    async fn get_stream_url_returns_none_when_no_active_stream() {
+        let mock = arc_mock();
+        // Arlo returns an envelope with no `url` when nothing is streaming.
+        mock.queue_post(r#"{"success":true,"data":{}}"#);
+        let client = authenticated_mocked_client(mock);
+        let dev = make_device("CAM-1", None, None);
+        assert_eq!(client.get_stream_url(&dev).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn get_stream_url_unwraps_data_url_envelope() {
+        let mock = arc_mock();
+        mock.queue_post(r#"{"success":true,"data":{"url":"rtsps://already/secure"}}"#);
+        let client = authenticated_mocked_client(mock);
+        let dev = make_device("CAM-1", None, None);
+        let got = client.get_stream_url(&dev).await.unwrap();
+        // Already rtsps:// — left untouched.
+        assert_eq!(
+            got.map(|s| s.into_inner()),
+            Some("rtsps://already/secure".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn get_stream_url_omits_xcloud_header_when_device_lacks_it() {
+        let mock = arc_mock();
+        mock.queue_post(r#"{"url":"rtsp://x/y"}"#);
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let dev = make_device("CAM-1", None, None); // no xCloudId
+        client.get_stream_url(&dev).await.unwrap();
+        let post = &mock.calls()[1];
+        assert!(
+            !post
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("xcloudId")),
+            "xcloudId header must be omitted when device.x_cloud_id is None"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_stream_reuses_active_stream_without_touching_sse() {
+        // get_stream_url returns Some → start_stream returns it directly,
+        // never subscribing to the event bus (which would fail here since
+        // MockTransport has no streaming client).
+        let mock = arc_mock();
+        mock.queue_post(r#"{"url":"rtsp://live/now"}"#);
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let dev = make_device("CAM-1", None, None);
+
+        let url = client.start_stream(&dev).await.unwrap();
+        assert_eq!(url.as_str(), "rtsps://live/now");
+        // Exactly one peek round-trip (OPTIONS + POST). No SSE bus boot.
+        assert_eq!(mock.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn start_stream_falls_back_to_force_when_no_active_stream() {
+        // get_stream_url → None, then force_start_stream tries to boot the
+        // event bus, which errors on MockTransport (no streaming client).
+        // We assert the fallback path is taken (an AuthError from the bus),
+        // proving start_stream didn't stop at the empty peek.
+        let mock = arc_mock();
+        mock.queue_post(r#"{"success":true,"data":{}}"#); // empty peek
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let dev = make_device("CAM-1", None, None);
+
+        let err = client.start_stream(&dev).await.unwrap_err();
+        assert!(
+            matches!(err, ArloError::AuthError(_)),
+            "expected the event-bus AuthError from the force fallback, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rewrite_rtsp_to_rtsps_only_touches_plain_rtsp() {
+        assert_eq!(super::rewrite_rtsp_to_rtsps("rtsp://h/p"), "rtsps://h/p");
+        assert_eq!(super::rewrite_rtsp_to_rtsps("rtsps://h/p"), "rtsps://h/p");
+        assert_eq!(
+            super::rewrite_rtsp_to_rtsps("https://h/p.m3u8"),
+            "https://h/p.m3u8"
+        );
+        assert_eq!(super::rewrite_rtsp_to_rtsps(""), "");
+    }
+
+    #[test]
+    fn extract_post_response_stream_url_handles_all_envelopes() {
+        use serde_json::json;
+        assert_eq!(
+            super::extract_post_response_stream_url(&json!({"url":"rtsp://a"})),
+            Some("rtsp://a".to_string())
+        );
+        assert_eq!(
+            super::extract_post_response_stream_url(&json!({"data":{"url":"rtsp://b"}})),
+            Some("rtsp://b".to_string())
+        );
+        assert_eq!(
+            super::extract_post_response_stream_url(
+                &json!({"success":true,"data":{"url":"rtsp://c"}})
+            ),
+            Some("rtsp://c".to_string())
+        );
+        assert_eq!(
+            super::extract_post_response_stream_url(&json!({"data":{"url":""}})),
+            None
+        );
+        assert_eq!(
+            super::extract_post_response_stream_url(&json!({"success":true,"data":{}})),
+            None
+        );
+        assert_eq!(super::extract_post_response_stream_url(&json!({})), None);
     }
 
     #[tokio::test]

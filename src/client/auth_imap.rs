@@ -169,6 +169,9 @@ pub async fn fetch_otp(
     // Wait for a fresh Arlo email — anything not already in the baseline.
     let deadline = tokio::time::Instant::now() + OTP_FETCH_TIMEOUT;
     let new_seq = loop {
+        // Force a session refresh (essential for Gmail to see new mail in an open session).
+        let _ = selected.noop().await;
+
         let current: HashSet<u32> = selected
             .search(arlo_unseen_query())
             .await
