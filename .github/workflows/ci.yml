@@ -146,7 +146,7 @@ jobs:
         run: cargo tarpaulin --all-features --workspace --timeout 120 --out xml --fail-under 70
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
