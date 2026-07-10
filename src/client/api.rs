@@ -382,7 +382,10 @@ mod tests {
         assert_eq!(calls[0].method, Method::OPTIONS);
         // Main POST (calls[1]) carries both the extra header and the
         // auto-added Content-Type.
-        assert_eq!(header_value(&calls[1].headers, "xcloudId"), Some("z1-cloud"));
+        assert_eq!(
+            header_value(&calls[1].headers, "xcloudId"),
+            Some("z1-cloud")
+        );
         assert_eq!(
             header_value(&calls[1].headers, "Content-Type"),
             Some("application/json")

@@ -18,6 +18,7 @@ use base64::prelude::BASE64_STANDARD;
 use reqwest::Method;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 use tokio::fs;
 use tracing::{info, instrument, warn};
 
@@ -144,6 +145,20 @@ impl AuthManager {
         };
         write_owner_only(path, json.as_bytes()).await;
     }
+}
+
+/// Arlo's `meta.error` returned (with HTTP 200, `meta.code` 400) by
+/// `finishAuth` while a push challenge is dispatched but not yet
+/// approved on the device: *"Authentication is not finished yet"*.
+const MFA_PENDING_ERROR: u32 = 9233;
+
+/// Outcome of a single push `finishAuth` poll.
+enum PushOutcome {
+    /// User hasn't approved yet — keep polling.
+    Pending,
+    /// Approved; carries the finalized session payload (token already
+    /// cached) including the `browserAuthCode` used for pairing.
+    Approved(AuthResponseData),
 }
 
 impl ArloClient {
@@ -273,13 +288,182 @@ impl ArloClient {
     /// This seamlessly runs the full backend REST validation chain required to actually load the Dashboard.
     pub async fn submit_mfa(&mut self, factor_auth_code: &str, otp: &str) -> Result<(), ArloError> {
         self.finish_auth(factor_auth_code, otp).await?;
+        self.complete_session(factor_auth_code).await
+    }
 
+    /// Post-`finishAuth` continuation chain shared by every MFA path
+    /// (OTP submit *and* push-approval polling): token validation, the
+    /// optional "trust this browser" pairing, the mandatory V3 session
+    /// validation, and the trailing telemetry call.
+    ///
+    /// `pairing_code` is the value passed to `startPairingFactor`. For
+    /// push that is the `browserAuthCode` returned by the approved
+    /// `finishAuth`; for the OTP path it's the MFA `factorAuthCode`.
+    async fn complete_session(&mut self, pairing_code: &str) -> Result<(), ArloError> {
         self.validate_access_token().await?;
-        let _ = self.start_pairing_factor(factor_auth_code).await; // Optional Trust factor
+        let _ = self.start_pairing_factor(pairing_code).await; // Optional Trust factor
         self.validate_session_v3().await?;
         let _ = self.device_support().await; // Secondary check to complete validation emulation
 
         Ok(())
+    }
+
+    /// Default cadence between `finishAuth` polls while waiting for the
+    /// user to approve the prompt in their Arlo mobile app. Matches the
+    /// Arlo web client's observed ~5 s cadence.
+    pub const DEFAULT_PUSH_POLL_INTERVAL: Duration = Duration::from_secs(5);
+    /// Default ceiling on the whole push-approval wait. Matches Arlo's
+    /// own `MFA_Config.timeout.PUSH` (120 s).
+    pub const DEFAULT_PUSH_TIMEOUT: Duration = Duration::from_secs(120);
+
+    /// Drives the MFA flow for the **PUSH** factor.
+    ///
+    /// Reproduces the Arlo web client's push ceremony (verified against
+    /// a live HAR capture):
+    ///
+    /// 1. `login` → preliminary token + `userId`.
+    /// 2. `POST /api/startAuth {factorType:"", userId}` — Arlo dispatches
+    ///    the account's PRIMARY second factor and returns its PingOne
+    ///    push `factorAuthCode` plus the factor list.
+    /// 3. Poll `POST /api/finishAuth {factorAuthCode, isBrowserTrusted}`
+    ///    (**no `otp`**). Every poll is HTTP 200; the body carries the
+    ///    state in `meta`: `code:400 error:9233` ("Authentication is not
+    ///    finished yet") ⇒ still pending; `code:200` + `data.token` ⇒
+    ///    approved (and `data.browserAuthCode` is the value to pair
+    ///    with). Polls every `poll_interval` until approval or
+    ///    `timeout` ([`ArloError::Timeout`]).
+    /// 4. Shared continuation chain, pairing with `browserAuthCode`.
+    ///
+    /// Requires PUSH to be the account's PRIMARY factor (empty
+    /// `factorType` dispatches the primary one); errors otherwise.
+    #[instrument(skip(self, config))]
+    pub async fn authenticate_with_push(
+        &mut self,
+        config: &crate::config::ArloConfig,
+        poll_interval: Duration,
+        timeout: Duration,
+    ) -> Result<AuthResult, ArloError> {
+        // 1. Reuse a still-valid cached session.
+        if self.auth.has_token() {
+            if self.validate_session_v3().await.is_ok() {
+                return Ok(AuthResult::Success);
+            }
+            warn!("Cached token failed v3 validation. Re-authenticating via push.");
+            self.auth.clear_token();
+        }
+
+        // 2. Credentials → preliminary token + userId.
+        let creds = config.credentials.as_ref().ok_or_else(|| {
+            ArloError::AuthError("Missing [credentials] block in TOML configuration".into())
+        })?;
+        let email = creds
+            .email
+            .as_ref()
+            .ok_or_else(|| ArloError::AuthError("Missing 'email' in credentials".into()))?;
+        let password = creds
+            .password
+            .as_ref()
+            .ok_or_else(|| ArloError::AuthError("Missing 'password' in credentials".into()))?;
+        self.login(email, password).await?;
+        let user_id = self
+            .auth
+            .user_id
+            .clone()
+            .ok_or_else(|| ArloError::AuthError("login did not return a userId".into()))?;
+
+        // 3. startAuth dispatches the push and returns its factorAuthCode.
+        let factor_auth_code = self.start_auth_push(&user_id).await?;
+
+        // 4. Poll finishAuth until the user taps Approve on their phone.
+        info!("Awaiting push approval in the Arlo mobile app");
+        let deadline = Instant::now() + timeout;
+        let approved = loop {
+            match self.finish_auth_push(&factor_auth_code).await? {
+                PushOutcome::Approved(data) => break data,
+                PushOutcome::Pending => {
+                    if Instant::now() >= deadline {
+                        return Err(ArloError::Timeout(format!(
+                            "push approval not granted within {timeout:?}"
+                        )));
+                    }
+                    tokio::time::sleep(poll_interval).await;
+                }
+            }
+        };
+
+        // 5. Continuation — pair with the browserAuthCode the approved
+        //    finishAuth handed back (not the push factorAuthCode).
+        let pairing_code = approved.browser_auth_code.unwrap_or(factor_auth_code);
+        self.complete_session(&pairing_code).await?;
+        Ok(AuthResult::Success)
+    }
+
+    /// `POST /api/startAuth {factorType:"", userId}` → the push
+    /// `factorAuthCode`. An empty `factorType` makes Arlo dispatch the
+    /// account's PRIMARY factor; errors if no PUSH factor is registered.
+    #[instrument(skip(self))]
+    async fn start_auth_push(&mut self, user_id: &str) -> Result<String, ArloError> {
+        let url = format!("{}{}", self.endpoints.auth_host, AUTH_START_AUTH);
+        let payload = StartAuthUserRequest {
+            factor_type: String::new(),
+            user_id: user_id.to_string(),
+        };
+        let body = self
+            .execute_request(Method::POST, &url, Some(&payload))
+            .await?;
+        let resp: BaseResponse<StartAuthData> = serde_json::from_str(&body)?;
+        if resp.meta.code != 200 {
+            return Err(ArloError::AuthError(
+                resp.meta
+                    .message
+                    .unwrap_or_else(|| "startAuth failed".into()),
+            ));
+        }
+        let data = resp
+            .data
+            .ok_or_else(|| ArloError::AuthError("startAuth returned no data".into()))?;
+        if !data
+            .factors
+            .iter()
+            .any(|f| f.factor_type.eq_ignore_ascii_case("PUSH"))
+        {
+            return Err(ArloError::AuthError(
+                "No PUSH factor registered on this Arlo account".into(),
+            ));
+        }
+        Ok(data.factor_auth_code)
+    }
+
+    /// One push `finishAuth` poll (no `otp`). Maps Arlo's
+    /// HTTP-200-with-`meta` envelope to a tri-state: approved (token
+    /// cached), still pending (`meta.error == 9233`), or a hard error.
+    #[instrument(skip(self, factor_auth_code))]
+    async fn finish_auth_push(&mut self, factor_auth_code: &str) -> Result<PushOutcome, ArloError> {
+        let url = format!("{}{}", self.endpoints.auth_host, AUTH_FINISH_AUTH);
+        let payload = FinishAuthPushRequest {
+            factor_auth_code: factor_auth_code.to_string(),
+            is_browser_trusted: true,
+        };
+        let body = self
+            .execute_request(Method::POST, &url, Some(&payload))
+            .await?;
+        let resp: BaseResponse<AuthResponseData> = serde_json::from_str(&body)?;
+
+        if resp.meta.code == 200 {
+            let data = resp
+                .data
+                .ok_or_else(|| ArloError::AuthError("finishAuth 200 but no data".into()))?;
+            // Cache the finalized token, mirroring finish_auth().
+            self.auth.set_token(data.token.clone());
+            self.auth.save_to_cache().await;
+            return Ok(PushOutcome::Approved(data));
+        }
+        if resp.meta.error == Some(MFA_PENDING_ERROR) {
+            return Ok(PushOutcome::Pending);
+        }
+        Err(ArloError::AuthError(resp.meta.message.unwrap_or_else(
+            || format!("finishAuth failed (meta.code {})", resp.meta.code),
+        )))
     }
 
     /// Step 1: Initiates the authentication flow with Arlo.
@@ -1300,6 +1484,123 @@ mod tests {
             .unwrap();
         assert!(matches!(res, AuthResult::Success));
         assert!(client.is_authenticated());
+    }
+
+    fn push_cfg() -> crate::config::ArloConfig {
+        crate::config::ArloConfig {
+            credentials: Some(crate::config::CredentialsConfig {
+                email: Some("u".into()),
+                password: Some("p".into()),
+            }),
+            mfa: None,
+            client: None,
+            streaming: None,
+        }
+    }
+
+    /// `startAuth` success body — PUSH is the PRIMARY factor.
+    fn start_auth_push_ok() -> &'static str {
+        r#"{"meta":{"code":200},"data":{"_type":"MultiFactorAuthCode",
+            "factorAuthCode":"FAC-P","authCompleted":false,
+            "factors":[
+              {"_type":"SecondFactor","factorId":"FP","factorType":"PUSH","factorRole":"PRIMARY"},
+              {"_type":"SecondFactor","factorId":"FE","factorType":"EMAIL","factorRole":"SECONDARY"}
+            ]}}"#
+    }
+
+    // Real Arlo pending body: HTTP 200, meta.code 400, error 9233.
+    const FINISH_PENDING: &str =
+        r#"{"meta":{"code":400,"error":9233,"message":"Authentication is not finished yet"}}"#;
+    // Real Arlo approved body: meta.code 200 + data with token + browserAuthCode.
+    const FINISH_APPROVED: &str = r#"{"meta":{"code":200},"data":{"_type":"AccessTokenV2",
+        "token":"final","userId":"U1","authenticated":1,"authCompleted":true,
+        "browserAuthCode":"BAC-1"}}"#;
+
+    #[tokio::test]
+    async fn authenticate_with_push_polls_finish_auth_until_approved() {
+        // login → startAuth(push) → finishAuth(pending) →
+        // finishAuth(approved) → continuation chain.
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(auth_response("preliminary", "U1")); // login
+        mock.queue_post(start_auth_push_ok()); // startAuth
+        mock.queue_post(FINISH_PENDING); // finishAuth #1: pending
+        mock.queue_post(FINISH_PENDING); // finishAuth #2: pending
+        mock.queue_post(FINISH_APPROVED); // finishAuth #3: approved
+        mock.queue_get("{}"); // validate_access_token
+        mock.queue_post("{}"); // start_pairing_factor (pairs with BAC-1)
+        mock.queue_get(r#"{"meta":{"code":200},"data":{"userId":"U1","token":"final"}}"#); // session_v3
+        mock.queue_get(r#"{"meta":{"code":200},"data":{}}"#); // device_support_v2
+
+        let mut client = mocked_client(mock.clone());
+        let res = client
+            .authenticate_with_push(
+                &push_cfg(),
+                Duration::from_millis(1),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("push approval completes");
+
+        assert!(matches!(res, AuthResult::Success));
+        assert!(client.is_authenticated());
+
+        // finishAuth must carry {factorAuthCode,isBrowserTrusted} and NO otp.
+        let finish = mock
+            .calls()
+            .into_iter()
+            .find(|c| c.url.contains("/api/finishAuth") && c.body.is_some())
+            .expect("a finishAuth POST with a body was made");
+        let body = parse_body_json(finish.body.as_ref());
+        assert_eq!(body["factorAuthCode"], "FAC-P");
+        assert_eq!(body["isBrowserTrusted"], true);
+        assert!(
+            body.get("otp").is_none(),
+            "push finishAuth must not send otp"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_with_push_times_out_when_never_approved() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(auth_response("preliminary", "U1")); // login
+        mock.queue_post(start_auth_push_ok()); // startAuth
+        mock.queue_post(FINISH_PENDING); // finishAuth: still pending
+
+        let mut client = mocked_client(mock);
+        // Zero timeout: the first pending response is already past the
+        // deadline, so the loop bails without sleeping.
+        let err = client
+            .authenticate_with_push(
+                &push_cfg(),
+                Duration::from_millis(1),
+                Duration::from_millis(0),
+            )
+            .await
+            .expect_err("never approved → timeout");
+
+        assert!(matches!(err, ArloError::Timeout(_)));
+    }
+
+    #[tokio::test]
+    async fn authenticate_with_push_errors_when_no_push_factor_registered() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(auth_response("preliminary", "U1")); // login
+        mock.queue_post(
+            r#"{"meta":{"code":200},"data":{"factorAuthCode":"FAC-E",
+               "factors":[{"factorType":"EMAIL","factorRole":"PRIMARY"}]}}"#,
+        ); // startAuth: only EMAIL
+
+        let mut client = mocked_client(mock);
+        let err = client
+            .authenticate_with_push(
+                &push_cfg(),
+                Duration::from_millis(1),
+                Duration::from_secs(5),
+            )
+            .await
+            .expect_err("no PUSH factor → error");
+
+        assert!(matches!(err, ArloError::AuthError(m) if m.contains("PUSH")));
     }
 
     #[tokio::test]

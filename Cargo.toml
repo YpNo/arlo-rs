@@ -3,6 +3,26 @@ name = "rs-arlo"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "A high-level, asynchronous Rust client for Arlo security cameras, supporting MFA, MQTT event streaming, and WebRTC signaling."
+repository = "https://github.com/YpNo/arlo-camera-streamer"
+readme = "README.md"
+keywords = ["arlo", "camera", "iot", "security", "webrtc"]
+categories = ["api-bindings", "asynchronous"]
+exclude = [
+    "target/",
+    ".agents/",
+    ".claude/",
+    ".github/",
+    ".gitignore",
+    "CONTEXT.md",
+    "GEMINI.md",
+    "CLAUDE.md",
+    ".vscode/",
+    "examples/",
+    "manual_examples/",
+    "tests/",
+    "*.json",
+]
 
 [dependencies]
 tokio = { version = "1.52", features = ["full", "rt-multi-thread"] }
@@ -13,15 +33,16 @@ thiserror = "2.0"
 uuid = { version = "1.23", features = ["v4", "fast-rng"] }
 urlencoding = "2.1"
 toml = "1.1"
-# Once `rs-cloudscraper` v0.2.0 is verified against this crate's call sites, swap to:
-# rs-cloudscraper = { git = "https://github.com/YpNo/rs-cloudscraper", tag = "v0.2.0", features = ["browser"] }
+# Once `stealthscraper-rs` v0.2.0 is verified against this crate's call sites, swap to:
+# stealthscraper-rs = { git = "https://github.com/YpNo/stealthscraper-rs", tag = "v0.2.0", features = ["browser"] }
 # (Tracked in CHANGELOG.md under [Unreleased].)
-rs-cloudscraper = { path = "../rs-cloudscraper", features = ["browser"] }
+# stealthscraper-rs = { path = "../stealthscraper-rs", features = ["browser"] }
+stealthscraper-rs = { version = "0.4.0", features = ["browser"] }
 mailparse = "0.16.1"
 regex = "1.12.3"
-imap-client = { path = "../imap-rs/imap-client" }
-imap-core = { path = "../imap-rs/imap-core" }
-imap-tls = { path = "../imap-rs/imap-tls" }
+imap-rs-client = "0.2.1"
+imap-rs-core = "0.2.1"
+imap-rs-tls = "0.2.1"
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 chrono = "0.4.44"
@@ -31,9 +52,31 @@ tracing = "0.1"
 tracing-futures = "0.2"
 secrecy = "0.10"
 async-trait = "0.1"
+# MQTT-over-WebSocket event bus (v3 replacement for the dead SSE
+# `/hmsweb/client/subscribe`). tokio-tungstenite gives full control of
+# Arlo's non-standard WS handshake (custom Origin + `mqtt` subprotocol);
+# mqttbytes is rumqttc's MQTT 3.1.1 packet codec (no broker runtime).
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+mqttbytes = "0.6"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# NOTE: rs-arlo is **signaling-only** for v3 live. The WebRTC media
+# plane lives in the consumer (the streamer's GStreamer `webrtcbin`) —
+# Arlo's gateway is non-bundled FreeSWITCH, which the pure-Rust `webrtc`
+# crate cannot negotiate. No WebRTC dependency here by design.
 
 
 [dev-dependencies]
 tempfile = "3.26.0"
 mockito = "1.6.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Manual, live-account smoke tests (not autodiscovered — they live in
+# `manual_examples/`, not `examples/`). Run with `cargo run --example <name>`.
+[[example]]
+name = "list_cameras"
+path = "manual_examples/list_cameras.rs"
+
+[[example]]
+name = "push_login"
+path = "manual_examples/push_login.rs"

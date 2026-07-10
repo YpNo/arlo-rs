@@ -33,6 +33,10 @@ pub struct AuthResponseData {
     pub auth_completed: Option<bool>,
     #[serde(rename = "MFA_State")]
     pub mfa_state: Option<String>,
+    /// Present on a successful `finishAuth`. This is the code that must
+    /// be fed to `startPairingFactor` to remember the browser — it is
+    /// **not** the same value as the MFA `factorAuthCode`.
+    pub browser_auth_code: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -62,6 +66,45 @@ pub struct VerifyFactorRequest {
     pub factor_auth_code: String,
     pub otp: String,
     pub is_browser_trusted: bool,
+}
+
+/// `POST /api/startAuth` body for the **push** flow. Mirrors the Arlo
+/// web client exactly: an empty `factorType` lets Arlo dispatch the
+/// account's PRIMARY second factor (push, when push is primary) and
+/// return its `factorAuthCode` in one round-trip.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartAuthUserRequest {
+    pub factor_type: String,
+    pub user_id: String,
+}
+
+/// `POST /api/finishAuth` body for the **push** flow. Note the absence
+/// of an `otp` field — push approval carries no code; the web client
+/// sends only these two keys and polls.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinishAuthPushRequest {
+    pub factor_auth_code: String,
+    pub is_browser_trusted: bool,
+}
+
+/// `data` payload of a successful `POST /api/startAuth`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartAuthData {
+    pub factor_auth_code: String,
+    #[serde(default)]
+    pub factors: Vec<SecondFactor>,
+}
+
+/// One entry of `StartAuthData::factors`. Only the discriminating
+/// fields are modelled; Arlo sends more (display name, etc.).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecondFactor {
+    pub factor_type: String,
+    pub factor_role: Option<String>,
 }
 
 /// Represents the asynchronous state of an authentication attempt.

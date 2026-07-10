@@ -15,6 +15,8 @@ pub const AUTH_LOGOUT: &str = "/hmsweb/logout";
 pub const API_DEVICES: &str = "/hmsweb/users/devices";
 pub const API_DEVICES_V2: &str = "/hmsweb/v2/users/devices";
 pub const API_START_STREAM: &str = "/hmsweb/users/devices/startStream";
+/// v3 WebRTC live-stream signaling info (SIP callee URI + ICE servers).
+pub const API_SIP_INFO: &str = "/hmsweb/users/devices/sipInfo/v2";
 pub const API_SET_MODE: &str = "/hmsweb/users/devices/automation/active";
 pub const API_SUBSCRIBE: &str = "/hmsweb/client/subscribe";
 

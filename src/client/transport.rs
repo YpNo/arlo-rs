@@ -24,7 +24,7 @@ use crate::error::ArloError;
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, StatusCode};
-use rs_cloudscraper::CloudScraper;
+use stealthscraper_rs::CloudScraper;
 use std::str::FromStr;
 
 /// Description of a single HTTP request to dispatch through the transport.

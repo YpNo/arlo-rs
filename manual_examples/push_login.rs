@@ -1,15 +1,27 @@
-//! Manual end-to-end smoke test: authenticate via IMAP-automated MFA,
-//! list the cameras on the account, and log out.
+//! Manual end-to-end smoke test: authenticate via **PUSH** MFA, list
+//! the cameras on the account, and log out.
 //!
 //! ## ⚠️ Hits your live Arlo account
 //!
 //! This binary opens a real authenticated session against
-//! `ocapi-app.arlo.com` / `myapi.arlo.com` and dispatches a real OTP
-//! email. Don't wire it into CI — it's a manual smoke test.
+//! `ocapi-app.arlo.com` / `myapi.arlo.com` and triggers a real push
+//! approval prompt on the phone signed into your Arlo mobile app.
+//! Don't wire it into CI — it's a manual smoke test.
+//!
+//! ## What it verifies
+//!
+//! The `ArloClient::authenticate_with_push` flow, reproducing the Arlo
+//! web client's PingOne push ceremony: `startAuth {factorType:"",
+//! userId}` (sends the prompt) → poll `finishAuth {factorAuthCode,
+//! isBrowserTrusted}` (no OTP); each poll is HTTP 200 with the state in
+//! `meta` (`error:9233` = pending, `code:200`+token = approved) → pair
+//! with `browserAuthCode` → continuation chain.
 //!
 //! ## Prerequisites
 //!
-//! `config.toml` (next to `Cargo.toml`) must contain:
+//! 1. The Arlo mobile app installed and signed in on your phone, with
+//!    push 2FA enabled on the account.
+//! 2. `config.toml` (next to `Cargo.toml`) containing:
 //!
 //! ```toml
 //! [credentials]
@@ -17,49 +29,49 @@
 //! password = "your-arlo-password"
 //!
 //! [mfa]
-//! preferred_method = "EMAIL"   # IMAP automation only works with EMAIL
-//!
-//! [mfa.imap]
-//! enabled  = true              # MUST be true for this script
-//! provider = "gmail"           # or "outlook" / "yahoo" / explicit host
-//! username = "you@example.com"
-//! password = "your-app-password"   # use an app-password, not your real one
-//! # delete_after_read = false
+//! preferred_method = "push"    # MUST be "push" for this script
 //!
 //! [client]
-//! session_cache_path = ".arlo_session.json"
+//! session_cache_path = ".arlo_session_push.json"
 //! headless           = true
 //! ```
+//!
+//! No `[mfa.imap]` block is needed — push has no inbox to poll.
 //!
 //! ## Run it
 //!
 //! ```bash
-//! RUST_LOG=rs_arlo=info cargo run --example list_cameras
+//! RUST_LOG=rs_arlo=info cargo run --example push_login
 //! ```
+//!
+//! Then **watch your phone** and tap "Approve" within the timeout
+//! (default 120 s, polled every 3 s).
 //!
 //! Expected behaviour:
 //! 1. Loads `config.toml`.
 //! 2. Boots the stealth proxy (~5–10 s on cold start).
-//! 3. Either restores the cached session or runs the full
-//!    `login → factors → start_auth → IMAP fetch → finish_auth → trust →
-//!    validate_session_v3 → device_support_v2` flow.
-//! 4. Fetches the device list and prints every camera-class device
-//!    with its name, model, firmware, parent base-station, and online
-//!    state.
+//! 3. Either restores the cached session or runs
+//!    `login → startAuth → [push prompt] → poll finishAuth → trust
+//!    (browserAuthCode) → validate_session_v3 → device_support_v2`.
+//! 4. Prints every camera-class device.
 //! 5. Logs out cleanly.
+//!
+//! Tell me: did step 3 complete after you approved on the phone, did it
+//! time out, or did it error — and paste the `RUST_LOG=info` lines
+//! around "Awaiting push approval" / "finishAuth" if it failed.
 
+use rs_arlo::ArloClient;
 use rs_arlo::config::ArloConfig;
-use rs_arlo::{ArloClient, ImapMfaHandler};
 use std::path::Path;
 
 const CONFIG_PATH: &str = "config.toml";
-const CACHE_PATH: &str = ".arlo_session.json";
+const CACHE_PATH: &str = ".arlo_session_push.json";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
-    println!("=== rs-arlo manual smoke test: list cameras ===\n");
+    println!("=== rs-arlo manual smoke test: PUSH login ===\n");
 
     // ---- 1. Validate config ----
     let config = match load_and_validate_config() {
@@ -69,11 +81,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
-    let imap_cfg = config
-        .mfa
-        .as_ref()
-        .and_then(|m| m.imap.clone())
-        .expect("validated above");
 
     // ---- 2. Build client (programmatic — exercises the public builder) ----
     println!("→ Booting stealth proxy + restoring cache (this can take a few seconds)...");
@@ -83,16 +90,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-    // ---- 3. Authenticate ----
+    // ---- 3. Authenticate via PUSH ----
     if client.is_authenticated() {
         println!("✓ Restored a valid session from `{CACHE_PATH}` — skipping MFA.");
+        println!("  (Delete `{CACHE_PATH}` to force a fresh push login.)");
     } else {
-        println!("→ No valid cached session. Running full IMAP-automated MFA flow...");
-        println!("  (Arlo will email an OTP; ImapMfaHandler polls your inbox for it.)");
+        let interval = ArloClient::DEFAULT_PUSH_POLL_INTERVAL;
+        let timeout = ArloClient::DEFAULT_PUSH_TIMEOUT;
+        println!(
+            "→ No cached session. Triggering a PUSH prompt — \
+             APPROVE IT ON YOUR PHONE within {timeout:?} (polling every {interval:?})..."
+        );
         client
-            .authenticate_with_handler(&config, ImapMfaHandler::new(imap_cfg))
+            .authenticate_with_push(&config, interval, timeout)
             .await?;
-        println!("✓ Authenticated; session cached to `{CACHE_PATH}`.");
+        println!("✓ Push approved; session cached to `{CACHE_PATH}`.");
     }
     println!(
         "  user_id  : {}\n  device_id: {}\n",
@@ -100,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client.device_id()
     );
 
-    // ---- 4. List cameras ----
+    // ---- 4. Prove the session works: list cameras ----
     println!("→ Fetching device list...");
     let devices = client.get_devices().await?;
     let cameras: Vec<_> = devices
@@ -126,15 +138,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(model) = &cam.model_id {
                 println!("       model     : {model}");
             }
-            if let Some(fw) = &cam.firm_version {
-                println!("       firmware  : {fw}");
-            }
-            if let Some(mac) = &cam.mac_address {
-                println!("       mac       : {mac}");
-            }
-            if cam.presigned_last_image_url.is_some() {
-                println!("       thumbnail : (presigned URL available)");
-            }
             println!();
         }
     }
@@ -143,17 +146,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("→ Logging out...");
     client.logout().await?;
     println!("✓ Logged out cleanly.\n");
+    println!("=== PUSH login smoke test PASSED ===");
 
     Ok(())
 }
 
-/// Loads `config.toml` and refuses to proceed unless every field this
-/// example needs is present and non-empty. Friendlier than letting the
-/// auth flow fail mid-stream with a generic message.
+/// Loads `config.toml` and refuses to proceed unless the fields this
+/// example needs are present. Friendlier than letting the auth flow
+/// fail mid-stream with a generic message.
 fn load_and_validate_config() -> Result<ArloConfig, String> {
     if !Path::new(CONFIG_PATH).exists() {
         return Err(format!(
-            "`{CONFIG_PATH}` not found. Copy `config.toml.example` and fill it in."
+            "`{CONFIG_PATH}` not found. Copy `config.toml.example` and fill it in \
+             (see this file's header for the minimal push layout)."
         ));
     }
     let config = ArloConfig::load_from_file(CONFIG_PATH)
@@ -170,34 +175,17 @@ fn load_and_validate_config() -> Result<ArloConfig, String> {
         return Err("`[credentials].password` is empty in config.toml".to_string());
     }
 
-    let imap = config
+    let preferred = config
         .mfa
         .as_ref()
-        .and_then(|m| m.imap.as_ref())
-        .ok_or_else(|| {
-            "Missing `[mfa.imap]` block — this example requires IMAP-automated MFA".to_string()
-        })?;
-    if !imap.enabled.unwrap_or(false) {
-        return Err("`[mfa.imap].enabled` must be `true` for this example. \
-             Either enable it or use `examples/simple` for the interactive flow."
-            .to_string());
-    }
-    if imap.username.as_deref().unwrap_or("").is_empty() {
-        return Err("`[mfa.imap].username` is empty in config.toml".to_string());
-    }
-    if imap.password.as_deref().unwrap_or("").is_empty() {
-        return Err(
-            "`[mfa.imap].password` is empty in config.toml — use an app-password \
-             (regular passwords don't work for IMAP on most providers)"
-                .to_string(),
-        );
-    }
-    if imap.host.as_deref().unwrap_or("").is_empty()
-        && imap.provider.as_deref().unwrap_or("").is_empty()
-    {
-        return Err(
-            "`[mfa.imap]` needs either `host` or `provider` (gmail / outlook / yahoo)".to_string(),
-        );
+        .and_then(|m| m.preferred_method.as_deref())
+        .unwrap_or("");
+    if !preferred.eq_ignore_ascii_case("push") {
+        return Err(format!(
+            "`[mfa].preferred_method` must be \"push\" for this example \
+             (found {preferred:?}). Use `examples/simple` or \
+             `manual_examples/list_cameras` for the email/IMAP flow."
+        ));
     }
 
     Ok(config)

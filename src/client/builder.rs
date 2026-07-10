@@ -29,7 +29,7 @@ use crate::client::{ArloClient, AuthManager};
 use crate::config::ClientConfig;
 use crate::error::ArloError;
 use reqwest::Client;
-use rs_cloudscraper::{BrowserProfile, CloudScraper};
+use stealthscraper_rs::{BrowserProfile, CloudScraper};
 use std::sync::Arc;
 
 /// Programmatic builder for an [`ArloClient`]. Construct via

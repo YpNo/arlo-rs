@@ -12,6 +12,8 @@ pub mod devices;
 pub mod endpoints;
 /// S3 Video chunk parsing and media decryption logic.
 pub mod library;
+/// v3 WebRTC live-stream signaling (sipInfo + hmswebsocketproxy WSS).
+pub mod livestream;
 /// Direct LAN client for an Arlo SmartHub with pinned-leaf TLS.
 pub mod local_hub;
 /// Pluggable Multi-Factor-Authentication handler trait + bundled impls.
@@ -27,7 +29,7 @@ pub(crate) mod test_helpers;
 
 use crate::config::{ApiVersion, ArloConfig, ClientConfig};
 use crate::error::ArloError;
-use crate::events::EventBus;
+use crate::events::{EventBus, MqttParams};
 use crate::models::auth::SessionToken;
 pub use auth::AuthManager;
 pub use builder::ArloClientBuilder;
@@ -144,32 +146,67 @@ impl ArloClient {
         })
     }
 
-    /// Returns a reference to the SSE event bus, booting it on first call.
+    /// Returns a reference to the event bus, booting it on first call.
     ///
-    /// The bus subscribes to Arlo's `/hmsweb/client/subscribe` SSE stream
-    /// and broadcasts parsed [`crate::models::events::ArloEvent`]s to any
-    /// receiver obtained via [`EventBus::subscribe`]. Returns
-    /// [`ArloError::AuthError`] if no access token is yet held.
+    /// Connects to Arlo's MQTT-over-WebSocket broker (the v3 successor
+    /// to the now-403 SSE channel) and broadcasts parsed
+    /// [`crate::models::events::ArloEvent`]s to any receiver obtained
+    /// via [`EventBus::subscribe`].
+    ///
+    /// First call resolves the broker URL from `session/v3` (`mqttUrl`)
+    /// and the device list to build the subscription topics, so it
+    /// performs two REST round-trips before the listener spawns.
+    ///
+    /// # Errors
+    ///
+    /// [`ArloError::AuthError`] if not authenticated or the account's
+    /// `session/v3` does not advertise an `mqttUrl`; transport/parse
+    /// errors from the `session/v3` and devices calls propagate.
     pub async fn events(&self) -> Result<&EventBus, ArloError> {
         self.event_bus
             .get_or_try_init(|| async {
-                let token = self.auth.token().ok_or_else(|| {
+                let access_token = self
+                    .auth
+                    .token()
+                    .ok_or_else(|| {
+                        ArloError::AuthError(
+                            "Cannot start event bus without an active session".into(),
+                        )
+                    })?
+                    .to_string();
+                let user_id = self.auth.user_id.clone().ok_or_else(|| {
+                    ArloError::AuthError("event bus requires an authenticated userId".into())
+                })?;
+
+                // `mqttUrl` is delivered by session/v3 (also doubles as a
+                // session-freshness check before we open the socket).
+                let session = self.validate_session_v3().await?;
+                let mqtt_url = session.mqtt_url.ok_or_else(|| {
                     ArloError::AuthError(
-                        "Cannot start SSE event bus without an active session".into(),
+                        "session/v3 returned no mqttUrl — account not on the v3 event bus".into(),
                     )
                 })?;
-                let streaming = self.transport.streaming_client().ok_or_else(|| {
-                    ArloError::AuthError(
-                        "The active transport does not support streaming (SSE event bus unavailable)"
-                            .into(),
-                    )
-                })?;
-                EventBus::start(
-                    streaming,
-                    self.endpoints.api_host.clone(),
-                    token.to_string(),
-                    self.auth.device_id.clone(),
-                )
+
+                // Subscribe to the web client's fine-grained per-resource
+                // topics keyed by each device's xCloudId (the broad
+                // `d/<xCloudId>/out/#` wildcard is owner-only) plus the
+                // user inbox.
+                let devices = self.get_devices().await?;
+                let with_xcloud = devices.iter().filter(|d| d.x_cloud_id.is_some()).count();
+                let topics = crate::events::subscription_topics(&devices, &user_id);
+                info!(
+                    device_count = devices.len(),
+                    with_xcloud,
+                    topic_count = topics.len(),
+                    "resolved MQTT event-bus subscription (no xCloud ⇒ legacy get_devices, no camera events)"
+                );
+
+                EventBus::start(MqttParams {
+                    mqtt_url,
+                    user_id,
+                    access_token,
+                    topics,
+                })
                 .await
             })
             .await
@@ -315,10 +352,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn events_errors_when_transport_does_not_support_streaming() {
-        // MockTransport's default streaming_client() returns None.
+    async fn events_errors_without_an_active_session() {
+        // No token cached → the bus can't authenticate the MQTT CONNECT.
         let mock = Arc::new(MockTransport::new());
-        let client = authenticated_mocked_client(mock);
+        let client = mocked_client(mock);
         let err = client.events().await.unwrap_err();
         assert!(matches!(err, ArloError::AuthError(_)));
     }

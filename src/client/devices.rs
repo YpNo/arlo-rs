@@ -1096,7 +1096,7 @@ fn extract_active_mode_revision(body: &str, location_id: &str) -> Option<u64> {
 /// pyaarlo. If the device has no `xCloudId` (legacy `/users/devices`
 /// payload) the header is omitted entirely — Arlo tolerates its
 /// absence on the legacy stream path.
-fn xcloud_header(device: &Device) -> Vec<(String, String)> {
+pub(crate) fn xcloud_header(device: &Device) -> Vec<(String, String)> {
     match device.x_cloud_id.as_deref() {
         Some(id) if !id.is_empty() => vec![("xcloudId".to_string(), id.to_string())],
         _ => Vec::new(),
@@ -1972,19 +1972,21 @@ mod tests {
 
     #[tokio::test]
     async fn start_stream_falls_back_to_force_when_no_active_stream() {
-        // get_stream_url → None, then force_start_stream tries to boot the
-        // event bus, which errors on MockTransport (no streaming client).
-        // We assert the fallback path is taken (an AuthError from the bus),
-        // proving start_stream didn't stop at the empty peek.
+        // get_stream_url → None, then force_start_stream boots the event
+        // bus, whose first step is a session/v3 round-trip. MockTransport
+        // has no canned response for it, so the call errors — but only
+        // *after* progressing past the 2-call peek, which is what proves
+        // start_stream didn't stop at the empty peek.
         let mock = arc_mock();
         mock.queue_post(r#"{"success":true,"data":{}}"#); // empty peek
         let client = authenticated_mocked_client(Arc::clone(&mock));
         let dev = make_device("CAM-1", None, None);
 
-        let err = client.start_stream(&dev).await.unwrap_err();
+        assert!(client.start_stream(&dev).await.is_err());
         assert!(
-            matches!(err, ArloError::AuthError(_)),
-            "expected the event-bus AuthError from the force fallback, got {err:?}"
+            mock.calls().len() > 2,
+            "force fallback must progress past the 2-call peek (event-bus boot), got {} calls",
+            mock.calls().len()
         );
     }
 

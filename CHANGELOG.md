@@ -7,6 +7,162 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed — ⚠️ BREAKING: rs-arlo is now signaling-only for v3 live
+- Deleted the in-crate WebRTC **media** plane: `ArloClient::start_live`,
+  `ArloClient::start_live_rtsp`, `LiveStream`, `RtspLiveStream`, the
+  built-in localhost RTSP publisher (`client::rtsp_pub`), the SDP
+  bundle-munge, the Opus-silence pump, the `on_track`/PLI keyframe pump,
+  the `SettingEngine`/ICE-server mapping, and the **`webrtc` 0.17
+  dependency** (and its entire ICE/DTLS/SRTP transitive graph — ~260
+  fewer crates). The `webrtc_live` / `webrtc_rtsp` manual examples are
+  removed too.
+  - **Why:** Arlo's v3 gateway is **non-bundled `FreeSWITCH`** and
+    requires a Chrome-style two-ICE-transport client; the pure-Rust
+    `webrtc` 0.17 stack is BUNDLE-only and provably cannot negotiate it
+    (confirmed live: ICE never completes). The WebRTC media plane now
+    lives in the **consumer** (the streamer's GStreamer `webrtcbin`,
+    proven against the live camera).
+  - **Kept (the public live API):** `ArloClient::sip_info`,
+    `ArloClient::webrtc_negotiate` (offer SDP in → answer SDP out),
+    `SignalingSocket` + `SignalingSocket::disconnect`
+    (`sessionDisconnected`), `SignalingAnswer`, `SipInfo`, and all the
+    HTTP-over-WS framing helpers + their fixture tests. Consumers
+    generate the offer, call `webrtc_negotiate`, apply the answer, and
+    own teardown via `SignalingSocket::disconnect`.
+  - SemVer: breaking — bump **MINOR** while pre-1.0 (`0.x`), per the
+    project's pre-1.0 policy.
+
+### Added (live video — WebRTC, Phases 1–2)
+- **`ArloClient::sip_info(&Device)`** — `GET /hmsweb/users/devices/
+  sipInfo/v2` (xcloudId header + envelope) → `SipInfo` (SIP callee URI,
+  per-call password, STUN/TURN `iceServers`). v3 cameras no longer
+  serve an `rtsps://` URL (legacy `/startStream` 502s); live is WebRTC.
+- **`ArloClient::webrtc_negotiate`** + **`SignalingSocket`** — the
+  `hmswebsocketproxy` HTTP-over-WSS exchange (`wss://<domain>:7443/`,
+  subprotocol `sip`): `POST /initiateOffer` (SDP offer) → `200 OK`
+  (SDP answer); `POST /sessionDisconnected` on teardown. Framing
+  fixture-tested against the captured bytes.
+- **`ArloClient::start_live(&Device) -> LiveStream`** — full WebRTC
+  peer (`webrtc` crate): recvonly H.264 offer pinned to the gateway's
+  profile (`42001f`, pkt-mode 1, pt 103), Arlo ICE servers, non-trickle
+  gather, apply answer, expose inbound H.264 RTP on `LiveStream::rtp`.
+  `LiveStream::close()` + a `Drop` RAII safety net guarantee the peer +
+  `sessionDisconnected` are torn down on every exit (incl. panic/abort)
+  so a forgotten handle can't leave the camera streaming (battery).
+- New dependency: `webrtc` 0.17 (pure-Rust ICE/DTLS/SRTP — no rtsps
+  path exists for v3).
+- **`ArloClient::start_live_rtsp(&Device) -> RtspLiveStream`** (Phase 3)
+  — fronts the WebRTC H.264 RTP with a minimal built-in RTSP/1.0
+  server (TCP-interleaved only, RFC 2326 §10.12). `RtspLiveStream::url()`
+  yields `rtsp://127.0.0.1:<port>/<deviceId>` that any RTSP client
+  (the streamer's `rtspsrc … protocols=tcp+udp`, VLC, ffmpeg) pulls
+  unchanged, so the streamer's `StreamSource{url}` port is untouched.
+  Inbound RTP is re-stamped to payload type 96 to match the served
+  SDP. `RtspLiveStream` close/Drop tears down RTSP **and** WebRTC.
+  Verified live: 681 H.264 RTP packets / ~281 kbps from a real camera.
+- The smoke-test fixes that made the live path work: `sipInfo/v2`
+  needs `cameraId` as a request header (not just query); and the
+  gateway's SDP `a=ssrc` must be stripped or webrtc-rs won't fire
+  `on_track` for the camera's (different) inbound SSRC.
+
+### Fixed (live video — Phase 5: streamer end-to-end)
+- **⚠️ Root cause: v3 live is a FreeSWITCH *SIP call* — it needs an
+  audio m-line.** A live HAR of the working web client shows the offer
+  is **two bundled m-lines**: sendrecv Opus audio (the browser sends
+  mic audio) **and** recvonly H.264 video. FreeSWITCH answers audio
+  `sendrecv` + video `sendonly` on **separate, non-bundled** ICE/DTLS
+  transports, and only relays the camera's video once the audio call
+  leg is up. Our offer was video-only, so ICE/DTLS/RTCP succeeded but
+  **zero video RTP ever arrived** (the camera was never "called"). This
+  is the true cause of "idle never switches to live" — not the earlier
+  ICE-gathering theory.
+  - `start_live` now offers a **sendrecv Opus** audio transceiver
+    (m-line 0, matching the web client) backed by a
+    `TrackLocalStaticSample`, and runs a 20 ms **silence pump**
+    (`Weak`-scoped) — we have no microphone, the pump just keeps the
+    SIP call (and thus the video relay) alive.
+  - `on_track` now ignores the camera's inbound audio leg
+    (video-only → RTSP bridge).
+  - `strip_ssrc_attrs` removed: with a two-m-line answer webrtc-rs
+    maps inbound RTP by the gateway's **declared** SSRC; the old
+    single-section undeclared-SSRC trick would defeat that.
+  - **`bundle_answer_to_match_offer`** — FreeSWITCH answers our
+    *bundled* offer **non-bundled** (per-m-line `ice-ufrag`/`ice-pwd`/
+    candidates, no `a=group:BUNDLE`); webrtc-rs 0.17 is BUNDLE-only and
+    rejects it (`set_remote_description called with multiple conflicting
+    ice-ufrag values`). The answer is now rewritten to a single bundled
+    transport pinned to the **video** m-line's ICE, with the offer's
+    `a=group:BUNDLE` + per-line `a=mid` re-attached (FreeSWITCH omits
+    mids). Safe: FreeSWITCH presents one DTLS identity (same
+    `fingerprint` + `setup:active`) for both m-lines. The audio leg is
+    throwaway silence, so collapsing it onto the video transport is
+    lossless for our purpose. Legacy single-m-line answers pass through.
+- **IPv4-only UDP, mDNS disabled** (`SettingEngine`:
+  `NetworkType::Udp4`, `MulticastDnsMode::Disabled`). FreeSWITCH
+  **mirrors the offer's address family** in its single host candidate:
+  a dual-stack offer makes it answer an IPv6 host unreachable from the
+  client (the STUN/TURN relay can't resolve over IPv6 either), so ICE
+  stalls in `Checking` then `Failed`s after ~30 s; a Udp4-only offer
+  makes it answer a reachable IPv4 host and ICE/DTLS complete (verified
+  live). Also kills the IPv6 link-local listen spam. mDNS off removes
+  `.local` candidates the gateway can't resolve. A config knob to force
+  dual-stack (IPv6-only / CGNAT networks) is a planned follow-up.
+- **Unusable TCP TURN dropped.** `ice_servers()` filters the
+  `transport=tcp` TURN: webrtc-ice 0.17 `gather_candidates_relay` only
+  handles UDP TURN, so the TCP one only logged "Unable to handle URL".
+  Arlo always also offers a UDP TURN (kept).
+- **Keyframe-on-demand.** The H.264 codec advertises
+  `nack`/`nack pli`/`ccm fir`/`goog-remb`, and `start_live` runs a
+  periodic RTCP **PLI** pump (every 3 s, `Weak`-scoped). Arlo emits
+  only sparse unsolicited IDRs, so a late-joining / reconnecting RTSP
+  client previously stalled with no decodable frame; it now recovers
+  within ≤3 s. Addresses "can't reconnect to the stream".
+
+### Changed — ⚠️ event bus migrated SSE → MQTT-over-WSS
+- The legacy SSE channel `/hmsweb/client/subscribe` returns **403**
+  under the v3 API. `EventBus` now connects to Arlo's MQTT broker over
+  WebSocket (`wss://<mqttUrl>/mqtt`, `Sec-WebSocket-Protocol: mqtt`,
+  `Origin: https://my.arlo.com`), reverse-engineered from a live HAR:
+  MQTT 3.1.1, clean session, keep-alive 60 s; `CONNECT` clientId
+  `user_<userId>_<rand>`, username `<userId>`, password `<accessToken>`;
+  `SUBSCRIBE` (QoS 0) to the web client's **fine-grained** per-resource
+  topics keyed by each device's `xCloudId` (**not** its `deviceId`):
+  `d/<xCloudId>/out/<cameras|doorbells|chimes>/<deviceId>/#` plus
+  `d/<xCloudId>/out/<resource>/#` for wifi/modes/basestation/… and
+  `u/<userId>/in/#`. The broad `d/<xCloudId>/out/#` wildcard is
+  **owner-only** — shared/secondary accounts get SUBACK `0x80` for it,
+  so the explicit set is required. Inbound `PUBLISH` payloads keep the
+  legacy
+  event JSON shape, so `ArloEvent` and the broadcast/`ConnectionState`
+  API are **unchanged** (downstream consumers need no changes).
+- `session/v3` now parses `mqttUrl` (`SessionV3Response::mqtt_url`);
+  `ArloClient::events()` resolves it + the device list to build the
+  subscription, then spawns the reconnecting listener.
+- New deps: `tokio-tungstenite` (rustls), `mqttbytes`, `bytes`,
+  `futures-util`. The 10-min session/v3 keep-alive pinger is replaced
+  by MQTT `PINGREQ` at 30 s. SSE framing code removed.
+- ⚠️ The MQTT WSS connection does **not** route through the
+  cloudscraper/JA4 transport yet (different host; tracked).
+
+### Added (MFA)
+- **`authenticate_with_push(config, poll_interval, timeout)`** — PUSH
+  2FA support, reproducing the Arlo web client's PingOne push ceremony
+  (**verified against a live HAR capture**): `login` →
+  `POST /api/startAuth {factorType:"", userId}` (Arlo dispatches the
+  account's PRIMARY factor and returns its push `factorAuthCode` +
+  factor list) → poll `POST /api/finishAuth
+  {factorAuthCode, isBrowserTrusted}` (**no `otp` field**). Every poll
+  is HTTP 200; state is read from the `meta` envelope —
+  `code:400 error:9233` ("Authentication is not finished yet") = still
+  pending, `code:200` + `data.token` = approved. Pairing then uses the
+  approved response's `data.browserAuthCode` (distinct from the push
+  `factorAuthCode`). Requires PUSH to be the account's PRIMARY factor.
+  Defaults `DEFAULT_PUSH_POLL_INTERVAL` (5 s) / `DEFAULT_PUSH_TIMEOUT`
+  (120 s, matching Arlo's `MFA_Config.timeout.PUSH`). The
+  post-`finishAuth` continuation is shared (`complete_session`) between
+  `submit_mfa` and the push path; `AuthResponseData` gained
+  `browser_auth_code`.
+
 ### Added (V3 migration + streaming)
 - **`get_stream_url(&Device) -> Result<Option<StreamUrl>, ArloError>`** —
   synchronous peek (`action: "get"` on `/startStream`) that returns an

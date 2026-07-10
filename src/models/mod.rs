@@ -7,3 +7,4 @@ pub mod envelope;
 pub mod events;
 pub mod library;
 pub mod ratls;
+pub mod sip;
