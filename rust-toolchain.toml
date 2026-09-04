@@ -3,6 +3,6 @@
 # `rustup toolchain install` covers both crates and Edition-2024 features
 # (let-chains, async fn in trait via `async-trait`) compile identically
 # everywhere — local, CI, and downstream consumers.
-channel = "1.95.0"
+channel = "1.98.1"
 components = ["rustfmt", "clippy", "rust-src"]
 profile = "minimal"
