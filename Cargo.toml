@@ -17,7 +17,7 @@ toml = "1.1"
 # rs-cloudscraper = { git = "https://github.com/YpNo/rs-cloudscraper", tag = "v0.2.0", features = ["browser"] }
 # (Tracked in CHANGELOG.md under [Unreleased].)
 rs-cloudscraper = { path = "../rs-cloudscraper", features = ["browser"] }
-mailparse = "0.16.1"
+mailparse = "0.17.0"
 regex = "1.12.3"
 imap-client = { path = "../imap-rs/imap-client" }
 imap-core = { path = "../imap-rs/imap-core" }
