@@ -3,7 +3,7 @@
 
 ## Core Directives
 1. **Hexagonal Integrity**: Strictly separate Arlo protocol logic (Domain) from transport/MFA solving (Infrastructure). See `.agents/rules/architecture.md`.
-2. **Protocol Fidelity**: We must mimic the Arlo Web Dashboard exactly. This includes undocumented headers, the 6-step OAuth ceremony (login → get_factors → start_auth → finish_auth → validate_access_token → validate_session_v3), and JA4 TLS signatures (via `rs-cloudscraper`).
+2. **Protocol Fidelity**: We must mimic the Arlo Web Dashboard exactly. This includes undocumented headers, the 6-step OAuth ceremony (login → get_factors → start_auth → finish_auth → validate_access_token → validate_session_v3), and JA4 TLS signatures (Chrome emulation from `stealthscraper-rs`, driven through `wreq`).
 3. **Quality & Security Gates**: Every contribution must pass the Zero-Warning and Dependency Audit gates. See `.agents/rules/quality-standards.md`.
 4. **Resilient Session Management**: Use `secrecy::SecretString` for all tokens (zeroized on drop). Session state is snapshotted via `SessionToken` / `ArloClient::reattach()`. Cache files are `0600` on Unix.
 
@@ -13,12 +13,12 @@
 | File | Responsibility |
 |---|---|
 | `mod.rs` | `ArloClient` struct: transport injection, lazy `EventBus` init, `reattach()` / `session_token()` |
-| `builder.rs` | `ArloClientBuilder` (fluent) + internal `bootstrap()` that boots `rs-cloudscraper` |
+| `builder.rs` | `ArloClientBuilder` (fluent) + internal `bootstrap()`: default `WreqTransport`, or the headless-Chrome proxy with `.browser(true)` (`browser` feature) |
 | `auth.rs` | `AuthManager` (token+cache) + full 6-step OAuth state machine on `ArloClient` |
 | `auth_imap.rs` | IMAP OTP fetcher using workspace `imap-client` / `imap-core` crates |
 | `mfa.rs` | `MfaHandler` trait + `ImapMfaHandler`, `StdinMfaHandler`, `StaticOtpHandler` |
-| `transport.rs` | `HttpTransport` trait + `CloudScraperTransport` (prod) + `MockTransport` (tests) |
-| `api.rs` | Generic REST helpers: `execute_request`, OPTIONS preflight, JSON envelope unwrap |
+| `transport.rs` | `HttpTransport` trait + `WreqTransport` (prod default) + `CloudScraperTransport` (`browser` feature) + `MockTransport` (tests) |
+| `api.rs` | Generic REST helpers: `execute_request`, OPTIONS preflight, 429/1015 rate-limit retry, JSON envelope unwrap |
 | `devices.rs` | Camera topology, mode management, actuations, `local_hub()` factory |
 | `local_hub.rs` | `LocalHubClient`: LAN-direct SmartHub client with rustls leaf-cert pinning (RATLS) |
 | `ratls.rs` | Raw RATLS token spoofing for Cloudflare-bypass on local hub connections |
@@ -54,10 +54,10 @@
 - **Instrumentation**: `log` crate present (legacy migration in progress) — all **new** code must use `tracing` only; never add new `log::` call sites.
 - **Safety**: No `unsafe`. `unwrap()` banned; use `.expect("SAFETY: <reason>")`.
 - **Tokens**: `secrecy::SecretString` wraps all access tokens — zeroized on drop, never formatted via `Debug`.
-- **Testing**: Use `ArloClient::with_transport(Arc<dyn HttpTransport>, endpoints)` + `MockTransport` from `transport::test_support`; use `ArloClientBuilder::endpoints()` to point at a `mockito` server. Never boot the real browser proxy in unit tests.
+- **Testing**: Use `ArloClient::with_transport(Arc<dyn HttpTransport>, endpoints)` + `MockTransport` from `transport::test_support`; use `ArloClientBuilder::endpoints()` to point at a `mockito` server. `ArloClientBuilder::build()` is cheap (no browser) and may be pointed at `mockito`; never use `.browser(true)` in unit tests.
 - **IMAP MFA**: `ImapMfaHandler::prepare()` captures UNSEEN-baseline **before** OTP dispatch. Uses workspace crates `imap-client`, `imap-core`, `imap-tls`.
 - **RATLS / Local Hub**: `LocalHubClient` uses a custom rustls `PinnedLeafVerifier` — fails closed on cert mismatch.
-- **Stealth Integrity**: TLS handshake signatures MUST be verified against `rs-cloudscraper` profiles when updating the Arlo client. `BrowserProfile::random()` is selected at bootstrap.
+- **Stealth Integrity**: Arlo's Cloudflare gate is TLS/HTTP2-fingerprint only (no JS challenge). `WreqTransport` uses `stealthscraper_rs::emulation::for_kind(profile.browser_kind())` — never build a `wreq` client without that emulation. `BrowserProfile::random()` is selected at bootstrap; the `User-Agent` and `Sec-CH-UA*` hints must always come from the same profile.
 
 <!-- rtk-instructions v2 -->
 ## RTK (Rust Token Killer) - Token-Optimized Commands

@@ -32,14 +32,15 @@ pub use transport::HttpTransport;
 ///
 /// `ArloClient` orchestrates auth-header injection, CORS preflight, and
 /// JSON envelope handling, then delegates the actual HTTP byte-shuffling
-/// to a pluggable [`HttpTransport`]. Production transports route through
-/// the `rs-cloudscraper` headless-browser proxy to forge a JA4 TLS
-/// fingerprint indistinguishable from a real Chrome session; tests
-/// substitute lightweight mocks.
+/// to a pluggable [`HttpTransport`]. The default production transport is
+/// a `wreq` client carrying a measured Chrome TLS/HTTP2 fingerprint (see
+/// [`crate::client::transport::WreqTransport`]); tests substitute
+/// lightweight mocks.
 pub struct ArloClient {
     /// The HTTP transport. Production wires this to a
-    /// [`crate::client::transport::CloudScraperTransport`]; tests use a
-    /// `MockTransport` to dispatch requests without booting the proxy.
+    /// [`crate::client::transport::WreqTransport`] (or the browser-proxy
+    /// transport under the `browser` feature); tests use a
+    /// `MockTransport` to dispatch requests without any network.
     pub(crate) transport: Arc<dyn HttpTransport>,
     /// Base hosts the client points at. Defaults to production URLs;
     /// the builder's [`ArloClientBuilder::endpoints`] overrides them.
@@ -81,7 +82,7 @@ impl ArloClient {
     }
 
     /// Constructs a client backed by a caller-supplied transport, skipping
-    /// the heavyweight `rs-cloudscraper` bootstrap entirely.
+    /// the default transport bootstrap entirely.
     ///
     /// This is the entry point for unit tests that want to drive the
     /// orchestration layer (auth-header injection, OPTIONS preflight,
@@ -250,14 +251,7 @@ impl ArloClient {
     #[instrument(skip(path))]
     pub async fn from_config(path: &str) -> Result<Self, ArloError> {
         let config = ArloConfig::load_from_file(path)?;
-        let client_conf = config.client.clone().unwrap_or(ClientConfig {
-            debug_mode: None,
-            user_agent: None,
-            session_cache_path: None,
-            headless: None,
-            upstream_proxy: None,
-            api_version: None,
-        });
+        let client_conf = config.client.clone().unwrap_or_default();
 
         let mut client = Self::with_config(&client_conf).await?;
         if let Some(ver) = client_conf.api_version {

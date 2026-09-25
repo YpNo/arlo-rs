@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — ⚠️ BREAKING: browser-less default transport
+- **`WreqTransport` is the default transport.** Arlo's Cloudflare front
+  admits clients on their TLS + HTTP/2 fingerprint alone (no JS /
+  Turnstile challenge — verified against the reference Python client,
+  which moved to `curl_cffi` Chrome impersonation in June 2026 for the
+  same reason). Every request now goes through a `wreq` client built
+  with the Chrome emulation `stealthscraper-rs` measured
+  (`emulation::for_kind(profile.browser_kind())`), carrying the
+  profile's `User-Agent` and `Sec-CH-UA` / `-Mobile` / `-Platform` hints
+  and a per-session cookie store. **No Chrome process is launched**;
+  `ArloClientBuilder::build()` is now cheap and needs no browser binary.
+- The headless-Chrome MITM-proxy transport (`CloudScraperTransport`)
+  moved behind a new off-by-default **`browser` cargo feature** and is
+  selected with `ArloClientBuilder::browser(true)` / `[client]
+  use_browser = true`. It no longer disables certificate verification:
+  the `reqwest` client trusts exactly the proxy's per-process CA
+  (`TlsSpoofingProxy::ca_pem()`) instead of `danger_accept_invalid_certs`.
+  `ArloClientBuilder::headless` is ignored by the default transport.
+- `ArloError::NetworkError` now wraps
+  `Box<dyn std::error::Error + Send + Sync>` (was `reqwest::Error`) so
+  both HTTP clients map into it; the concrete error is reachable via
+  `source()`. `HttpTransport::streaming_client` (dead since the SSE bus
+  was removed) is gone; `HttpRequest` is `Clone`.
+- New: automatic retry of Cloudflare rate limiting — HTTP 429, or any
+  body carrying `error code: 1015` — three attempts, 3 s apart, in
+  `execute_request` (mirrors pyaarlo's loop).
+- New dependency `wreq` (temporary, same version and features as
+  `stealthscraper-rs`; removed once that crate re-exports it).
+  `stealthscraper-rs` is consumed without default features, which drops
+  the CDP client, Chrome launcher and their dependencies from the
+  default build.
+
 ### Changed — ⚠️ BREAKING: crate renamed `rs-arlo` → `arlo-rs`
 - The package is now `arlo-rs` (library crate `arlo_rs`), matching the
   repository `YpNo/arlo-rs`. Every `use rs_arlo::…` becomes

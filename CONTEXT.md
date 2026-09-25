@@ -6,7 +6,7 @@ This document provides a comprehensive technical overview of the `arlo-rs` libra
 `arlo-rs` is a high-fidelity, asynchronous Rust library for interacting with the Arlo security camera ecosystem. Since Arlo lacks an official API, this library **emulates the Arlo Web Dashboard** exactly.
 
 ### Core Strategy:
-- **Stealth**: All traffic is routed through a local headless-browser proxy (`rs-cloudscraper`) to forge JA4 TLS fingerprints and bypass Cloudflare bot detection.
+- **Stealth**: Arlo's Cloudflare front fingerprints TLS/HTTP2 only (no JS challenge — confirmed against the reference Python client, which moved to `curl_cffi` Chrome impersonation in 2026). All REST traffic therefore goes through `WreqTransport`: a `wreq` client with the Chrome emulation `stealthscraper-rs` measured, plus the profile's `User-Agent` and `Sec-CH-UA*` hints. No browser process. The headless-Chrome MITM proxy (`CloudScraperTransport`) is an opt-in escalation path behind the `browser` feature.
 - **Hexagonal Architecture**: Business logic (Domain) is strictly decoupled from I/O (Infrastructure) via traits, enabling 100% unit-testability without booting a browser.
 - **Protocol Fidelity**: Every undocumented header, telemetry ping, and the complex 6-step OAuth ceremony is mirrored.
 
@@ -16,7 +16,8 @@ This document provides a comprehensive technical overview of the `arlo-rs` libra
 
 ### Hexagonal Seams
 - **`HttpTransport`**: The primary seam.
-    - `CloudScraperTransport` (Prod): Routes through the stealth proxy.
+    - `WreqTransport` (Prod, default): Chrome-impersonating `wreq` client.
+    - `CloudScraperTransport` (Prod, `browser` feature): routes `reqwest` through the headless-Chrome MITM proxy, trusting only that proxy's per-process CA.
     - `MockTransport` (Test): Canned responses, no network I/O.
     - Host URLs are injected via `ArloEndpoints` (prod defaults, or
       `ArloEndpoints::testing(base_url)` to point at a mock server).
@@ -117,13 +118,14 @@ Handles S3 chunk parsing and media decryption. Arlo video chunks are often encry
 - **`log` / `env_logger` fully removed** (PR 5). Examples use `tracing-subscriber` with a `RUST_LOG`-driven `EnvFilter` (default `warn,arlo_rs=info`). Do not reintroduce `log`.
 
 ### Testing
-- **Unit Tests**: Must use `ArloClient::with_transport()` to avoid booting the `rs-cloudscraper` browser.
+- **Unit Tests**: Use `ArloClient::with_transport()` + `MockTransport` for orchestration logic. `ArloClientBuilder::build()` is cheap with the default transport, so builder-level tests may point it at a `mockito` server via `.endpoints()`. Never use `.browser(true)` in tests.
 - **Mocking**: Use `mockito` for endpoint-level mocks and `MockTransport` for trait-level mocks.
 
 ---
 
 ## 6. Workspace Dependencies
-- **`rs-cloudscraper`** (Local path `../rs-cloudscraper`): The stealth browser engine.
+- **`stealthscraper-rs`** (Local path `../stealthscraper-rs`, branch `chore/p0-lean-dependencies`, v1.0.0): browser profiles, the measured Chrome emulation table and client hints (core, no features); headless Chrome + MITM proxy under its `browser` feature.
+- **`wreq`** (temporary direct dependency, same version/features as `stealthscraper-rs`): the impersonating HTTP client behind `WreqTransport`. Goes away once `stealthscraper-rs` re-exports it.
 - **`imap-rs`** (Local path `../imap-rs/`): Provides `imap-client`, `imap-core`, and `imap-tls` for MFA automation.
 
 ## 7. Error Handling

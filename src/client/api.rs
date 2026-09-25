@@ -216,10 +216,11 @@ impl ArloClient {
             );
         }
 
-        // 3. Dispatch through the transport.
+        // 3. Dispatch through the transport, retrying Cloudflare rate
+        //    limiting (429 / error 1015) the way the web client's users do:
+        //    a short pause, a few attempts.
         let HttpResponse { status, body } = self
-            .transport
-            .request(HttpRequest {
+            .send_with_rate_limit_retry(HttpRequest {
                 method: method.clone(),
                 url: url.to_string(),
                 headers,
@@ -240,14 +241,58 @@ impl ArloClient {
         }
         Ok(body)
     }
+
+    /// Sends `request`, re-sending it after [`RATE_LIMIT_BACKOFF`] when
+    /// the response is a rate limit ([`is_rate_limited`]), at most
+    /// [`RATE_LIMIT_ATTEMPTS`] times. Any other response (including other
+    /// errors) is returned as-is on the first attempt.
+    async fn send_with_rate_limit_retry(
+        &self,
+        request: HttpRequest,
+    ) -> Result<HttpResponse, ArloError> {
+        let mut attempt = 1;
+        loop {
+            let response = self.transport.request(request.clone()).await?;
+            if !is_rate_limited(&response) || attempt >= RATE_LIMIT_ATTEMPTS {
+                return Ok(response);
+            }
+            warn!(
+                url = %request.url,
+                status = %response.status,
+                attempt,
+                backoff_secs = RATE_LIMIT_BACKOFF.as_secs(),
+                "Rate limited by Arlo/Cloudflare; retrying"
+            );
+            tokio::time::sleep(RATE_LIMIT_BACKOFF).await;
+            attempt += 1;
+        }
+    }
+}
+
+/// Maximum number of attempts for a rate-limited request (the first send
+/// plus retries). Mirrors the reference Python client's `3 × 3 s` loop.
+const RATE_LIMIT_ATTEMPTS: u32 = 3;
+/// Pause between rate-limited attempts.
+const RATE_LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(3);
+/// Cloudflare's rate-limit error code, embedded in the HTML body it
+/// serves (sometimes with an HTTP 403 rather than 429).
+const CLOUDFLARE_RATE_LIMIT_CODE: &str = "error code: 1015";
+
+/// True for HTTP 429, or for any response whose body carries Cloudflare's
+/// `error code: 1015` rate-limit marker.
+fn is_rate_limited(response: &HttpResponse) -> bool {
+    response.status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || response.body.contains(CLOUDFLARE_RATE_LIMIT_CODE)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::client::endpoints::ArloEndpoints;
+    use crate::client::test_helpers::mocked_client;
     use crate::client::transport::test_support::MockTransport;
     use mockito::Server;
+    use reqwest::StatusCode;
     use std::sync::Arc;
 
     fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -525,6 +570,83 @@ mod tests {
             )
             .await;
         assert!(res.is_ok(), "preflight failure must not abort the call");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn execute_request_retries_after_rate_limit_then_succeeds() {
+        // Paused clock: the 3 s backoff auto-advances, so this runs instantly.
+        let mock = Arc::new(MockTransport::new());
+        mock.expect(HttpResponse {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: "slow down".into(),
+        });
+        mock.expect_ok(r#"{"ok":true}"#);
+        let client = mocked_client(Arc::clone(&mock));
+
+        let body = client
+            .execute_request::<()>(Method::GET, "https://test.example/hmsweb/x", None)
+            .await
+            .unwrap();
+        assert_eq!(body, r#"{"ok":true}"#);
+        assert_eq!(mock.calls().len(), 2, "one retry after the 429");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn execute_request_retries_on_cloudflare_1015_body() {
+        let mock = Arc::new(MockTransport::new());
+        mock.expect(HttpResponse {
+            status: StatusCode::FORBIDDEN,
+            body: "<html>error code: 1015</html>".into(),
+        });
+        mock.expect_ok("fine");
+        let client = mocked_client(Arc::clone(&mock));
+
+        let body = client
+            .execute_request::<()>(Method::GET, "https://test.example/hmsweb/x", None)
+            .await
+            .unwrap();
+        assert_eq!(body, "fine");
+        assert_eq!(mock.calls().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn execute_request_gives_up_after_rate_limit_attempts() {
+        let mock = Arc::new(MockTransport::new());
+        for _ in 0..RATE_LIMIT_ATTEMPTS {
+            mock.expect(HttpResponse {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                body: "".into(),
+            });
+        }
+        let client = mocked_client(Arc::clone(&mock));
+
+        let err = client
+            .execute_request::<()>(Method::GET, "https://test.example/hmsweb/x", None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ArloError::HttpError { status, .. } if status == StatusCode::TOO_MANY_REQUESTS),
+            "{err:?}"
+        );
+        assert_eq!(mock.calls().len() as u32, RATE_LIMIT_ATTEMPTS);
+        assert!(mock.responses_drained());
+    }
+
+    #[tokio::test]
+    async fn execute_request_does_not_retry_other_failures() {
+        let mock = Arc::new(MockTransport::new());
+        mock.expect(HttpResponse {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: "boom".into(),
+        });
+        let client = mocked_client(Arc::clone(&mock));
+
+        let err = client
+            .execute_request::<()>(Method::GET, "https://test.example/hmsweb/x", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ArloError::HttpError { .. }));
+        assert_eq!(mock.calls().len(), 1);
     }
 
     #[tokio::test]

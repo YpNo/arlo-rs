@@ -42,14 +42,19 @@ pub struct ImapConfig {
     pub delete_after_read: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ClientConfig {
     pub debug_mode: Option<bool>,
     pub user_agent: Option<String>,
     pub session_cache_path: Option<String>,
+    /// Only meaningful with `use_browser = true` (headless Chrome).
     pub headless: Option<bool>,
     pub upstream_proxy: Option<String>,
     pub api_version: Option<ApiVersion>,
+    /// Route traffic through the headless-Chrome MITM proxy instead of
+    /// the default `wreq` impersonation client. Requires the crate's
+    /// `browser` feature; defaults to `false`.
+    pub use_browser: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

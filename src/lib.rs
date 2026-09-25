@@ -2,15 +2,21 @@
 //! The `arlo-rs` library provides asynchronous, programmatic access to the Arlo security camera ecosystem.
 //!
 //! Because Arlo does not provide an official API, this library rigorously emulates the behavior of the
-//! Arlo Web Dashboard. It circumvents Cloudflare bot protections by tunneling all traffic through a local
-//! headless browser proxy managed by `rs-cloudscraper`.
+//! Arlo Web Dashboard. Arlo's Cloudflare front admits clients by their TLS and HTTP/2 fingerprint (it
+//! serves no JavaScript challenge), so every request goes out through a `wreq` client that reproduces
+//! a real Chrome's ClientHello, HTTP/2 SETTINGS and client hints — measured by `stealthscraper-rs` —
+//! with no browser process involved. A headless-Chrome MITM-proxy transport remains available behind
+//! the `browser` feature as an escalation path.
 //!
 //! # Architecture
 //!
-//! 1. **`ArloClient`**: The core interactive REST client. It uses a custom `reqwest` builder configured
-//!    to proxy traffic seamlessly.
-//! 2. **`EventManager`**: An Actor-pattern `tokio` background task that subscribes to Arlo's Server-Sent Events (SSE).
-//!    It parses JSON event chunks and broadcasts strictly-typed `ArloEvent` enums down a channel.
+//! 1. **`ArloClient`**: The core REST client. It orchestrates headers, CORS preflight and JSON
+//!    envelopes, then dispatches through a pluggable [`HttpTransport`] (default:
+//!    [`WreqTransport`]).
+//! 2. **`EventBus`**: A `tokio` background task that subscribes to Arlo's MQTT-over-WebSocket broker
+//!    and broadcasts strictly-typed `ArloEvent` enums down a channel.
+//! 3. **Live video**: `sipInfo/v2` + the `hmswebsocketproxy` WebRTC signaling exchange (signaling
+//!    only; the media plane lives in the consumer).
 //!
 //! # Example
 //! ```no_run
@@ -49,7 +55,7 @@ pub use client::local_hub::LocalHubClient;
 pub use client::mfa::{
     ImapMfaHandler, MfaChallenge, MfaHandler, StaticOtpHandler, StdinMfaHandler,
 };
-pub use client::transport::{HttpRequest, HttpResponse, HttpTransport};
+pub use client::transport::{HttpRequest, HttpResponse, HttpTransport, WreqTransport};
 pub use client::{ArloClient, ArloClientBuilder};
 pub use error::ArloError;
 pub use events::{ConnectionState, EventBus};

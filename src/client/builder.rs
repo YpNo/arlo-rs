@@ -22,15 +22,20 @@
 //! TOML-based construction is now a thin shim: `ArloClient::from_config`
 //! parses the TOML, calls into this builder, and applies the session-cache
 //! restore step.
+//!
+//! By default the client talks to Arlo through
+//! [`crate::client::transport::WreqTransport`] — a Chrome-impersonating
+//! HTTP client, no browser process. [`ArloClientBuilder::browser`] opts
+//! into the headless-Chrome MITM-proxy transport (crate feature
+//! `browser`).
 
 use crate::client::endpoints::ArloEndpoints;
-use crate::client::transport::CloudScraperTransport;
+use crate::client::transport::{HttpTransport, WreqTransport};
 use crate::client::{ArloClient, AuthManager};
 use crate::config::ClientConfig;
 use crate::error::ArloError;
-use reqwest::Client;
 use std::sync::Arc;
-use stealthscraper_rs::{BrowserProfile, CloudScraper};
+use stealthscraper_rs::BrowserProfile;
 
 /// Programmatic builder for an [`ArloClient`]. Construct via
 /// [`ArloClient::builder`].
@@ -42,18 +47,22 @@ pub struct ArloClientBuilder {
     debug_mode: bool,
     session_cache_path: Option<String>,
     endpoints: Option<ArloEndpoints>,
+    use_browser: bool,
 }
 
 impl ArloClientBuilder {
     /// Override the User-Agent string presented to Arlo. Defaults to a
-    /// random Chrome desktop profile from `rs-cloudscraper`.
+    /// random Chrome desktop profile from `stealthscraper-rs`. The TLS /
+    /// HTTP2 fingerprint stays that of the underlying Chrome emulation,
+    /// so only set this if you know why.
     pub fn user_agent(mut self, ua: impl Into<String>) -> Self {
         self.user_agent = Some(ua.into());
         self
     }
 
-    /// Run the underlying headless browser without a visible window.
-    /// Set to `false` only for interactive debugging.
+    /// Run the headless browser without a visible window. Only consulted
+    /// by the browser-proxy transport ([`Self::browser`]); the default
+    /// transport has no browser and ignores it.
     pub fn headless(mut self, on: bool) -> Self {
         self.headless = Some(on);
         self
@@ -90,12 +99,24 @@ impl ArloClientBuilder {
         self
     }
 
-    /// Constructs the [`ArloClient`]. This boots the headless browser
-    /// stealth proxy (`rs-cloudscraper`), so it is a heavyweight call
-    /// (typically several seconds). If [`Self::session_cache`] was set and
-    /// the file exists, the cached token is restored and validated; an
-    /// invalid cache is wiped and the client returns ready for a fresh
-    /// login.
+    /// Use the headless-Chrome MITM-proxy transport instead of the default
+    /// `wreq` impersonation client. Escalation path for the day Cloudflare
+    /// starts serving an interactive challenge; today it only fingerprints
+    /// TLS/HTTP2, which the default transport already satisfies.
+    ///
+    /// Requires the crate's `browser` feature — [`Self::build`] returns
+    /// [`ArloError::ScraperError`] otherwise.
+    pub fn browser(mut self, on: bool) -> Self {
+        self.use_browser = on;
+        self
+    }
+
+    /// Constructs the [`ArloClient`]. With the default transport this is
+    /// cheap (no network, no browser). With [`Self::browser`] it boots
+    /// headless Chrome and the MITM proxy, which takes several seconds.
+    /// If [`Self::session_cache`] was set and the file exists, the cached
+    /// token is restored and validated; an invalid cache is wiped and the
+    /// client returns ready for a fresh login.
     pub async fn build(self) -> Result<ArloClient, ArloError> {
         let endpoints = self.endpoints.clone().unwrap_or_default();
         let mut client = bootstrap(BootstrapConfig {
@@ -104,6 +125,7 @@ impl ArloClientBuilder {
             upstream_proxy: self.upstream_proxy,
             debug_mode: self.debug_mode,
             endpoints,
+            use_browser: self.use_browser,
         })
         .await?;
 
@@ -124,6 +146,7 @@ pub(crate) struct BootstrapConfig {
     pub upstream_proxy: Option<String>,
     pub debug_mode: bool,
     pub endpoints: ArloEndpoints,
+    pub use_browser: bool,
 }
 
 impl From<&ClientConfig> for BootstrapConfig {
@@ -134,16 +157,19 @@ impl From<&ClientConfig> for BootstrapConfig {
             upstream_proxy: c.upstream_proxy.clone(),
             debug_mode: c.debug_mode.unwrap_or(false),
             endpoints: ArloEndpoints::default(),
+            use_browser: c.use_browser.unwrap_or(false),
         }
     }
 }
 
-/// Single source of truth for [`ArloClient`] construction. Boots the
-/// headless browser, builds the proxied `reqwest` client, and returns a
-/// fresh [`ArloClient`] with no auth state populated.
+/// Single source of truth for [`ArloClient`] construction. Picks the
+/// transport, and returns a fresh [`ArloClient`] with no auth state
+/// populated.
 pub(crate) async fn bootstrap(cfg: BootstrapConfig) -> Result<ArloClient, ArloError> {
-    // rustls 0.23+ panics if no default CryptoProvider is installed and the
-    // local MITM proxy ships TLS connections through it.
+    // rustls 0.23+ panics if no default CryptoProvider is installed. The
+    // local-hub client (`reqwest`), the IMAP OTP fetcher and the MQTT /
+    // signaling WebSockets all use rustls; the `wreq` transport itself is
+    // BoringSSL and does not care.
     rustls::crypto::ring::default_provider()
         .install_default()
         .ok();
@@ -153,31 +179,14 @@ pub(crate) async fn bootstrap(cfg: BootstrapConfig) -> Result<ArloClient, ArloEr
         profile.user_agent = ua;
     }
 
-    let mut cs_builder = CloudScraper::builder().profile(profile.clone());
-    if let Some(headless) = cfg.headless {
-        cs_builder = cs_builder.headless(headless);
-    }
-    if let Some(proxy) = cfg.upstream_proxy {
-        cs_builder = cs_builder.upstream_proxy(proxy);
-    }
-    if cfg.debug_mode {
-        cs_builder = cs_builder.with_debug(true);
-    }
-
-    let cloud_scraper = cs_builder
-        .build()
-        .await
-        .map_err(|e| ArloError::ScraperError(e.to_string()))?;
-
-    let mut req_builder = Client::builder().user_agent(profile.user_agent.clone());
-    if let Some(ref proxy) = cloud_scraper.proxy {
-        let proxy_url = format!("http://127.0.0.1:{}", proxy.port());
-        req_builder = req_builder.proxy(reqwest::Proxy::all(&proxy_url)?);
-        // The proxy ships a self-signed CA for its MITM termination.
-        req_builder = req_builder.danger_accept_invalid_certs(true);
-    }
-    let reqwest_client = req_builder.build()?;
-    let transport = Arc::new(CloudScraperTransport::new(reqwest_client, cloud_scraper));
+    let transport: Arc<dyn HttpTransport> = if cfg.use_browser {
+        browser_transport(profile, cfg.headless, cfg.upstream_proxy, cfg.debug_mode).await?
+    } else {
+        if cfg.headless.is_some() {
+            tracing::debug!("`headless` is ignored by the default (browser-less) transport");
+        }
+        Arc::new(WreqTransport::new(profile, cfg.upstream_proxy.as_deref())?)
+    };
 
     Ok(ArloClient {
         transport,
@@ -187,6 +196,68 @@ pub(crate) async fn bootstrap(cfg: BootstrapConfig) -> Result<ArloClient, ArloEr
         event_bus: tokio::sync::OnceCell::new(),
         api_version: std::sync::RwLock::new(crate::config::ApiVersion::default()),
     })
+}
+
+/// Boots headless Chrome + the MITM proxy and returns a `reqwest` client
+/// routed through it. The proxy's per-process CA is added as a trust root
+/// — certificate verification stays on for everything else (the previous
+/// `danger_accept_invalid_certs(true)` accepted any bad certificate from
+/// any server).
+#[cfg(feature = "browser")]
+async fn browser_transport(
+    profile: BrowserProfile,
+    headless: Option<bool>,
+    upstream_proxy: Option<String>,
+    debug_mode: bool,
+) -> Result<Arc<dyn HttpTransport>, ArloError> {
+    use crate::client::transport::CloudScraperTransport;
+    use stealthscraper_rs::CloudScraper;
+
+    let mut cs_builder = CloudScraper::builder().profile(profile.clone());
+    if let Some(headless) = headless {
+        cs_builder = cs_builder.headless(headless);
+    }
+    if let Some(proxy) = upstream_proxy {
+        cs_builder = cs_builder.upstream_proxy(proxy);
+    }
+    if debug_mode {
+        cs_builder = cs_builder.with_debug(true);
+    }
+
+    let cloud_scraper = cs_builder
+        .build()
+        .await
+        .map_err(|e| ArloError::ScraperError(e.to_string()))?;
+
+    let mut req_builder = reqwest::Client::builder().user_agent(profile.user_agent.clone());
+    if let Some(ref proxy) = cloud_scraper.proxy {
+        let proxy_url = format!("http://127.0.0.1:{}", proxy.port());
+        req_builder = req_builder.proxy(reqwest::Proxy::all(&proxy_url)?);
+        // Trust exactly this proxy's (per-process, in-memory) CA. Fetched
+        // now, never cached across runs: the CA is regenerated each boot.
+        let ca_pem = proxy
+            .ca_pem()
+            .map_err(|e| ArloError::ScraperError(format!("proxy CA unavailable: {e}")))?;
+        req_builder =
+            req_builder.add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes())?);
+    }
+    let reqwest_client = req_builder.build()?;
+    Ok(Arc::new(CloudScraperTransport::new(
+        reqwest_client,
+        cloud_scraper,
+    )))
+}
+
+#[cfg(not(feature = "browser"))]
+async fn browser_transport(
+    _profile: BrowserProfile,
+    _headless: Option<bool>,
+    _upstream_proxy: Option<String>,
+    _debug_mode: bool,
+) -> Result<Arc<dyn HttpTransport>, ArloError> {
+    Err(ArloError::ScraperError(
+        "browser transport requested but arlo-rs was built without the `browser` feature".into(),
+    ))
 }
 
 /// Restores a cached session token from `path` and validates it against the
@@ -238,29 +309,25 @@ mod tests {
             headless: Some(false),
             upstream_proxy: Some("http://p".into()),
             api_version: None,
+            use_browser: Some(true),
         };
         let bc = BootstrapConfig::from(&cc);
         assert_eq!(bc.user_agent.as_deref(), Some("ua"));
         assert_eq!(bc.headless, Some(false));
         assert_eq!(bc.upstream_proxy.as_deref(), Some("http://p"));
         assert!(bc.debug_mode);
+        assert!(bc.use_browser);
     }
 
     #[test]
     fn bootstrap_config_from_default_client_config_has_no_overrides() {
-        let cc = ClientConfig {
-            debug_mode: None,
-            user_agent: None,
-            session_cache_path: None,
-            headless: None,
-            upstream_proxy: None,
-            api_version: None,
-        };
+        let cc = ClientConfig::default();
         let bc = BootstrapConfig::from(&cc);
         assert_eq!(bc.user_agent, None);
         assert_eq!(bc.headless, None);
         assert_eq!(bc.upstream_proxy, None);
         assert!(!bc.debug_mode);
+        assert!(!bc.use_browser);
     }
 
     #[test]
@@ -344,14 +411,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_with_endpoints_setter_picks_up_override() {
-        // We can't actually call .build() (CloudScraper boot), but we
-        // can confirm the builder collects the endpoint override and
-        // bootstrap respects it via the BootstrapConfig conversion.
-        let custom = ArloEndpoints::testing("https://staging.example");
-        let b = ArloClientBuilder::default().endpoints(custom.clone());
-        let endpoints_in_builder = b.endpoints.unwrap();
-        assert_eq!(endpoints_in_builder, custom);
+    async fn build_uses_wreq_transport_end_to_end_against_mockito() {
+        // The default transport needs no browser, so `.build()` is cheap
+        // enough to run in a unit test and drive a real round-trip:
+        // build → seed a token → validate_session_v3 over wreq.
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex("^/hmsweb/users/session/v3".into()),
+            )
+            .match_header("user-agent", mockito::Matcher::Regex("Chrome/".into()))
+            // `ArloEndpoints::testing` puts auth + api on one host, so the
+            // orchestration layer sends the auth-host (Base64) token form.
+            .match_header("authorization", "dG9rLTE=")
+            .with_status(200)
+            .with_body(r#"{"meta":{"code":200},"data":{"userId":"U-wreq","token":"tok-1"}}"#)
+            .create_async()
+            .await;
+
+        let mut client = ArloClientBuilder::default()
+            .endpoints(ArloEndpoints::testing(server.url()))
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
+            .build()
+            .await
+            .expect("default transport builds without a browser");
+        assert!(format!("{:?}", client.transport).starts_with("WreqTransport"));
+
+        crate::client::test_helpers::set_test_token(&mut client, "tok-1", "U-wreq", "dev-1");
+        let session = client
+            .validate_session_v3()
+            .await
+            .expect("session/v3 over wreq");
+        assert_eq!(session.user_id, "U-wreq");
+    }
+
+    #[cfg(not(feature = "browser"))]
+    #[tokio::test]
+    async fn build_with_browser_errors_when_feature_is_off() {
+        let err = match ArloClientBuilder::default().browser(true).build().await {
+            Ok(_) => panic!("browser transport must not build without the feature"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, ArloError::ScraperError(_)), "{err:?}");
+    }
+
+    #[test]
+    fn browser_setter_defaults_off() {
+        assert!(!ArloClientBuilder::default().use_browser);
+        assert!(ArloClientBuilder::default().browser(true).use_browser);
     }
 
     #[tokio::test]

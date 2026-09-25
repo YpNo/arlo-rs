@@ -6,13 +6,13 @@
 
 `arlo-rs` is a robust, asynchronous Rust client for the Arlo camera ecosystem. It natively fully replaces legacy Python implementations by dynamically adapting strictly to Arlo's constantly updating telemetry metrics and undocumented headers.
 
-Powered by `rs-cloudscraper`, this library natively bridges Cloudflare's advanced bot-protection by launching a stealthy headless Chrome proxy and shaping perfect JA4 TLS signatures for all REST API interactions.
+Arlo's Cloudflare front admits clients by their TLS and HTTP/2 fingerprint and serves no JavaScript challenge, so `arlo-rs` talks to it through a `wreq` client that reproduces a real Chrome's ClientHello, HTTP/2 SETTINGS and client hints (measured by `stealthscraper-rs`) — no browser process, ~10 MB of RSS instead of a Chrome. A headless-Chrome MITM-proxy transport stays available behind the `browser` cargo feature as an escalation path.
 
 ---
 
 ## 🚀 Features
 
-- **Cloudflare Bypass**: Native integration with `rs-cloudscraper` tunnels all REST and Streaming requests through a locally forged JA4 TLS profile that identically maps to legitimate Chrome Desktop sessions.
+- **Cloudflare Bypass without a browser**: every REST request carries a measured Chrome JA4 TLS + HTTP/2 fingerprint and matching `User-Agent` / `Sec-CH-UA` client hints via `wreq`; rate limits (429 / Cloudflare 1015) are retried automatically. Opt into headless Chrome with the `browser` feature + `ArloClientBuilder::browser(true)` only if Cloudflare ever starts challenging.
 - **MFA Support**: Integrated Multi-Factor Authentication (Email, Push, SMS) with persistent JSON disk caching to prevent 2FA lockouts.
 - **Asynchronous Actor System**: Decoupled `tokio::sync::broadcast` tasks handle background Server-Sent Events (SSE) keep-alives and device topology states natively without thread-locking.
 - **Camera Actuation**: Instantly toggle modes, trigger sirens, trigger snapshots, or start manual recordings with simple Rust methods.
@@ -37,7 +37,6 @@ Two ways to configure the client:
 ```rust
 let client = arlo_rs::ArloClient::builder()
     .session_cache(".arlo_session.json")
-    .headless(true)
     .build()
     .await?;
 ```
@@ -53,7 +52,8 @@ password = "your-secure-password"
 [client]
 debug_mode = false
 session_cache_path = ".arlo_session.json"
-headless = true # Set to false to visibly debug the browser automation
+# use_browser = false  # true = headless-Chrome proxy transport (needs the `browser` feature)
+# headless = true      # only consulted when use_browser = true
 ```
 
 > ⚠️ **Never commit `config.toml` or `.arlo_session.json`.** Both are in

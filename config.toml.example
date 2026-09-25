@@ -58,16 +58,23 @@ session_cache_path = ".arlo_session.json"
 # un-migrated account and want to skip the failed v3 probe round-trips.
 api_version = "v3"
 
-# Launch the stealth Chrome engine invisibly. Default true; set false
-# to watch the browser automation for debugging.
+# Transport. Default (false): a Chrome-impersonating `wreq` HTTP client —
+# no browser process; Arlo's Cloudflare front only fingerprints TLS/HTTP2.
+# true: headless-Chrome MITM proxy (requires the crate's `browser` feature).
+# use_browser = false
+
+# Only consulted when use_browser = true. Default true; set false to
+# watch the browser automation for debugging.
 # headless = true
 
 # Funnel all stealth traffic through an upstream HTTP/SOCKS proxy
 # (e.g. a residential proxy for IP-reputation reasons).
 # upstream_proxy = "http://username:password@my-proxy:8080"
 
-# Override the User-Agent rs-cloudscraper spoofs. Defaults to a random
-# real Chrome desktop profile — only set this if you know why.
+# Override the User-Agent presented to Arlo. Defaults to a random real
+# Chrome desktop profile whose TLS/HTTP2 emulation and Sec-CH-UA hints
+# match — a custom value will contradict them, so only set this if you
+# know why.
 # user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # NOTE: the [streaming] section below is parsed but NOT yet wired into

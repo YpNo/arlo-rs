@@ -38,7 +38,14 @@ toml = "1.1"
 # and every wreq 5.x is yanked. Cargo.lock pins the yanked wreq on purpose —
 # build with `--locked`. Switch back to a version req once stealthscraper-rs
 # publishes against wreq 6.
-stealthscraper-rs = { path = "../stealthscraper-rs", features = ["browser"] }
+stealthscraper-rs = { path = "../stealthscraper-rs", default-features = false }
+# TEMPORARY direct dependency. The default transport (`WreqTransport`) drives
+# `wreq` itself with the Chrome emulation stealthscraper-rs measured, but
+# stealthscraper-rs does not yet re-export `wreq` nor expose its impersonation
+# client builder outside the `browser` feature. Same version + feature set as
+# stealthscraper-rs so cargo unifies both onto one build. Drop this entry when
+# stealthscraper-rs publishes `pub use wreq` / an `impersonation_client(profile)`.
+wreq = { version = "5.3.0", default-features = false, features = ["cookies", "socks", "gzip", "deflate", "brotli", "zstd"] }
 mailparse = "0.16.1"
 regex = "1.12.3"
 imap-rs-client = "0.2.1"
@@ -67,7 +74,18 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 # crate cannot negotiate. No WebRTC dependency here by design.
 
 
+[features]
+default = []
+# Opt-in escalation path: the headless-Chrome + MITM-proxy transport
+# (`CloudScraperTransport`, selected with `ArloClientBuilder::browser(true)`).
+# Off by default because Arlo's Cloudflare front only fingerprints TLS/HTTP2 —
+# it serves no JS challenge — so the plain `wreq` transport is sufficient.
+browser = ["stealthscraper-rs/browser"]
+
 [dev-dependencies]
+# `test-util` enables the paused clock (`#[tokio::test(start_paused = true)]`)
+# so the rate-limit backoff tests do not actually sleep.
+tokio = { version = "1.52", features = ["test-util"] }
 tempfile = "3.26.0"
 mockito = "1.6.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
