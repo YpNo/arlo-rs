@@ -28,7 +28,7 @@
 //!
 //! [client]
 //! session_cache_path = ".arlo_session.json"
-//! headless           = true
+//! # use_browser      = false   # default: browser-less wreq transport
 //! ```
 //!
 //! ## Run it
@@ -39,7 +39,7 @@
 //!
 //! Expected behaviour:
 //! 1. Loads `config.toml`.
-//! 2. Boots the stealth proxy (~5–10 s on cold start).
+//! 2. Builds the browser-less `wreq` transport (instant; no Chrome needed).
 //! 3. Either restores the cached session or runs the full
 //!    `login → factors → start_auth → IMAP fetch → finish_auth → trust →
 //!    validate_session_v3 → device_support_v2` flow.
@@ -76,10 +76,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("validated above");
 
     // ---- 2. Build client (programmatic — exercises the public builder) ----
-    println!("→ Booting stealth proxy + restoring cache (this can take a few seconds)...");
+    println!("→ Building client + restoring cached session...");
     let mut client = ArloClient::builder()
         .session_cache(CACHE_PATH)
-        .headless(true)
         .build()
         .await?;
 

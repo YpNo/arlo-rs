@@ -28,8 +28,8 @@ preferred_method = "EMAIL"
 # (stdin / push) flow.
 [mfa.imap]
 enabled = false
-# Optional shortcut: set `provider` to "gmail", "outlook", or "yahoo"
-# to auto-map host + port. If set, `host`/`port` below are ignored.
+# Optional shortcut: set `provider` to "gmail", "outlook" (or "hotmail"),
+# or "yahoo" to auto-map host + port. If set, `host`/`port` below are ignored.
 provider = "gmail"
 # If NOT using a shortcut provider, define the custom host/port here:
 host = "imap.example.com"
