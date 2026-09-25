@@ -26,7 +26,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-arlo-rs = "0.1.0"
+arlo-rs = "0.2.0"
 ```
 
 ### Build prerequisites

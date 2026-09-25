@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-25
+
+First release under the `arlo-rs` name. Breaking throughout (pre-1.0:
+MINOR bump); the headline changes are the browser-less `wreq` transport,
+trusted-browser re-login, the Arlo error-code classifier and the module
+split. Every entry below was `[Unreleased]` since 0.1.0.
+
 ### Changed — module splits and documentation (Phase 5)
 - `src/client/auth.rs` (1825 lines) → `auth/{mod, ceremony, flow, push,
   session}.rs` and `src/client/devices.rs` (2148 lines) →

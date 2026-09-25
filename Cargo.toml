@@ -1,6 +1,6 @@
 [package]
 name = "arlo-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "A high-level, asynchronous Rust client for Arlo security cameras, supporting MFA, MQTT event streaming, and WebRTC signaling."
