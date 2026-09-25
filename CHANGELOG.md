@@ -17,7 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   usual factor/OTP ceremony runs. `login` responses with
   `authCompleted: true` short-circuit the same way. New public methods:
   `ArloClient::get_factor_id` (now returns the factor id) and
-  `ArloClient::start_auth_trusted`.
+  `ArloClient::start_auth_trusted`. Verified live on 2026-09-25: a full
+  OTP login paired the browser ("Browser paired with Arlo"), and the
+  next login with a dropped token completed with "Trusted browser
+  accepted by Arlo — no OTP required".
 - **Pairing fixed and made durable.** `startPairingFactor` is now called
   with the `browserAuthCode` that `finishAuth` returns (the OTP path
   previously sent the MFA `factorAuthCode`, so the browser was never
