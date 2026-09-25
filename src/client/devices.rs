@@ -419,7 +419,7 @@ impl ArloClient {
         let url = format!("{}{}", self.endpoints.api_host, API_SET_MODE);
 
         let payload = if is_v2_model {
-            let timestamp = chrono::Utc::now().timestamp_millis() as u64;
+            let timestamp = crate::client::api::now_millis() as u64;
             json!({
                 "activeAutomations": [{
                     "deviceId": base_station_id,

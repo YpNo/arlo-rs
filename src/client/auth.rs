@@ -667,7 +667,7 @@ impl ArloClient {
 
     /// Step 4b: Validates the token to complete the browser initialization sequence.
     pub async fn validate_access_token(&self) -> Result<(), ArloError> {
-        let timestamp = chrono::Utc::now().timestamp_millis();
+        let timestamp = crate::client::api::now_millis();
         let url = format!(
             "{}{}?data={}",
             self.endpoints.auth_host, AUTH_VALIDATE_ACCESS_TOKEN, timestamp
@@ -698,7 +698,7 @@ impl ArloClient {
     /// It utilizes dynamic JSON parsing as Arlo arbitrarily structures this
     /// response using either legacy `{ "success": true }` wrappers or modern `{ "meta": { "code": 200 } }` formats.
     pub async fn validate_session_v3(&self) -> Result<SessionV3Response, ArloError> {
-        let timestamp = chrono::Utc::now().timestamp_millis();
+        let timestamp = crate::client::api::now_millis();
         let event_id = format!("FE!{}", uuid::Uuid::new_v4());
         let url = format!(
             "{}{}?eventId={}&time={}",
@@ -726,7 +726,7 @@ impl ArloClient {
     /// — the caller's deliberate `Legacy` setting must survive a chance
     /// V3 success, and rewriting V3→V3 on every call is just noise.
     pub async fn device_support(&self) -> Result<serde_json::Value, ArloError> {
-        let timestamp = chrono::Utc::now().timestamp_millis();
+        let timestamp = crate::client::api::now_millis();
         let event_id = format!("FE!{}", uuid::Uuid::new_v4());
 
         // Respect a previously-pinned Legacy setting so we skip the V3 probe.
@@ -921,7 +921,7 @@ impl ArloClient {
                 .as_deref()
                 .expect("SAFETY: user_id checked non-None just above");
             let event_id = format!("FE!{}", uuid::Uuid::new_v4());
-            let time_ms = chrono::Utc::now().timestamp_millis();
+            let time_ms = crate::client::api::now_millis();
             let url = format!(
                 "{}/hmsweb/user/{}/client/smart/devices/logout?clientId={}&eventId={}&time={}",
                 self.endpoints.api_host, uid, self.auth.device_id, event_id, time_ms

@@ -102,8 +102,6 @@ allow = [
     "ISC",
     "0BSD",
     "BSD-3-Clause",
-    "GPL-3.0",
-    "GPL-3.0-or-later",
     "Zlib",
 ]
 # The confidence threshold for detecting a license from license text.
@@ -226,13 +224,12 @@ skip = [
     { crate = "getrandom@0.2.17", reason = "Required by ring v0.17" },
     { crate = "getrandom@0.3.4", reason = "Required by rand_core v0.9 (tungstenite)" },
     { crate = "r-efi@5.3.0", reason = "Required by getrandom v0.3.4" },
-    { crate = "rand@0.9.4", reason = "Required by tungstenite v0.26 (stealthscraper-rs is on rand 0.10)" },
+    { crate = "rand@0.9.4", reason = "Required by tungstenite v0.28 (stealthscraper-rs is on rand 0.10)" },
     { crate = "rand_core@0.9.5", reason = "Required by rand v0.9.4" },
     { crate = "socket2@0.5.10", reason = "Required by wreq v5.3.0" },
     { crate = "thiserror@1.0.69", reason = "Required by tokio-socks v0.5" },
     { crate = "thiserror-impl@1.0.69", reason = "Required by tokio-socks v0.5" },
-    { crate = "webpki-roots@0.26.11", reason = "Required by tokio-tungstenite v0.26 (bump to 0.28 planned)" },
-    { crate = "windows-sys@0.60.2", reason = "Required by rustix / tempfile / rustls-platform-verifier; tokio and mio are on 0.61" },
+    { crate = "webpki-roots@0.26.11", reason = "Required by tokio-tungstenite (0.28 through 0.30 still pin webpki-roots 0.26); reqwest is on 1.0" },
     { crate = "wit-bindgen@0.51.0", reason = "Required by wasip2 (getrandom v0.4)" },
 ]
 # Similarly to `skip` allows you to skip certain crates during duplicate

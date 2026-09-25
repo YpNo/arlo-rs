@@ -141,7 +141,8 @@ Handles S3 chunk parsing and media decryption. Arlo video chunks are often encry
 ## 6. Workspace Dependencies
 - **`stealthscraper-rs`** (Local path `../stealthscraper-rs`, branch `chore/p0-lean-dependencies`, v1.0.0): browser profiles, the measured Chrome emulation table and client hints (core, no features); headless Chrome + MITM proxy under its `browser` feature.
 - **`wreq`** (temporary direct dependency, same version/features as `stealthscraper-rs`): the impersonating HTTP client behind `WreqTransport`. Goes away once `stealthscraper-rs` re-exports it.
-- **`imap-rs`** (Local path `../imap-rs/`): Provides `imap-client`, `imap-core`, and `imap-tls` for MFA automation.
+- **`imap-rs-client` / `imap-rs-tls`** (crates.io): IMAP for MFA automation.
+- **`mqttbytes` 0.6** (crates.io, rumqtt project): MQTT 3.1.1 packet codec for the event bus. Frozen upstream since 2021, `unsafe`-free; kept deliberately — the protocol is frozen too. Vendor the six packet types only if an advisory ever appears.
 
 ## 7. Error Handling
 Library uses `thiserror` with 10 variants:

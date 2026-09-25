@@ -18,7 +18,7 @@ use imap_client::credentials::Password;
 use imap_client::flags::{Flag, StoreAction};
 use imap_client::search::{SearchKey, SearchQuery};
 use mailparse::ParsedMail;
-use regex::Regex;
+use regex_lite::Regex;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Duration;

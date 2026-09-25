@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — crate diet (Phase 4)
+- Removed five direct dependencies that pulled their own subtrees for
+  next to nothing: `chrono` (six calls to get epoch millis → a
+  `SystemTime`-based `now_millis()`), `regex` (→ `regex-lite`, three
+  small OTP patterns), `urlencoding` and `tracing-futures` (unused),
+  `imap-rs-core` and `rustls-pki-types` (transitive already; the
+  local-hub verifier uses `rustls::pki_types`). The normal dependency
+  graph went from 277 to 266 crates.
+- `tokio` features narrowed from `full` to the six the crate uses;
+  `reqwest`'s unused `socks` feature dropped.
+- `tokio-tungstenite` 0.26 → 0.28. 0.30 was evaluated and rejected: it
+  still pins `webpki-roots` 0.26 and adds a duplicate `digest`/`sha1`
+  family through `sha1` 0.11.
+- `deny.toml`: the `GPL-3.0` / `GPL-3.0-or-later` allowances are gone
+  (nothing in the graph needs them; the crate is MIT); the duplicate
+  skip list matches the new graph.
+- `mqttbytes` stays. It is the frozen MQTT 3.1.1 codec from the rumqtt
+  project (last release 2021), contains no `unsafe`, and the protocol it
+  implements has not changed either; vendoring six packet codecs would
+  add maintenance for no security gain. Revisit only if RUSTSEC ever
+  flags it.
+
 ### Changed — seams and safety (Phase 3)
 - **`WsConnector` port** (`client::ws`): the MQTT event bus and the
   WebRTC signaling socket now open their WebSockets through a trait

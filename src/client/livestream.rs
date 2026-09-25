@@ -59,7 +59,7 @@ impl ArloClient {
         let model = device.model_id.as_deref().unwrap_or_default();
         let unique_id = format!("{user_id}_{}", device.device_id);
         let event_id = format!("FE!{}", uuid::Uuid::new_v4());
-        let ts = chrono::Utc::now().timestamp_millis();
+        let ts = crate::client::api::now_millis();
         let url = format!(
             "{}{}?cameraId={}&modelId={}&uniqueId={}&eventId={}&time={}",
             self.endpoints.api_host, API_SIP_INFO, device.device_id, model, unique_id, event_id, ts,

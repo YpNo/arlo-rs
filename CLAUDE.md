@@ -15,7 +15,7 @@
 | `mod.rs` | `ArloClient` struct: transport injection, lazy `EventBus` init, `reattach()` / `session_token()` |
 | `builder.rs` | `ArloClientBuilder` (fluent) + internal `bootstrap()`: default `WreqTransport`, or the headless-Chrome proxy with `.browser(true)` (`browser` feature) |
 | `auth.rs` | `AuthManager` (token + cookies + cache) + the OAuth state machine on `ArloClient`: trusted-browser fast path (`getFactorId` → `startAuth` BROWSER) before the OTP ceremony; pairing with `browserAuthCode`; `persist_session()` |
-| `auth_imap.rs` | IMAP OTP fetcher using workspace `imap-client` / `imap-core` crates |
+| `auth_imap.rs` | IMAP OTP fetcher over the `imap-rs-client` / `imap-rs-tls` crates; OTP regexes on `regex-lite` |
 | `mfa.rs` | `MfaHandler` trait + `ImapMfaHandler`, `StdinMfaHandler`, `StaticOtpHandler` |
 | `transport.rs` | `HttpTransport` trait (+ `export_cookies`/`import_cookies`) + `WreqTransport` (prod default) + `CloudScraperTransport` (`browser` feature) + `MockTransport` (tests) |
 | `cookies.rs` | `PersistentJar`: `wreq` cookie store with JSON export/import — Arlo's "trusted browser" state |
@@ -58,7 +58,8 @@
 - **Tokens**: `secrecy::SecretString` wraps all access tokens — zeroized on drop, never formatted via `Debug`. Wire DTOs that must stay plain `String` (`AuthRequest`, `AuthResponseData`, `VerifyFactorRequest`, `SessionV3Response`, `RatlsTokenData`, `SipCallInfo`, the config credential structs) implement `Debug` by hand and print `[REDACTED]` for the secret field — keep it that way when adding fields.
 - **Shared state**: `api_version` is an `ApiVersionCell` (atomic), never a lock; no `.unwrap()` on lock guards anywhere in `src/`.
 - **Testing**: Use `ArloClient::with_transport(Arc<dyn HttpTransport>, endpoints)` + `MockTransport` from `transport::test_support` (and `with_transports(..)` + `ws::test_support::MockWsConnector` for the event bus / signaling); use `ArloClientBuilder::endpoints()` to point at a `mockito` server. `ArloClientBuilder::build()` is cheap (no browser) and may be pointed at `mockito`; never use `.browser(true)` in unit tests.
-- **IMAP MFA**: `ImapMfaHandler::prepare()` captures UNSEEN-baseline **before** OTP dispatch. Uses workspace crates `imap-client`, `imap-core`, `imap-tls`.
+- **IMAP MFA**: `ImapMfaHandler::prepare()` captures UNSEEN-baseline **before** OTP dispatch. Uses the published `imap-rs-client` / `imap-rs-tls` crates.
+- **Dependencies**: stdlib first — epoch millis come from `client::api::now_millis()` (no `chrono`), patterns from `regex-lite`, cert types from `rustls::pki_types`. `tokio` is on a narrow feature list; do not re-enable `full`. Run `cargo deny check` after any manifest change (the duplicate skip list is curated per crate).
 - **RATLS / Local Hub**: `LocalHubClient` uses a custom rustls `PinnedLeafVerifier` — fails closed on cert mismatch.
 - **Stealth Integrity**: Arlo's Cloudflare gate is TLS/HTTP2-fingerprint only (no JS challenge). `WreqTransport` uses `stealthscraper_rs::emulation::for_kind(profile.browser_kind())` — never build a `wreq` client without that emulation. `BrowserProfile::random()` is selected at bootstrap; the `User-Agent` and `Sec-CH-UA*` hints must always come from the same profile.
 

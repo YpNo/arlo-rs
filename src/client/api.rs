@@ -75,6 +75,16 @@ fn redact_in_place(value: &mut Value) {
     }
 }
 
+/// Milliseconds since the Unix epoch, as Arlo's `time=` / `timestamp`
+/// telemetry parameters expect. Saturates at 0 should the clock be
+/// before 1970.
+pub(crate) fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
 impl ArloClient {
     /// Builds the standard set of Arlo Single-Page-Application headers
     /// for the given URL.
@@ -570,6 +580,13 @@ mod tests {
             )
             .await;
         assert!(res.is_ok(), "preflight failure must not abort the call");
+    }
+
+    #[test]
+    fn now_millis_is_a_plausible_epoch_timestamp() {
+        let ms = now_millis();
+        // 2020-01-01 .. 2100-01-01
+        assert!((1_577_836_800_000..4_102_444_800_000).contains(&ms), "{ms}");
     }
 
     #[tokio::test(start_paused = true)]

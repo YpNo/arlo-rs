@@ -26,9 +26,9 @@ use crate::error::ArloError;
 use crate::models::ratls::HmslsListResponse;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
-use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use std::sync::Arc;
 
 /// LAN-direct client for a single Arlo SmartHub. TLS to the hub is pinned
