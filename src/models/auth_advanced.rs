@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+/// `session/v3` payload. `Debug` redacts the `token`.
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionV3Response {
     pub user_id: String,
@@ -12,6 +13,17 @@ pub struct SessionV3Response {
     /// SSE `/hmsweb/client/subscribe` now returns 403). The `/mqtt`
     /// path is appended by the bus.
     pub mqtt_url: Option<String>,
+}
+
+impl std::fmt::Debug for SessionV3Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionV3Response")
+            .field("user_id", &self.user_id)
+            .field("token", &"[REDACTED]")
+            .field("valid_for", &self.valid_for)
+            .field("mqtt_url", &self.mqtt_url)
+            .finish()
+    }
 }
 
 #[cfg(test)]

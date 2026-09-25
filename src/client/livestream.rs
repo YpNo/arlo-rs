@@ -23,13 +23,11 @@
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Method;
 use serde_json::json;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::header::{ORIGIN, SEC_WEBSOCKET_PROTOCOL};
-use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, info, instrument};
 
 use crate::client::ArloClient;
 use crate::client::devices::xcloud_header;
+use crate::client::ws::{BoxWsStream, WsMessage as Message};
 use crate::endpoints::API_SIP_INFO;
 use crate::error::ArloError;
 use crate::models::api::Device;
@@ -99,10 +97,11 @@ impl ArloClient {
         let session_id = uuid::Uuid::new_v4().to_string();
         let camera_id = sip.sip_call_info.device_id.clone();
 
-        let request = ws_request(&sip.sip_call_info.ws_url())?;
-        let (mut ws, _resp) = tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(|e| ArloError::ScraperError(format!("livestream WSS connect: {e}")))?;
+        // Arlo's upgrade extras: `Origin` + the `sip` subprotocol.
+        let mut ws = self
+            .ws
+            .connect(&sip.sip_call_info.ws_url(), WS_ORIGIN, "sip")
+            .await?;
         info!("livestream signaling WS connected");
 
         let frame = build_initiate_offer(sip, &session_id, &camera_id, offer_sdp);
@@ -145,9 +144,7 @@ impl ArloClient {
 
 /// An open signaling WS held for the lifetime of a WebRTC session.
 pub struct SignalingSocket {
-    ws: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    ws: BoxWsStream,
     sip: SipInfo,
     session_id: String,
     camera_id: String,
@@ -163,32 +160,8 @@ impl SignalingSocket {
         if let Err(e) = self.ws.send(Message::Text(frame.into())).await {
             debug!(error = %e, "sessionDisconnected send failed (ignored)");
         }
-        let _ = self.ws.close(None).await;
+        let _ = self.ws.close().await;
     }
-}
-
-/// Builds the WS upgrade request with Arlo's `Origin` + `sip`
-/// subprotocol (standard handshake headers filled by tungstenite).
-fn ws_request(
-    url: &str,
-) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, ArloError> {
-    let mut req = url
-        .into_client_request()
-        .map_err(|e| ArloError::ScraperError(format!("bad livestream url '{url}': {e}")))?;
-    let h = req.headers_mut();
-    h.insert(
-        ORIGIN,
-        WS_ORIGIN
-            .parse()
-            .map_err(|_| ArloError::ScraperError("invalid Origin".into()))?,
-    );
-    h.insert(
-        SEC_WEBSOCKET_PROTOCOL,
-        "sip"
-            .parse()
-            .map_err(|_| ArloError::ScraperError("invalid subprotocol".into()))?,
-    );
-    Ok(req)
 }
 
 /// Wraps a JSON body in the literal HTTP/1.1 request the
@@ -389,6 +362,59 @@ mod tests {
         assert_eq!(j["payload"]["sessionId"], "sess-1");
         assert_eq!(j["payload"]["cameraId"], "A0A0000YA0D00");
         assert!(j["payload"].get("offer").is_none());
+    }
+
+    #[tokio::test]
+    async fn webrtc_negotiate_drives_the_signaling_exchange_over_the_ws_port() {
+        use crate::client::test_helpers::{mocked_client_with_ws, set_test_token};
+        use crate::client::transport::test_support::MockTransport;
+        use crate::client::ws::test_support::MockWsConnector;
+        use std::sync::Arc;
+
+        let answer_frame = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
+            {\"data\":{\"payload\":{\"answer\":{\"format\":\"SDP\",\"value\":\"v=0\\r\\nanswer\"}},\"sessionId\":\"sess-1\"},\"success\":true}";
+        let ws = Arc::new(MockWsConnector::new());
+        ws.script(vec![
+            Message::Ping(vec![1].into()),
+            Message::Text(answer_frame.into()),
+        ]);
+        ws.release();
+        let mut client = mocked_client_with_ws(Arc::new(MockTransport::new()), ws.clone());
+        set_test_token(&mut client, "tok", "U1", "dev");
+
+        let (answer, socket) = client
+            .webrtc_negotiate(&sip(), "v=0\r\noffer")
+            .await
+            .expect("negotiation succeeds");
+        assert_eq!(answer.session_id, "sess-1");
+        assert!(answer.answer_sdp.starts_with("v=0"));
+
+        let (url, origin, proto) = ws.connects().first().cloned().expect("connected");
+        assert_eq!(url, "wss://livestream-z1-prod.arlo.com:7443/");
+        assert_eq!(origin, WS_ORIGIN);
+        assert_eq!(proto, "sip");
+
+        socket.disconnect().await;
+        let sent = ws.sent();
+        let texts: Vec<&str> = sent
+            .iter()
+            .filter_map(|m| match m {
+                Message::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts[0].starts_with("POST /hmswebsocketproxy/initiateOffer HTTP/1.1"));
+        assert!(
+            texts[0].contains("v=0\\r\\noffer"),
+            "offer SDP carried: {}",
+            texts[0]
+        );
+        assert!(texts[0].contains("\"cameraId\":\"A0A0000YA0D00\""));
+        assert!(texts[1].starts_with("POST /hmswebsocketproxy/sessionDisconnected HTTP/1.1"));
+        assert!(
+            matches!(sent[1], Message::Pong(_)),
+            "ping answered before the answer frame"
+        );
     }
 
     #[test]

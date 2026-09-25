@@ -27,7 +27,8 @@ pub struct RatlsTokenRequest {
     pub device_id: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+/// RATLS bearer token for the local hub. `Debug` redacts the `token`.
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RatlsTokenData {
     pub token: String,
@@ -46,4 +47,14 @@ pub struct HmslsListResponse {
     pub success: Option<bool>,
     // Varies depending on hub payload, we parse generic values back or define strictly later
     pub data: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for RatlsTokenData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RatlsTokenData")
+            .field("token", &"[REDACTED]")
+            .field("exp", &self.exp)
+            .field("cert_serial_number", &self.cert_serial_number)
+            .finish()
+    }
 }

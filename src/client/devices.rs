@@ -33,7 +33,7 @@ impl ArloClient {
     /// `{ success: true, data: { devices: [...] } }`.
     #[instrument(skip(self))]
     pub async fn get_devices(&self) -> Result<Vec<Device>, ArloError> {
-        let is_v3 = *self.api_version.read().unwrap() == crate::config::ApiVersion::V3;
+        let is_v3 = self.api_version.get() == crate::config::ApiVersion::V3;
 
         let url_primary = if is_v3 {
             format!("{}{}", self.endpoints.api_host, API_DEVICES_V2)
@@ -56,7 +56,7 @@ impl ArloClient {
                     "get_devices v2 returned {}. Pinning client to Legacy and retrying.",
                     status
                 );
-                *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+                self.api_version.set(crate::config::ApiVersion::Legacy);
                 let url_fallback = format!("{}{}", self.endpoints.api_host, API_DEVICES);
                 self.execute_request::<()>(Method::GET, &url_fallback, None)
                     .await?
@@ -299,7 +299,7 @@ impl ArloClient {
         mode: &str,
         model_id: Option<&str>,
     ) -> Result<(), ArloError> {
-        let is_v3 = *self.api_version.read().unwrap() == crate::config::ApiVersion::V3;
+        let is_v3 = self.api_version.get() == crate::config::ApiVersion::V3;
         let is_v2_model = model_id.is_some_and(|m| m.starts_with("VMB"));
 
         if is_v3 && !is_v2_model {
@@ -353,7 +353,7 @@ impl ArloClient {
                         "V3 activeMode GET succeeded but revision could not be extracted; \
                          falling back to legacy."
                     );
-                    *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+                    self.api_version.set(crate::config::ApiVersion::Legacy);
                     return Err(SetModeV3Outcome::Fallback);
                 }
             },
@@ -365,7 +365,7 @@ impl ArloClient {
                     "V3 activeMode GET returned {}. Pinning client to Legacy.",
                     status
                 );
-                *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+                self.api_version.set(crate::config::ApiVersion::Legacy);
                 return Err(SetModeV3Outcome::Fallback);
             }
             Err(e) => return Err(SetModeV3Outcome::Error(e)),
@@ -396,7 +396,7 @@ impl ArloClient {
                     "V3 activeMode PUT returned {}. Pinning client to Legacy.",
                     status
                 );
-                *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+                self.api_version.set(crate::config::ApiVersion::Legacy);
                 Err(SetModeV3Outcome::Fallback)
             }
             Err(e) => Err(SetModeV3Outcome::Error(e)),
@@ -1484,7 +1484,7 @@ mod tests {
         mock.queue_post("{}");
 
         let client = authenticated_mocked_client(Arc::clone(&mock));
-        *client.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+        client.api_version.set(crate::config::ApiVersion::Legacy);
         client.set_mode("base-1", "mode1", None).await.unwrap();
 
         let body = parse_body_json(mock.calls()[1].body.as_ref());
@@ -1584,10 +1584,7 @@ mod tests {
         client.set_mode("base-1", "armed", None).await.unwrap();
 
         // Per-client api_version is now Legacy.
-        assert_eq!(
-            *client.api_version.read().unwrap(),
-            crate::config::ApiVersion::Legacy
-        );
+        assert_eq!(client.api_version.get(), crate::config::ApiVersion::Legacy);
         let calls = mock.calls();
         // get_locations(GET) + activeMode(GET 404) + legacy(OPTIONS + POST) = 4
         assert_eq!(calls.len(), 4);

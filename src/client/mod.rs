@@ -12,6 +12,7 @@ pub mod local_hub;
 pub mod mfa;
 pub mod ratls;
 pub mod transport;
+pub mod ws;
 
 #[cfg(test)]
 #[allow(dead_code)] // helper utilities; not all are used by every dependent test module
@@ -25,9 +26,50 @@ pub use auth::AuthManager;
 pub use builder::ArloClientBuilder;
 pub use endpoints::ArloEndpoints;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::OnceCell;
 use tracing::{info, instrument};
 pub use transport::HttpTransport;
+pub use ws::{TungsteniteConnector, WsConnector};
+
+/// Lock-free holder for the per-client [`ApiVersion`]: read on every
+/// versioned call, written once when a V3 endpoint answers 403/404 (pin
+/// to `Legacy`). An enum with two variants needs no `RwLock`, and this
+/// cannot be poisoned.
+#[derive(Debug)]
+pub(crate) struct ApiVersionCell(AtomicU8);
+
+impl ApiVersionCell {
+    const LEGACY: u8 = 0;
+    const V3: u8 = 1;
+
+    pub(crate) fn new(version: ApiVersion) -> Self {
+        let cell = Self(AtomicU8::new(Self::V3));
+        cell.set(version);
+        cell
+    }
+
+    pub(crate) fn get(&self) -> ApiVersion {
+        match self.0.load(Ordering::Relaxed) {
+            Self::LEGACY => ApiVersion::Legacy,
+            _ => ApiVersion::V3,
+        }
+    }
+
+    pub(crate) fn set(&self, version: ApiVersion) {
+        let raw = match version {
+            ApiVersion::Legacy => Self::LEGACY,
+            ApiVersion::V3 => Self::V3,
+        };
+        self.0.store(raw, Ordering::Relaxed);
+    }
+}
+
+impl Default for ApiVersionCell {
+    fn default() -> Self {
+        Self::new(ApiVersion::default())
+    }
+}
 
 /// Core REST API manager for the Arlo ecosystem.
 ///
@@ -52,11 +94,14 @@ pub struct ArloClient {
     pub(crate) auth: AuthManager,
     /// When enabled, dumps all HTTP payloads matching traces to stdout.
     pub(crate) debug_mode: bool,
-    /// Lazy SSE event bus. First [`Self::events`] call boots it; the bus
-    /// is dropped (and its tasks aborted) when the client is dropped.
+    /// Opens the MQTT event-bus and WebRTC-signaling WebSockets.
+    /// Production wires [`TungsteniteConnector`]; tests a scripted double.
+    pub(crate) ws: Arc<dyn WsConnector>,
+    /// Lazy MQTT event bus. First [`Self::events`] call boots it; the bus
+    /// is dropped (and its task aborted) when the client is dropped.
     pub(crate) event_bus: OnceCell<EventBus>,
     /// Tracks the detected API version for fallback logic.
-    pub(crate) api_version: std::sync::RwLock<ApiVersion>,
+    pub(crate) api_version: ApiVersionCell,
 }
 
 impl ArloClient {
@@ -91,13 +136,25 @@ impl ArloClient {
     /// useful for callers whose environment already provides a
     /// stealth-routed `reqwest::Client` and doesn't need a second proxy.
     pub fn with_transport(transport: Arc<dyn HttpTransport>, endpoints: ArloEndpoints) -> Self {
+        Self::with_transports(transport, Arc::new(TungsteniteConnector), endpoints)
+    }
+
+    /// Like [`Self::with_transport`], additionally injecting the
+    /// [`WsConnector`] used for the MQTT event bus and WebRTC signaling
+    /// sockets — the second seam a test double can occupy.
+    pub fn with_transports(
+        transport: Arc<dyn HttpTransport>,
+        ws: Arc<dyn WsConnector>,
+        endpoints: ArloEndpoints,
+    ) -> Self {
         Self {
             transport,
             endpoints,
             auth: AuthManager::new(),
             debug_mode: false,
+            ws,
             event_bus: OnceCell::new(),
-            api_version: std::sync::RwLock::new(ApiVersion::default()),
+            api_version: ApiVersionCell::default(),
         }
     }
 
@@ -192,12 +249,15 @@ impl ArloClient {
                     "resolved MQTT event-bus subscription (no xCloud ⇒ legacy get_devices, no camera events)"
                 );
 
-                EventBus::start(MqttParams {
-                    mqtt_url,
-                    user_id,
-                    access_token,
-                    topics,
-                })
+                EventBus::start(
+                    MqttParams {
+                        mqtt_url,
+                        user_id,
+                        access_token: access_token.into(),
+                        topics,
+                    },
+                    Arc::clone(&self.ws),
+                )
                 .await
             })
             .await
@@ -256,7 +316,7 @@ impl ArloClient {
 
         let mut client = Self::with_config(&client_conf).await?;
         if let Some(ver) = client_conf.api_version {
-            *client.api_version.write().unwrap() = ver;
+            client.api_version.set(ver);
         }
         if let Some(ref cache_path) = client_conf.session_cache_path {
             builder::apply_session_cache(&mut client, cache_path).await;
@@ -374,5 +434,24 @@ mod tests {
     async fn test_base_url_constant_is_used_consistently() {
         // Compile-time guarantee that the const re-exports correctly.
         assert!(TEST_BASE_URL.starts_with("https://"));
+    }
+}
+
+#[cfg(test)]
+mod api_version_cell_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_v3_and_round_trips_both_variants() {
+        let cell = ApiVersionCell::default();
+        assert_eq!(cell.get(), ApiVersion::V3);
+        cell.set(ApiVersion::Legacy);
+        assert_eq!(cell.get(), ApiVersion::Legacy);
+        cell.set(ApiVersion::V3);
+        assert_eq!(cell.get(), ApiVersion::V3);
+        assert_eq!(
+            ApiVersionCell::new(ApiVersion::Legacy).get(),
+            ApiVersion::Legacy
+        );
     }
 }

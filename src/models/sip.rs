@@ -16,8 +16,9 @@ pub struct SipInfo {
     pub ice_servers: IceServers,
 }
 
-/// SIP call coordinates for the `livestream-*` gateway.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// SIP call coordinates for the `livestream-*` gateway. `Debug` redacts
+/// the per-call `password`.
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SipCallInfo {
     /// Conference id (`Conference_<ts>_<callId>_<userId>_<deviceId>_caller`).
@@ -88,6 +89,21 @@ impl IceServer {
             Some(t) => format!("{}:{}:{}?transport={t}", self.kind, self.domain, self.port),
             None => format!("{}:{}:{}", self.kind, self.domain, self.port),
         }
+    }
+}
+
+impl std::fmt::Debug for SipCallInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SipCallInfo")
+            .field("id", &self.id)
+            .field("callee_uri", &self.callee_uri)
+            .field("domain", &self.domain)
+            .field("port", &self.port)
+            .field("password", &"[REDACTED]")
+            .field("device_id", &self.device_id)
+            .field("call_id", &self.call_id)
+            .field("conference_id", &self.conference_id)
+            .finish()
     }
 }
 

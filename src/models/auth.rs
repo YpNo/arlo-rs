@@ -2,7 +2,8 @@ use crate::error::ArloError;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+/// `POST /api/auth` body. `Debug` redacts the (Base64) `password`.
+#[derive(Serialize, Deserialize)]
 pub struct AuthRequest {
     pub email: String,
     pub password: String,
@@ -52,7 +53,8 @@ impl Meta {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Session payload of `auth` / `finishAuth`. `Debug` redacts the `token`.
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthResponseData {
     pub token: String,
@@ -89,7 +91,8 @@ pub struct FactorRequest {
     pub factor_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// `POST /api/finishAuth` body (OTP flow). `Debug` redacts the `otp`.
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerifyFactorRequest {
     pub factor_auth_code: String,
@@ -134,6 +137,44 @@ pub struct StartAuthData {
 pub struct SecondFactor {
     pub factor_type: String,
     pub factor_role: Option<String>,
+}
+
+impl std::fmt::Debug for AuthRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthRequest")
+            .field("email", &self.email)
+            .field("password", &"[REDACTED]")
+            .field("language", &self.language)
+            .field("env_source", &self.env_source)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for AuthResponseData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthResponseData")
+            .field("token", &"[REDACTED]")
+            .field("user_id", &self.user_id)
+            .field("authenticated", &self.authenticated)
+            .field("mfa", &self.mfa)
+            .field("auth_completed", &self.auth_completed)
+            .field("mfa_state", &self.mfa_state)
+            .field(
+                "browser_auth_code",
+                &self.browser_auth_code.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for VerifyFactorRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifyFactorRequest")
+            .field("factor_auth_code", &self.factor_auth_code)
+            .field("otp", &"[REDACTED]")
+            .field("is_browser_trusted", &self.is_browser_trusted)
+            .finish()
+    }
 }
 
 /// Represents the asynchronous state of an authentication attempt.
@@ -231,5 +272,39 @@ mod tests {
         assert!(dump.contains("***"));
         assert!(dump.contains("u"));
         assert!(dump.contains("d"));
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn debug_never_prints_secrets() {
+        let req = AuthRequest {
+            email: "e@x".into(),
+            password: "cGFzcw==".into(),
+            language: "en".into(),
+            env_source: "prod".into(),
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("e@x") && !dbg.contains("cGFzcw=="), "{dbg}");
+
+        let data: AuthResponseData = serde_json::from_str(
+            r#"{"token":"SECRET-TOKEN","userId":"U","authenticated":1,"browserAuthCode":"BAC"}"#,
+        )
+        .unwrap();
+        let dbg = format!("{data:?}");
+        assert!(
+            !dbg.contains("SECRET-TOKEN") && !dbg.contains("BAC"),
+            "{dbg}"
+        );
+
+        let v = VerifyFactorRequest {
+            factor_auth_code: "FAC".into(),
+            otp: "123456".into(),
+            is_browser_trusted: true,
+        };
+        assert!(!format!("{v:?}").contains("123456"));
     }
 }

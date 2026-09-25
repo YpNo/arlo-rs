@@ -19,14 +19,14 @@ use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
 use mqttbytes::QoS;
 use mqttbytes::v4::{Connect, Login, Packet, Subscribe, SubscribeFilter};
+use secrecy::{ExposeSecret, SecretString};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::header::{ORIGIN, SEC_WEBSOCKET_PROTOCOL};
-use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{Instrument, error, info, info_span, warn};
 
+use crate::client::ws::{WsConnector, WsMessage as Message};
 use crate::error::ArloError;
 use crate::models::api::Device;
 use crate::models::events::ArloEvent;
@@ -134,7 +134,8 @@ pub(crate) struct MqttParams {
     /// (from `session/v3`'s `mqttUrl`). `/mqtt` is appended here.
     pub mqtt_url: String,
     pub user_id: String,
-    pub access_token: String,
+    /// MQTT password. Secret: `Debug` prints `[REDACTED]`.
+    pub access_token: SecretString,
     /// Topic filters to subscribe, built by [`subscription_topics`]
     /// (fine-grained per-resource, keyed by `xCloudId`, + user inbox).
     pub topics: Vec<String>,
@@ -145,6 +146,7 @@ pub(crate) struct MqttParams {
 /// `EventBus` aborts it.
 pub(crate) fn spawn_mqtt_listener(
     params: MqttParams,
+    ws: Arc<dyn WsConnector>,
     sender: broadcast::Sender<ArloEvent>,
     state_tx: watch::Sender<ConnectionState>,
 ) -> JoinHandle<()> {
@@ -152,7 +154,7 @@ pub(crate) fn spawn_mqtt_listener(
         async move {
             loop {
                 let _ = state_tx.send(ConnectionState::Connecting);
-                match run_session(&params, &sender, &state_tx).await {
+                match run_session(&params, ws.as_ref(), &sender, &state_tx).await {
                     Ok(()) => warn!("MQTT stream ended; reconnecting"),
                     Err(e) => error!(error = %e, "MQTT connection error"),
                 }
@@ -168,16 +170,15 @@ pub(crate) fn spawn_mqtt_listener(
 /// clean stream end (triggers reconnect), `Err` on a hard failure.
 async fn run_session(
     params: &MqttParams,
+    connector: &dyn WsConnector,
     sender: &broadcast::Sender<ArloEvent>,
     state_tx: &watch::Sender<ConnectionState>,
 ) -> Result<(), ArloError> {
     let url = format!("{}/mqtt", params.mqtt_url.trim_end_matches('/'));
     info!(%url, "Connecting to MQTT-over-WSS event bus");
 
-    let request = build_ws_request(&url)?;
-    let (mut ws, _resp) = tokio_tungstenite::connect_async(request)
-        .await
-        .map_err(|e| ArloError::ScraperError(format!("WSS connect failed: {e}")))?;
+    // Arlo's non-standard upgrade extras: `Origin` + the `mqtt` subprotocol.
+    let mut ws = connector.connect(&url, WS_ORIGIN, "mqtt").await?;
 
     // -- MQTT CONNECT --
     ws.send(Message::Binary(encode(&connect_packet(params))?.into()))
@@ -235,31 +236,6 @@ async fn run_session(
     }
 }
 
-/// Builds the WS upgrade request with Arlo's non-standard extras: the
-/// `Origin` header and the `mqtt` subprotocol. The standard handshake
-/// headers (`Sec-WebSocket-Key`, etc.) are filled by tungstenite.
-fn build_ws_request(
-    url: &str,
-) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, ArloError> {
-    let mut req = url
-        .into_client_request()
-        .map_err(|e| ArloError::ScraperError(format!("bad mqtt url '{url}': {e}")))?;
-    let headers = req.headers_mut();
-    headers.insert(
-        ORIGIN,
-        WS_ORIGIN
-            .parse()
-            .map_err(|_| ArloError::ScraperError("invalid Origin".into()))?,
-    );
-    headers.insert(
-        SEC_WEBSOCKET_PROTOCOL,
-        "mqtt"
-            .parse()
-            .map_err(|_| ArloError::ScraperError("invalid subprotocol".into()))?,
-    );
-    Ok(req)
-}
-
 /// MQTT 3.1.1 `CONNECT`: clientId `user_<uid>_<rand>`, username `<uid>`,
 /// password `<accessToken>`, clean session, 60 s keep-alive.
 fn connect_packet(p: &MqttParams) -> Connect {
@@ -269,7 +245,7 @@ fn connect_packet(p: &MqttParams) -> Connect {
     c.clean_session = true;
     c.login = Some(Login {
         username: p.user_id.clone(),
-        password: p.access_token.clone(),
+        password: p.access_token.expose_secret().to_string(),
     });
     c
 }
@@ -308,7 +284,7 @@ impl MqttWritable for Subscribe {
 
 async fn wait_for_connack<S>(ws: &mut S, rx_buf: &mut BytesMut) -> Result<(), ArloError>
 where
-    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    S: StreamExt<Item = Result<Message, crate::client::ws::WsError>> + Unpin,
 {
     while let Some(msg) = ws.next().await {
         let msg = msg.map_err(|e| ArloError::ScraperError(format!("WSS read: {e}")))?;
@@ -372,7 +348,7 @@ mod tests {
         MqttParams {
             mqtt_url: "wss://mqtt-cluster-z1-1.arloxcld.com:8084".into(),
             user_id: "UXXX-000-00000000".into(),
-            access_token: "TOK".into(),
+            access_token: SecretString::from("TOK"),
             topics: vec![
                 "d/A0A0000YA0D00/out/#".into(),
                 "u/UXXX-000-00000000/in/#".into(),
@@ -432,6 +408,69 @@ mod tests {
         assert_eq!(ev.resource, "basestation");
         assert_eq!(ev.source.as_deref(), Some("A0A0000YA0D00"));
         assert_eq!(ev.trans_id.as_deref(), Some("f2a1985"));
+    }
+
+    fn packet_bytes(
+        write: impl FnOnce(&mut BytesMut) -> Result<usize, mqttbytes::Error>,
+    ) -> Message {
+        let mut buf = BytesMut::new();
+        write(&mut buf).expect("SAFETY: test packet encodes");
+        Message::Binary(buf.freeze())
+    }
+
+    #[tokio::test]
+    async fn listener_connects_subscribes_and_routes_publish_over_the_ws_port() {
+        use crate::client::ws::test_support::MockWsConnector;
+        use mqttbytes::v4::{ConnAck, ConnectReturnCode, Publish, SubAck, SubscribeReasonCode};
+        use std::time::Duration;
+
+        let ws = Arc::new(MockWsConnector::new());
+        ws.script(vec![
+            packet_bytes(|b| ConnAck::new(ConnectReturnCode::Success, false).write(b)),
+            packet_bytes(|b| {
+                SubAck::new(1, vec![SubscribeReasonCode::Success(QoS::AtMostOnce)]).write(b)
+            }),
+            packet_bytes(|b| {
+                Publish::new(
+                    "d/XC/out/cameras/A0A0000YA0D00/motionDetected",
+                    QoS::AtMostOnce,
+                    r#"{"action":"is","resource":"cameras/A0A0000YA0D00","properties":{"motionDetected":true}}"#,
+                )
+                .write(b)
+            }),
+            Message::Close(None),
+        ]);
+
+        let bus = super::super::EventBus::start(params(), ws.clone())
+            .await
+            .expect("bus starts");
+        let mut rx = bus.subscribe();
+        ws.release(); // frames replay only once we are subscribed
+
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("event within 5 s")
+            .expect("event routed");
+        assert_eq!(event.resource, "cameras/A0A0000YA0D00");
+
+        // Handshake extras + the two MQTT control packets we send.
+        let (url, origin, proto) = ws.connects().first().cloned().expect("one connect");
+        assert_eq!(url, "wss://mqtt-cluster-z1-1.arloxcld.com:8084/mqtt");
+        assert_eq!(origin, WS_ORIGIN);
+        assert_eq!(proto, "mqtt");
+        let sent = ws.sent();
+        let decode = |m: &Message| match m {
+            Message::Binary(b) => {
+                let mut buf = BytesMut::from(&b[..]);
+                mqttbytes::v4::read(&mut buf, MAX_PACKET_BYTES)
+                    .expect("SAFETY: test packet decodes")
+            }
+            other => panic!("expected binary frame, got {other:?}"),
+        };
+        assert!(
+            matches!(decode(&sent[0]), Packet::Connect(c) if c.login.as_ref().is_some_and(|l| l.password == "TOK"))
+        );
+        assert!(matches!(decode(&sent[1]), Packet::Subscribe(s) if s.filters.len() == 2));
     }
 
     #[test]

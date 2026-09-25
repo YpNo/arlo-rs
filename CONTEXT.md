@@ -21,6 +21,11 @@ This document provides a comprehensive technical overview of the `arlo-rs` libra
     - `MockTransport` (Test): Canned responses, no network I/O.
     - Host URLs are injected via `ArloEndpoints` (prod defaults, or
       `ArloEndpoints::testing(base_url)` to point at a mock server).
+- **`WsConnector`** (`src/client/ws.rs`): the WebSocket seam for the MQTT
+  event bus and the WebRTC signaling socket. `TungsteniteConnector`
+  (prod, plain rustls — those hosts are not fingerprint-gated) or the
+  scripted `MockWsConnector` (tests), injected via
+  `ArloClient::with_transports`.
 - **`MfaHandler`**: Pluggable OTP source.
     - `ImapMfaHandler`: Automated extraction from an inbox.
     - `StdinMfaHandler`: Interactive CLI prompt.

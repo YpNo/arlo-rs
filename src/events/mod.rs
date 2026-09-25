@@ -59,10 +59,13 @@ pub struct EventBus {
 impl EventBus {
     /// Spawns the reconnecting MQTT-over-WSS listener. Crate-internal —
     /// applications obtain a bus via [`crate::ArloClient::events`].
-    pub(crate) async fn start(params: MqttParams) -> Result<Self, ArloError> {
+    pub(crate) async fn start(
+        params: MqttParams,
+        ws: std::sync::Arc<dyn crate::client::ws::WsConnector>,
+    ) -> Result<Self, ArloError> {
         let (sender, _initial_rx) = broadcast::channel(BROADCAST_CAPACITY);
         let (state_tx, state_rx) = watch::channel(ConnectionState::Connecting);
-        let listener_handle = mqtt::spawn_mqtt_listener(params, sender.clone(), state_tx);
+        let listener_handle = mqtt::spawn_mqtt_listener(params, ws, sender.clone(), state_tx);
         Ok(Self {
             sender,
             state_rx,

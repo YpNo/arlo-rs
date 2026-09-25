@@ -193,8 +193,9 @@ pub(crate) async fn bootstrap(cfg: BootstrapConfig) -> Result<ArloClient, ArloEr
         endpoints: cfg.endpoints,
         auth: AuthManager::new(),
         debug_mode: cfg.debug_mode,
+        ws: Arc::new(crate::client::ws::TungsteniteConnector),
         event_bus: tokio::sync::OnceCell::new(),
-        api_version: std::sync::RwLock::new(crate::config::ApiVersion::default()),
+        api_version: crate::client::ApiVersionCell::default(),
     })
 }
 

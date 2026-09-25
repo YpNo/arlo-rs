@@ -30,16 +30,22 @@ const OTP_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const OTP_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Arlo formats the OTP inside an `<h1>` block. Match exactly 6 digits there.
-static OTP_RE_H1: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<h1[^>]*>\s*(\d{6})\s*</h1>").expect("static regex"));
+static OTP_RE_H1: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)<h1[^>]*>\s*(\d{6})\s*</h1>")
+        .expect("SAFETY: static regex literal, validated by the unit tests")
+});
 /// Newer templates put the code on a line of its own in the `text/plain`
 /// part (the reference client's `^\W*(\d{6})\W*$` per-line match).
-static OTP_RE_LINE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)^\W*(\d{6})\W*$").expect("static regex"));
+static OTP_RE_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\W*(\d{6})\W*$")
+        .expect("SAFETY: static regex literal, validated by the unit tests")
+});
 /// Fallback: 6 digits not preceded by `#`, `=`, `&`, or word chars (avoids
 /// CSS hex colours, quoted-printable artefacts, and HTML entities).
-static OTP_RE_FALLBACK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)(?:^|[^#=&\w])(\d{6})(?:[^0-9]|$)").expect("static regex"));
+static OTP_RE_FALLBACK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(?:^|[^#=&\w])(\d{6})(?:[^0-9]|$)")
+        .expect("SAFETY: static regex literal, validated by the unit tests")
+});
 
 /// Recursively extracts the plain-text payload from a multi-part MIME tree.
 /// Concatenates every `text/*` part — Arlo's emails are typically `text/html`

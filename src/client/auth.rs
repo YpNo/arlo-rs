@@ -730,7 +730,7 @@ impl ArloClient {
         let event_id = format!("FE!{}", uuid::Uuid::new_v4());
 
         // Respect a previously-pinned Legacy setting so we skip the V3 probe.
-        let pinned_legacy = *self.api_version.read().unwrap() == crate::config::ApiVersion::Legacy;
+        let pinned_legacy = self.api_version.get() == crate::config::ApiVersion::Legacy;
         if pinned_legacy {
             return self.device_support_legacy(&event_id, timestamp).await;
         }
@@ -749,7 +749,7 @@ impl ArloClient {
                     "device_support v3 returned {}. Pinning client to Legacy and retrying v2.",
                     status
                 );
-                *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+                self.api_version.set(crate::config::ApiVersion::Legacy);
                 self.device_support_legacy(&event_id, timestamp).await
             }
             Err(e) => Err(e),
@@ -905,7 +905,7 @@ impl ArloClient {
     /// leave the client believing it's still logged in.
     #[instrument(skip(self))]
     pub async fn logout(&mut self) -> Result<(), ArloError> {
-        let api_version = *self.api_version.read().unwrap();
+        let api_version = self.api_version.get();
         let use_legacy =
             api_version == crate::config::ApiVersion::Legacy || self.auth.user_id.is_none();
 
@@ -915,7 +915,11 @@ impl ArloClient {
         } else {
             // V3 path — `unwrap()` of user_id is safe because `use_legacy`
             // is true whenever it's `None`.
-            let uid = self.auth.user_id.as_deref().expect("checked above");
+            let uid = self
+                .auth
+                .user_id
+                .as_deref()
+                .expect("SAFETY: user_id checked non-None just above");
             let event_id = format!("FE!{}", uuid::Uuid::new_v4());
             let time_ms = chrono::Utc::now().timestamp_millis();
             let url = format!(
@@ -937,7 +941,7 @@ impl ArloClient {
                 "v3 logout returned {}. Pinning client to Legacy and continuing local wipe.",
                 status
             );
-            *self.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+            self.api_version.set(crate::config::ApiVersion::Legacy);
         }
 
         // Wipe local session state regardless of HTTP outcome.
@@ -1235,26 +1239,20 @@ mod tests {
 
         let client = authenticated_mocked_client(mock);
         // Start from a non-default pinning to make the assertion meaningful.
-        *client.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+        client.api_version.set(crate::config::ApiVersion::Legacy);
         // Pinned Legacy short-circuits to V2 — that's the documented
         // behaviour and the api_version stays put.
         let _ = client.device_support().await;
-        assert_eq!(
-            *client.api_version.read().unwrap(),
-            crate::config::ApiVersion::Legacy
-        );
+        assert_eq!(client.api_version.get(), crate::config::ApiVersion::Legacy);
 
         // Round-trip the other direction: V3 success on a default client.
         let mock2 = Arc::new(MockTransport::new());
         mock2.queue_get(r#"{"meta":{"code":200},"data":{}}"#);
         let client2 = authenticated_mocked_client(mock2);
-        assert_eq!(
-            *client2.api_version.read().unwrap(),
-            crate::config::ApiVersion::V3
-        );
+        assert_eq!(client2.api_version.get(), crate::config::ApiVersion::V3);
         client2.device_support().await.unwrap();
         assert_eq!(
-            *client2.api_version.read().unwrap(),
+            client2.api_version.get(),
             crate::config::ApiVersion::V3,
             "successful V3 call must not rewrite api_version"
         );
@@ -1275,7 +1273,7 @@ mod tests {
         let v = client.device_support().await.unwrap();
         assert_eq!(v["foo"], 1);
         assert_eq!(
-            *client.api_version.read().unwrap(),
+            client.api_version.get(),
             crate::config::ApiVersion::Legacy,
             "403 from V3 must pin the client to Legacy"
         );
@@ -1402,7 +1400,7 @@ mod tests {
         mock.queue_post("{}");
 
         let mut client = authenticated_mocked_client(Arc::clone(&mock));
-        *client.api_version.write().unwrap() = crate::config::ApiVersion::Legacy;
+        client.api_version.set(crate::config::ApiVersion::Legacy);
 
         client.logout().await.unwrap();
         let calls = mock.calls();
@@ -1445,10 +1443,7 @@ mod tests {
         let mut client = authenticated_mocked_client(Arc::clone(&mock));
         client.logout().await.unwrap();
         // V3 → Legacy auto-downgrade fires.
-        assert_eq!(
-            *client.api_version.read().unwrap(),
-            crate::config::ApiVersion::Legacy
-        );
+        assert_eq!(client.api_version.get(), crate::config::ApiVersion::Legacy);
     }
 
     #[tokio::test]

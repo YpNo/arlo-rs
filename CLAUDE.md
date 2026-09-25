@@ -19,6 +19,7 @@
 | `mfa.rs` | `MfaHandler` trait + `ImapMfaHandler`, `StdinMfaHandler`, `StaticOtpHandler` |
 | `transport.rs` | `HttpTransport` trait (+ `export_cookies`/`import_cookies`) + `WreqTransport` (prod default) + `CloudScraperTransport` (`browser` feature) + `MockTransport` (tests) |
 | `cookies.rs` | `PersistentJar`: `wreq` cookie store with JSON export/import — Arlo's "trusted browser" state |
+| `ws.rs` | `WsConnector` port (+ `TungsteniteConnector` adapter, `MockWsConnector` in tests) — the seam the MQTT bus and WebRTC signaling open sockets through |
 | `api.rs` | Generic REST helpers: `execute_request`, OPTIONS preflight, 429/1015 rate-limit retry, JSON envelope unwrap |
 | `devices.rs` | Camera topology, mode management, actuations, `local_hub()` factory |
 | `local_hub.rs` | `LocalHubClient`: LAN-direct SmartHub client with rustls leaf-cert pinning (RATLS) |
@@ -54,8 +55,9 @@
 - **Error Handling**: `thiserror` for library boundaries; `anyhow` only in binaries/integration tests.
 - **Instrumentation**: `log` crate present (legacy migration in progress) — all **new** code must use `tracing` only; never add new `log::` call sites.
 - **Safety**: No `unsafe`. `unwrap()` banned; use `.expect("SAFETY: <reason>")`.
-- **Tokens**: `secrecy::SecretString` wraps all access tokens — zeroized on drop, never formatted via `Debug`.
-- **Testing**: Use `ArloClient::with_transport(Arc<dyn HttpTransport>, endpoints)` + `MockTransport` from `transport::test_support`; use `ArloClientBuilder::endpoints()` to point at a `mockito` server. `ArloClientBuilder::build()` is cheap (no browser) and may be pointed at `mockito`; never use `.browser(true)` in unit tests.
+- **Tokens**: `secrecy::SecretString` wraps all access tokens — zeroized on drop, never formatted via `Debug`. Wire DTOs that must stay plain `String` (`AuthRequest`, `AuthResponseData`, `VerifyFactorRequest`, `SessionV3Response`, `RatlsTokenData`, `SipCallInfo`, the config credential structs) implement `Debug` by hand and print `[REDACTED]` for the secret field — keep it that way when adding fields.
+- **Shared state**: `api_version` is an `ApiVersionCell` (atomic), never a lock; no `.unwrap()` on lock guards anywhere in `src/`.
+- **Testing**: Use `ArloClient::with_transport(Arc<dyn HttpTransport>, endpoints)` + `MockTransport` from `transport::test_support` (and `with_transports(..)` + `ws::test_support::MockWsConnector` for the event bus / signaling); use `ArloClientBuilder::endpoints()` to point at a `mockito` server. `ArloClientBuilder::build()` is cheap (no browser) and may be pointed at `mockito`; never use `.browser(true)` in unit tests.
 - **IMAP MFA**: `ImapMfaHandler::prepare()` captures UNSEEN-baseline **before** OTP dispatch. Uses workspace crates `imap-client`, `imap-core`, `imap-tls`.
 - **RATLS / Local Hub**: `LocalHubClient` uses a custom rustls `PinnedLeafVerifier` — fails closed on cert mismatch.
 - **Stealth Integrity**: Arlo's Cloudflare gate is TLS/HTTP2-fingerprint only (no JS challenge). `WreqTransport` uses `stealthscraper_rs::emulation::for_kind(profile.browser_kind())` — never build a `wreq` client without that emulation. `BrowserProfile::random()` is selected at bootstrap; the `User-Agent` and `Sec-CH-UA*` hints must always come from the same profile.

@@ -17,6 +17,7 @@
 
 use crate::client::endpoints::ArloEndpoints;
 use crate::client::transport::test_support::MockTransport;
+use crate::client::ws::test_support::MockWsConnector;
 use crate::client::{ArloClient, AuthManager, HttpTransport};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -28,13 +29,23 @@ pub(crate) const TEST_BASE_URL: &str = "https://test.example";
 /// hosts set to [`TEST_BASE_URL`]. The client starts with no token —
 /// call [`set_test_token`] for tests that need an authenticated path.
 pub(crate) fn mocked_client(mock: Arc<MockTransport>) -> ArloClient {
+    mocked_client_with_ws(mock, Arc::new(MockWsConnector::new()))
+}
+
+/// Like [`mocked_client`] with an explicit scripted WebSocket double for
+/// the event-bus / signaling paths.
+pub(crate) fn mocked_client_with_ws(
+    mock: Arc<MockTransport>,
+    ws: Arc<MockWsConnector>,
+) -> ArloClient {
     ArloClient {
         transport: mock as Arc<dyn HttpTransport>,
         endpoints: ArloEndpoints::testing(TEST_BASE_URL),
         auth: AuthManager::new(),
         debug_mode: false,
+        ws,
         event_bus: OnceCell::new(),
-        api_version: std::sync::RwLock::new(crate::config::ApiVersion::default()),
+        api_version: crate::client::ApiVersionCell::default(),
     }
 }
 

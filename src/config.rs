@@ -19,7 +19,8 @@ pub struct ArloConfig {
     pub streaming: Option<StreamingConfig>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+/// Arlo account credentials. `Debug` redacts the `password`.
+#[derive(Deserialize, Serialize, Clone)]
 pub struct CredentialsConfig {
     pub email: Option<String>,
     pub password: Option<String>,
@@ -31,7 +32,9 @@ pub struct MfaConfig {
     pub imap: Option<ImapConfig>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+/// IMAP mailbox used for automated OTP retrieval. `Debug` redacts the
+/// app `password`.
+#[derive(Deserialize, Serialize, Clone)]
 pub struct ImapConfig {
     pub enabled: Option<bool>,
     pub provider: Option<String>,
@@ -75,6 +78,29 @@ impl ArloConfig {
         })?;
 
         Ok(parsed)
+    }
+}
+
+impl std::fmt::Debug for CredentialsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialsConfig")
+            .field("email", &self.email)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ImapConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImapConfig")
+            .field("enabled", &self.enabled)
+            .field("provider", &self.provider)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("delete_after_read", &self.delete_after_read)
+            .finish()
     }
 }
 

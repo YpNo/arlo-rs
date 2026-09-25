@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — seams and safety (Phase 3)
+- **`WsConnector` port** (`client::ws`): the MQTT event bus and the
+  WebRTC signaling socket now open their WebSockets through a trait
+  (`connect(url, origin, subprotocol)`) instead of calling
+  `tokio_tungstenite::connect_async` directly. `TungsteniteConnector`
+  is the production adapter; `ArloClient::with_transports(http, ws,
+  endpoints)` injects a double. Both paths are now unit-tested end to
+  end on a scripted socket: CONNECT → CONNACK → SUBSCRIBE → PUBLISH
+  routing for the bus, and `initiateOffer` → `200 OK` answer →
+  `sessionDisconnected` for signaling. `SignalingSocket` holds a
+  `BoxWsStream`. This is also the hook for a future adapter that shares
+  the HTTP transport's Chrome fingerprint on WSS.
+- **No lock unwraps.** The per-client `api_version` is an atomic
+  `ApiVersionCell` (`get`/`set`) instead of a `RwLock` read/written with
+  `.unwrap()` at eleven sites.
+- **Secrets never reach `Debug` output.** `MqttParams.access_token` is a
+  `SecretString`; `AuthRequest`, `AuthResponseData` (token and
+  `browserAuthCode`), `VerifyFactorRequest` (OTP), `SessionV3Response`,
+  `RatlsTokenData`, `SipCallInfo` (SIP password), `CredentialsConfig`
+  and `ImapConfig` implement `Debug` by hand and print `[REDACTED]`.
+- The three remaining bare `.expect()` calls carry `SAFETY:` rationales.
+
 ### Added — protocol gaps closed against the reference Python client (2026)
 - **Trusted-browser re-login (no OTP after the first pairing).** After
   `login`, `authenticate` now probes `POST /api/getFactorId
