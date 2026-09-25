@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   profile's `User-Agent` and `Sec-CH-UA` / `-Mobile` / `-Platform` hints
   and a per-session cookie store. **No Chrome process is launched**;
   `ArloClientBuilder::build()` is now cheap and needs no browser binary.
+  Verified live on 2026-09-25: the full EMAIL/IMAP MFA ceremony
+  (`login → getFactors → startAuth → finishAuth → validateAccessToken →
+  session/v3`), the v3 device list and logout all completed through
+  `WreqTransport` against the production Cloudflare front.
 - The headless-Chrome MITM-proxy transport (`CloudScraperTransport`)
   moved behind a new off-by-default **`browser` cargo feature** and is
   selected with `ArloClientBuilder::browser(true)` / `[client]
