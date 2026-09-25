@@ -28,6 +28,22 @@ Add this to your `Cargo.toml`:
 arlo-rs = "0.1.0"
 ```
 
+### Build prerequisites
+
+`arlo-rs` links BoringSSL (through `stealthscraper-rs` → `wreq`), which is
+built from source by `boring-sys2` and needs a C/C++ toolchain, CMake and
+`libclang` (for `bindgen`). On Debian / Ubuntu:
+
+```bash
+sudo apt-get install -y build-essential cmake libclang-dev
+```
+
+Without `libclang` the build stops inside `boring-sys2` with
+`Unable to find libclang`. If your `libclang` lives in a non-standard
+place, point `LIBCLANG_PATH` at its directory. No browser binary is
+required: the default transport has no Chrome. Only the opt-in `browser`
+feature needs a Chrome/Chromium at runtime.
+
 ## 💻 Configuration
 
 Two ways to configure the client:
