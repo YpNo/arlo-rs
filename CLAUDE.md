@@ -5,7 +5,7 @@
 1. **Hexagonal Integrity**: Strictly separate Arlo protocol logic (Domain) from transport/MFA solving (Infrastructure). See `.agents/rules/architecture.md`.
 2. **Protocol Fidelity**: We must mimic the Arlo Web Dashboard exactly. This includes undocumented headers, the 6-step OAuth ceremony (login → get_factors → start_auth → finish_auth → validate_access_token → validate_session_v3), and JA4 TLS signatures (Chrome emulation from `stealthscraper-rs`, driven through `wreq`).
 3. **Quality & Security Gates**: Every contribution must pass the Zero-Warning and Dependency Audit gates. See `.agents/rules/quality-standards.md`.
-4. **Resilient Session Management**: Use `secrecy::SecretString` for all tokens (zeroized on drop). Session state is snapshotted via `SessionToken` / `ArloClient::reattach()`. Cache files are `0600` on Unix.
+4. **Resilient Session Management**: Use `secrecy::SecretString` for all tokens (zeroized on drop). Session state is snapshotted via `SessionToken` / `ArloClient::reattach()`. Cache files are `0600` on Unix. Cache files also carry the cookie jar; on a stale token keep `device_id` + cookies (that is the trusted-browser identity) and drop only the token.
 
 ## Module Map
 
@@ -14,10 +14,11 @@
 |---|---|
 | `mod.rs` | `ArloClient` struct: transport injection, lazy `EventBus` init, `reattach()` / `session_token()` |
 | `builder.rs` | `ArloClientBuilder` (fluent) + internal `bootstrap()`: default `WreqTransport`, or the headless-Chrome proxy with `.browser(true)` (`browser` feature) |
-| `auth.rs` | `AuthManager` (token+cache) + full 6-step OAuth state machine on `ArloClient` |
+| `auth.rs` | `AuthManager` (token + cookies + cache) + the OAuth state machine on `ArloClient`: trusted-browser fast path (`getFactorId` → `startAuth` BROWSER) before the OTP ceremony; pairing with `browserAuthCode`; `persist_session()` |
 | `auth_imap.rs` | IMAP OTP fetcher using workspace `imap-client` / `imap-core` crates |
 | `mfa.rs` | `MfaHandler` trait + `ImapMfaHandler`, `StdinMfaHandler`, `StaticOtpHandler` |
-| `transport.rs` | `HttpTransport` trait + `WreqTransport` (prod default) + `CloudScraperTransport` (`browser` feature) + `MockTransport` (tests) |
+| `transport.rs` | `HttpTransport` trait (+ `export_cookies`/`import_cookies`) + `WreqTransport` (prod default) + `CloudScraperTransport` (`browser` feature) + `MockTransport` (tests) |
+| `cookies.rs` | `PersistentJar`: `wreq` cookie store with JSON export/import — Arlo's "trusted browser" state |
 | `api.rs` | Generic REST helpers: `execute_request`, OPTIONS preflight, 429/1015 rate-limit retry, JSON envelope unwrap |
 | `devices.rs` | Camera topology, mode management, actuations, `local_hub()` factory |
 | `local_hub.rs` | `LocalHubClient`: LAN-direct SmartHub client with rustls leaf-cert pinning (RATLS) |
@@ -31,7 +32,7 @@
 - `ConnectionState`: `Connecting | Connected | Disconnected` — exhaustive enum, no wildcard arms
 
 ### `src/models/` — Pure data layer (no I/O)
-`auth.rs`, `auth_advanced.rs`, `events.rs`, `envelope.rs`, `automation.rs`, `library.rs`, `ratls.rs`, `api.rs`
+`auth.rs` (+ `Meta::into_error`), `auth_advanced.rs`, `events.rs` (`ArloEvent::active_mode_change`), `envelope.rs`, `error_codes.rs` (`ErrorAction`, `classify`, official messages — branch on `ArloError::action()`, never on raw codes), `automation.rs` (`AutomationConfig`, `Location::hosts_device`), `library.rs`, `ratls.rs`, `sip.rs`, `api.rs`
 
 ### Other modules
 - `src/error.rs` — `ArloError` (9 `thiserror` variants)

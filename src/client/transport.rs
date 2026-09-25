@@ -24,11 +24,13 @@
 //! [`HttpResponse`]. Auth headers, base URLs, and CORS preflight are the
 //! orchestration layer's job — the transport just executes.
 
+use crate::client::cookies::PersistentJar;
 use crate::error::ArloError;
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, StatusCode};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use stealthscraper_rs::{BrowserProfile, ClientHints};
 
@@ -72,6 +74,19 @@ pub trait HttpTransport: Send + Sync + std::fmt::Debug {
     /// failures (DNS, TLS, dropped connections); HTTP status codes flow
     /// through [`HttpResponse::status`] for the caller to interpret.
     async fn request(&self, request: HttpRequest) -> Result<HttpResponse, ArloError>;
+
+    /// Serialised cookie jar, for persisting Arlo's "trusted browser"
+    /// state across processes. `None` when the transport keeps no jar or
+    /// the jar is empty. The blob is opaque to callers.
+    fn export_cookies(&self) -> Option<String> {
+        None
+    }
+
+    /// Restores a jar previously produced by [`Self::export_cookies`].
+    /// Transports without a jar accept and ignore it.
+    fn import_cookies(&self, _json: &str) -> Result<(), ArloError> {
+        Ok(())
+    }
 }
 
 /// Converts the orchestration layer's header pairs into a typed map.
@@ -100,12 +115,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// matching `Sec-CH-UA`, `Sec-CH-UA-Mobile` and `Sec-CH-UA-Platform`
 /// client hints unless the orchestration layer already set them, so the
 /// advertised browser and the fingerprint on the wire never contradict.
-/// A cookie store is enabled so Arlo's `Set-Cookie`s (trusted-browser
-/// state) round-trip within the session.
+/// Cookies live in a [`PersistentJar`] so Arlo's trusted-browser state
+/// can be exported with the session cache and restored on the next run.
 pub struct WreqTransport {
     client: wreq::Client,
     profile: BrowserProfile,
     hints: Option<ClientHints>,
+    jar: Arc<PersistentJar>,
 }
 
 impl WreqTransport {
@@ -117,13 +133,14 @@ impl WreqTransport {
     /// [`ArloError::ScraperError`] if the proxy URL is invalid or the
     /// client cannot be built.
     pub fn new(profile: BrowserProfile, upstream_proxy: Option<&str>) -> Result<Self, ArloError> {
+        let jar = Arc::new(PersistentJar::default());
         let mut builder = wreq::Client::builder()
             // Derive the fingerprint from the profile's own User-Agent so
             // the JA4 signature and the advertised browser agree.
             .emulation(stealthscraper_rs::emulation::for_kind(
                 profile.browser_kind(),
             ))
-            .cookie_store(true)
+            .cookie_provider(Arc::clone(&jar))
             .timeout(REQUEST_TIMEOUT);
         if let Some(url) = upstream_proxy {
             let proxy = wreq::Proxy::all(url)
@@ -138,6 +155,7 @@ impl WreqTransport {
             client,
             profile,
             hints,
+            jar,
         })
     }
 
@@ -205,6 +223,14 @@ impl HttpTransport for WreqTransport {
         let status = response.status();
         let body = response.text().await?;
         Ok(HttpResponse { status, body })
+    }
+
+    fn export_cookies(&self) -> Option<String> {
+        self.jar.export_json()
+    }
+
+    fn import_cookies(&self, json: &str) -> Result<(), ArloError> {
+        self.jar.import_json(json)
     }
 }
 
@@ -364,6 +390,7 @@ pub(crate) mod test_support {
                 .pop_front()
                 .ok_or_else(|| ArloError::ApiError {
                     code: 500,
+                    error: None,
                     message: "MockTransport: no canned response queued".into(),
                 })
         }
@@ -507,6 +534,45 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ArloError::NetworkError(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn wreq_transport_persists_cookies_across_requests_and_exports_them() {
+        let mut server = Server::new_async().await;
+        let _set = server
+            .mock("GET", "/login")
+            .with_status(200)
+            .with_header("set-cookie", "trust=abc; Path=/")
+            .create_async()
+            .await;
+        let _replay = server
+            .mock("GET", "/next")
+            .match_header("cookie", "trust=abc")
+            .with_status(204)
+            .create_async()
+            .await;
+
+        let transport = WreqTransport::new(BrowserProfile::random(), None).unwrap();
+        assert!(
+            transport.export_cookies().is_none(),
+            "fresh jar exports nothing"
+        );
+        let get = |path: &str| HttpRequest {
+            method: Method::GET,
+            url: format!("{}{path}", server.url()),
+            headers: vec![],
+            body: None,
+        };
+        transport.request(get("/login")).await.unwrap();
+        let resp = transport.request(get("/next")).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+
+        // Round-trip the jar into a brand-new transport.
+        let blob = transport.export_cookies().expect("jar exported");
+        let fresh = WreqTransport::new(BrowserProfile::random(), None).unwrap();
+        fresh.import_cookies(&blob).unwrap();
+        let resp = fresh.request(get("/next")).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
     }
 
     #[test]

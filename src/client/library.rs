@@ -29,6 +29,7 @@ impl ArloClient {
         if !response.success {
             return Err(ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: "Failed to fetch media library recordings".to_string(),
             });
         }

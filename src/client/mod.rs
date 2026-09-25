@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod auth_imap;
 pub mod builder;
+pub mod cookies;
 pub mod devices;
 pub mod endpoints;
 /// S3 Video chunk parsing and media decryption logic.

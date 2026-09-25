@@ -48,11 +48,21 @@ probe round-trips entirely.
 Arlo's modern authentication is a strictly ordered sequence, driven by
 `authenticate_with_handler` (the `MfaHandler` supplies the OTP):
 1. **`login`**: Submit Base64-encoded credentials to `ocapi-app.arlo.com/api/auth`.
+   `authCompleted: true` skips straight to step 7.
+1b. **Trusted-browser fast path**: `get_factor_id` (`POST /api/getFactorId
+   {factorType:"BROWSER", factorData:"", userId}`) succeeds only when Arlo
+   recognises this `device_id` + cookie jar from an earlier pairing; then
+   `start_auth_trusted` (`POST /api/startAuth {factorId, factorType:"BROWSER",
+   userId}`) returns the final token and the flow jumps to step 5 — no OTP.
+   Any rejection (typically error 9204) falls through to the OTP ceremony.
 2. **`get_factors`**: Retrieve list of MFA options (Email, SMS, Push).
 3. **`start_auth`**: Trigger the OTP dispatch for a specific factor.
 4. **`finish_auth`**: Submit the 6-digit OTP to get a temporary token.
 5. **`validate_access_token`**: Initial token check.
-6. **`start_pairing_factor`** *(optional)*: "Trust this browser" grant.
+6. **`start_pairing_factor`**: "Trust this browser" grant, sent with the
+   `browserAuthCode` that `finishAuth` returned (never the MFA
+   `factorAuthCode`). Arlo binds the trust to the cookies it sets here plus
+   the `x-user-device-id`; both are persisted in the session cache.
 7. **`validate_session_v3`**: Validation against `myapi.arlo.com/hmsweb/users/session/v3` for the telemetry token.
 8. **`device_support`**: Final telemetry call (V3 with Legacy fallback).
 

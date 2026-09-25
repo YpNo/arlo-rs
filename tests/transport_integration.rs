@@ -80,6 +80,9 @@ async fn public_api_full_authenticated_flow_via_static_otp() {
     mock.queue_post(
         r#"{"meta":{"code":200},"data":{"token":"preliminary","userId":"U-1","authenticated":1}}"#,
     );
+    // getFactorId (POST: OPTIONS + body) — this browser is not trusted yet,
+    // so the client falls back to the OTP ceremony.
+    mock.queue_post(r#"{"meta":{"code":400,"error":9204}}"#);
     // get_factors (GET)
     mock.queue_ok(
         r#"{"meta":{"code":200},"data":{"items":[
@@ -88,9 +91,10 @@ async fn public_api_full_authenticated_flow_via_static_otp() {
     );
     // start_auth (POST: OPTIONS + body)
     mock.queue_post(r#"{"meta":{"code":200},"data":{"factorAuthCode":"FAC-1"}}"#);
-    // finish_auth (POST: OPTIONS + body)
+    // finish_auth (POST: OPTIONS + body) — carries the browserAuthCode used
+    // to pair ("trust") this browser for future logins.
     mock.queue_post(
-        r#"{"meta":{"code":200},"data":{"token":"final","userId":"U-1","authenticated":1}}"#,
+        r#"{"meta":{"code":200},"data":{"token":"final","userId":"U-1","authenticated":1,"browserAuthCode":"BAC-1"}}"#,
     );
     // validate_access_token (GET)
     mock.queue_ok("{}");
@@ -143,6 +147,8 @@ async fn public_api_full_authenticated_flow_via_static_otp() {
     let calls = mock.calls();
     let expected_method_sequence = vec![
         Method::OPTIONS, // login
+        Method::POST,
+        Method::OPTIONS, // getFactorId (trusted-browser probe, rejected)
         Method::POST,
         Method::GET,     // get_factors
         Method::OPTIONS, // start_auth

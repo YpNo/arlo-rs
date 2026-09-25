@@ -10,6 +10,7 @@
 use crate::client::ArloClient;
 use crate::endpoints::*;
 use crate::error::ArloError;
+use crate::models::error_codes::{ErrorAction, classify_arlo_error};
 // Endpoints (auth/api hosts) come from self.endpoints — PR 4 transport refactor.
 use crate::models::auth::*;
 use crate::models::auth_advanced::*;
@@ -20,7 +21,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tokio::fs;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// Internal credentials caching layer.
 ///
@@ -38,6 +39,12 @@ pub struct AuthManager {
     pub(crate) device_id: String,
     /// Absolute or relative path to the persistent cache disk JSON.
     pub(crate) cache_path: Option<String>,
+    /// Serialised transport cookie jar — Arlo binds "trust this browser"
+    /// to these cookies plus `device_id`. Opaque here; produced and
+    /// consumed by [`crate::HttpTransport::export_cookies`] /
+    /// [`crate::HttpTransport::import_cookies`]. Secret because the jar
+    /// carries session-bearing values.
+    pub(crate) cookies: Option<SecretString>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,6 +52,9 @@ struct AuthCacheSchema {
     access_token: Option<String>,
     user_id: Option<String>,
     device_id: String,
+    /// Added after the first cache format; absent in older files.
+    #[serde(default)]
+    cookies: Option<String>,
 }
 
 /// Writes `bytes` to `path` with owner-only permissions (`0600`) on Unix.
@@ -82,6 +92,7 @@ impl AuthManager {
             // Generate a random UUID for the device
             device_id: uuid::Uuid::new_v4().to_string(),
             cache_path: None,
+            cookies: None,
         }
     }
 
@@ -118,6 +129,7 @@ impl AuthManager {
                 user_id: schema.user_id,
                 device_id: schema.device_id,
                 cache_path: Some(path.to_string()),
+                cookies: schema.cookies.map(SecretString::from),
             });
         }
         None
@@ -139,6 +151,7 @@ impl AuthManager {
                 .map(|s| s.expose_secret().to_string()),
             user_id: self.user_id.clone(),
             device_id: self.device_id.clone(),
+            cookies: self.cookies.as_ref().map(|c| c.expose_secret().to_string()),
         };
         let Ok(json) = serde_json::to_string_pretty(&schema) else {
             return;
@@ -146,11 +159,6 @@ impl AuthManager {
         write_owner_only(path, json.as_bytes()).await;
     }
 }
-
-/// Arlo's `meta.error` returned (with HTTP 200, `meta.code` 400) by
-/// `finishAuth` while a push challenge is dispatched but not yet
-/// approved on the device: *"Authentication is not finished yet"*.
-const MFA_PENDING_ERROR: u32 = 9233;
 
 /// Outcome of a single push `finishAuth` poll.
 enum PushOutcome {
@@ -162,6 +170,17 @@ enum PushOutcome {
 }
 
 impl ArloClient {
+    /// Snapshots the transport's cookie jar into the auth state and writes
+    /// the session cache (best-effort). Every token change goes through
+    /// here so the cache always carries the cookies that were current
+    /// when the token was issued.
+    pub(crate) async fn persist_session(&mut self) {
+        if let Some(blob) = self.transport.export_cookies() {
+            self.auth.cookies = Some(SecretString::from(blob));
+        }
+        self.auth.save_to_cache().await;
+    }
+
     /// High-level automated authentication state machine orchestrator.
     /// This resolves the cache session if it exists, triggers login automatically using the config,
     /// pulls dynamic 2FA factors, and can independently resolve IMAP OTP codes.
@@ -196,7 +215,20 @@ impl ArloClient {
         })?;
 
         // 3. Initiate Standard Login Target
-        self.login(email, password).await?;
+        let login_data = self.login(email, password).await?;
+        if login_data.auth_completed == Some(true) {
+            info!("Arlo reports authentication complete without a second factor");
+            self.complete_session(None).await?;
+            return Ok(AuthResult::Success);
+        }
+
+        // 3b. Trusted-browser fast path: once a previous session paired
+        //     this device_id + cookie jar, `getFactorId` hands back a
+        //     BROWSER factor and `startAuth` on it yields a full token
+        //     with no OTP at all.
+        if self.try_trusted_browser_login().await? {
+            return Ok(AuthResult::Success);
+        }
 
         // 4. Factor Resolution Targeting
         let factors = self.get_factors().await?;
@@ -291,23 +323,64 @@ impl ArloClient {
     /// Primary Continuation Function: Executed when manual interaction is requested and fulfilled.
     /// This seamlessly runs the full backend REST validation chain required to actually load the Dashboard.
     pub async fn submit_mfa(&mut self, factor_auth_code: &str, otp: &str) -> Result<(), ArloError> {
-        self.finish_auth(factor_auth_code, otp).await?;
-        self.complete_session(factor_auth_code).await
+        let data = self.finish_auth(factor_auth_code, otp).await?;
+        self.complete_session(data.browser_auth_code.as_deref())
+            .await
+    }
+
+    /// The trusted-browser fast path (reference client, 0.8.0.15+):
+    /// `POST /api/getFactorId {factorType:"BROWSER", factorData:"", userId}`
+    /// succeeds only when Arlo recognises this `device_id` + cookie jar
+    /// from an earlier pairing; its `factorId` then goes to
+    /// `POST /api/startAuth {factorId, factorType:"BROWSER", userId}`,
+    /// whose response already carries the final token. Returns
+    /// `Ok(false)` — with the reason logged — whenever the browser is not
+    /// trusted, so the caller continues with the OTP ceremony.
+    async fn try_trusted_browser_login(&mut self) -> Result<bool, ArloError> {
+        let Some(user_id) = self.auth.user_id.clone() else {
+            return Ok(false);
+        };
+        let factor_id = match self.get_factor_id().await {
+            Ok(id) => id,
+            Err(e) => {
+                debug!(error = %e, "Browser not trusted by Arlo; running the OTP ceremony");
+                return Ok(false);
+            }
+        };
+        if let Err(e) = self.start_auth_trusted(&factor_id, &user_id).await {
+            warn!(error = %e, "Trusted-browser startAuth rejected; falling back to the OTP ceremony");
+            return Ok(false);
+        }
+        info!("Trusted browser accepted by Arlo — no OTP required");
+        self.complete_session(None).await?;
+        Ok(true)
     }
 
     /// Post-`finishAuth` continuation chain shared by every MFA path
-    /// (OTP submit *and* push-approval polling): token validation, the
-    /// optional "trust this browser" pairing, the mandatory V3 session
-    /// validation, and the trailing telemetry call.
+    /// (OTP submit, push-approval polling and the trusted fast path):
+    /// token validation, the "trust this browser" pairing when a
+    /// `browserAuthCode` is available, the mandatory V3 session
+    /// validation, the trailing telemetry call, and a cache write so the
+    /// cookies Arlo set during pairing are persisted with the token.
     ///
-    /// `pairing_code` is the value passed to `startPairingFactor`. For
-    /// push that is the `browserAuthCode` returned by the approved
-    /// `finishAuth`; for the OTP path it's the MFA `factorAuthCode`.
-    async fn complete_session(&mut self, pairing_code: &str) -> Result<(), ArloError> {
+    /// `pairing_code` is the `browserAuthCode` an approved `finishAuth`
+    /// returned (`None` when Arlo sent none, or when the browser is
+    /// already trusted). Pairing failures are logged, not fatal.
+    async fn complete_session(&mut self, pairing_code: Option<&str>) -> Result<(), ArloError> {
         self.validate_access_token().await?;
-        let _ = self.start_pairing_factor(pairing_code).await; // Optional Trust factor
+        if let Some(code) = pairing_code {
+            match self.start_pairing_factor(code).await {
+                Ok(()) => info!("Browser paired with Arlo; future logins can skip the OTP"),
+                Err(e) => {
+                    warn!(error = %e, "startPairingFactor failed; the next login will need an OTP")
+                }
+            }
+        } else {
+            debug!("No browserAuthCode to pair with; pairing skipped");
+        }
         self.validate_session_v3().await?;
         let _ = self.device_support().await; // Secondary check to complete validation emulation
+        self.persist_session().await;
 
         Ok(())
     }
@@ -396,9 +469,10 @@ impl ArloClient {
         };
 
         // 5. Continuation — pair with the browserAuthCode the approved
-        //    finishAuth handed back (not the push factorAuthCode).
-        let pairing_code = approved.browser_auth_code.unwrap_or(factor_auth_code);
-        self.complete_session(&pairing_code).await?;
+        //    finishAuth handed back (the push factorAuthCode is not a
+        //    pairing code).
+        self.complete_session(approved.browser_auth_code.as_deref())
+            .await?;
         Ok(AuthResult::Success)
     }
 
@@ -416,12 +490,8 @@ impl ArloClient {
             .execute_request(Method::POST, &url, Some(&payload))
             .await?;
         let resp: BaseResponse<StartAuthData> = serde_json::from_str(&body)?;
-        if resp.meta.code != 200 {
-            return Err(ArloError::AuthError(
-                resp.meta
-                    .message
-                    .unwrap_or_else(|| "startAuth failed".into()),
-            ));
+        if !resp.meta.is_success() {
+            return Err(resp.meta.into_error("startAuth failed"));
         }
         let data = resp
             .data
@@ -459,15 +529,17 @@ impl ArloClient {
                 .ok_or_else(|| ArloError::AuthError("finishAuth 200 but no data".into()))?;
             // Cache the finalized token, mirroring finish_auth().
             self.auth.set_token(data.token.clone());
-            self.auth.save_to_cache().await;
+            self.persist_session().await;
             return Ok(PushOutcome::Approved(data));
         }
-        if resp.meta.error == Some(MFA_PENDING_ERROR) {
+        if resp
+            .meta
+            .error
+            .is_some_and(|e| classify_arlo_error(e) == ErrorAction::AuthPending)
+        {
             return Ok(PushOutcome::Pending);
         }
-        Err(ArloError::AuthError(resp.meta.message.unwrap_or_else(
-            || format!("finishAuth failed (meta.code {})", resp.meta.code),
-        )))
+        Err(resp.meta.into_error("finishAuth failed"))
     }
 
     /// Step 1: Initiates the authentication flow with Arlo.
@@ -492,14 +564,8 @@ impl ArloClient {
             .await?;
         let base_response: BaseResponse<AuthResponseData> = serde_json::from_str(&body_str)?;
 
-        if base_response.meta.code != 200 {
-            return Err(ArloError::AuthError(format!(
-                "Arlo API Login Failed: {}",
-                base_response
-                    .meta
-                    .message
-                    .unwrap_or_else(|| "Unknown error".to_string())
-            )));
+        if !base_response.meta.is_success() {
+            return Err(base_response.meta.into_error("Arlo API login failed"));
         }
 
         let auth_data = base_response
@@ -509,7 +575,7 @@ impl ArloClient {
         // Cache the preliminary token so subsequent factor requests get authorized.
         self.auth.set_token(auth_data.token.clone());
         self.auth.user_id = Some(auth_data.user_id.clone());
-        self.auth.save_to_cache().await;
+        self.persist_session().await;
 
         Ok(auth_data)
     }
@@ -523,13 +589,8 @@ impl ArloClient {
 
         let base_response: BaseResponse<AuthStartResponse> = serde_json::from_str(&body_str)?;
 
-        if base_response.meta.code != 200 {
-            return Err(ArloError::AuthError(
-                base_response
-                    .meta
-                    .message
-                    .unwrap_or_else(|| "Unknown error".to_string()),
-            ));
+        if !base_response.meta.is_success() {
+            return Err(base_response.meta.into_error("getFactors failed"));
         }
 
         let data = base_response.data.ok_or_else(|| {
@@ -552,13 +613,8 @@ impl ArloClient {
 
         let base_response: BaseResponse<serde_json::Value> = serde_json::from_str(&body_str)?;
 
-        if base_response.meta.code != 200 {
-            return Err(ArloError::AuthError(
-                base_response
-                    .meta
-                    .message
-                    .unwrap_or_else(|| "Failed to trigger MFA".to_string()),
-            ));
+        if !base_response.meta.is_success() {
+            return Err(base_response.meta.into_error("Failed to trigger MFA"));
         }
 
         let factor_auth_code = base_response
@@ -594,13 +650,8 @@ impl ArloClient {
             .await?;
         let base_response: BaseResponse<AuthResponseData> = serde_json::from_str(&body_str)?;
 
-        if base_response.meta.code != 200 {
-            return Err(ArloError::AuthError(
-                base_response
-                    .meta
-                    .message
-                    .unwrap_or_else(|| "Failed to verify OTP".to_string()),
-            ));
+        if !base_response.meta.is_success() {
+            return Err(base_response.meta.into_error("Failed to verify OTP"));
         }
 
         let auth_data = base_response.data.ok_or_else(|| {
@@ -609,7 +660,7 @@ impl ArloClient {
 
         // Cache the finalized token
         self.auth.set_token(auth_data.token.clone());
-        self.auth.save_to_cache().await;
+        self.persist_session().await;
 
         Ok(auth_data)
     }
@@ -720,8 +771,13 @@ impl ArloClient {
         crate::models::envelope::unwrap_envelope(&body)
     }
 
-    /// Retrieve Details of a Specific 2FA Factor (Requested by workfile.md)
-    pub async fn get_factor_id(&self) -> Result<(), ArloError> {
+    /// `POST /api/getFactorId {factorType:"BROWSER", factorData:"", userId}`
+    /// — asks Arlo whether this client (its `x-user-device-id` plus the
+    /// cookies set at pairing) is a trusted browser. Succeeds with the
+    /// BROWSER `factorId` to feed [`Self::start_auth_trusted`]; otherwise
+    /// an [`ArloError::ApiError`] (typically error 9204, "browser is not
+    /// trusted") or an HTTP error, both meaning "run the OTP ceremony".
+    pub async fn get_factor_id(&self) -> Result<String, ArloError> {
         let url = format!("{}{}", self.endpoints.auth_host, AUTH_GET_FACTOR_ID);
         let user_id = self.require_user_id()?;
 
@@ -731,12 +787,58 @@ impl ArloClient {
             "userId": user_id
         });
 
-        let _body_str = self
+        let body_str = self
             .execute_request(Method::POST, &url, Some(&payload))
             .await?;
+        let resp: BaseResponse<serde_json::Value> = serde_json::from_str(&body_str)?;
+        if !resp.meta.is_success() {
+            return Err(resp.meta.into_error("getFactorId rejected"));
+        }
+        resp.data
+            .as_ref()
+            .and_then(|d| d.get("factorId"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| ArloError::AuthError("getFactorId returned no factorId".into()))
+    }
 
-        // According to trace, body structure often discarded/ignored for this specific check,
-        // we just ensure a 200 OK.
+    /// `POST /api/startAuth {factorId, factorType:"BROWSER", userId}` for
+    /// a trusted browser: unlike the OTP flow, the response's `data`
+    /// already carries the finalised session (`token`, `userId`, possibly
+    /// nested under `accessToken`) and no `finishAuth` follows. Caches the
+    /// token on success.
+    pub async fn start_auth_trusted(
+        &mut self,
+        factor_id: &str,
+        user_id: &str,
+    ) -> Result<(), ArloError> {
+        let url = format!("{}{}", self.endpoints.auth_host, AUTH_START_AUTH);
+        let payload = serde_json::json!({
+            "factorId": factor_id,
+            "factorType": "BROWSER",
+            "userId": user_id,
+        });
+        let body_str = self
+            .execute_request(Method::POST, &url, Some(&payload))
+            .await?;
+        let resp: BaseResponse<serde_json::Value> = serde_json::from_str(&body_str)?;
+        if !resp.meta.is_success() {
+            return Err(resp.meta.into_error("trusted-browser startAuth rejected"));
+        }
+        let data = resp.data.unwrap_or(serde_json::Value::Null);
+        // The web client tolerates the session arriving nested under `accessToken`.
+        let session = data.get("accessToken").unwrap_or(&data);
+        let token = session
+            .get("token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ArloError::AuthError("trusted-browser startAuth returned no token".into())
+            })?;
+        if let Some(uid) = session.get("userId").and_then(|v| v.as_str()) {
+            self.auth.user_id = Some(uid.to_string());
+        }
+        self.auth.set_token(token.to_string());
+        self.persist_session().await;
         Ok(())
     }
 
@@ -777,7 +879,7 @@ impl ArloClient {
 
         self.auth.set_token(auth_data.token.clone());
         self.auth.user_id = Some(auth_data.user_id.clone());
-        self.auth.save_to_cache().await;
+        self.persist_session().await;
 
         Ok(auth_data)
     }
@@ -841,7 +943,7 @@ impl ArloClient {
         // Wipe local session state regardless of HTTP outcome.
         self.auth.clear_token();
         self.auth.user_id = None;
-        self.auth.save_to_cache().await;
+        self.persist_session().await;
 
         Ok(())
     }
@@ -968,12 +1070,12 @@ mod tests {
         mock.queue_post(r#"{"meta":{"code":401,"message":"bad creds"},"data":null}"#);
 
         let mut client = mocked_client(mock);
-        let err = client
-            .login("u", "p")
-            .await
-            .expect_err("expected AuthError");
+        let err = client.login("u", "p").await.expect_err("expected ApiError");
         match err {
-            ArloError::AuthError(msg) => assert!(msg.contains("bad creds")),
+            ArloError::ApiError { code, message, .. } => {
+                assert_eq!(code, 401);
+                assert!(message.contains("bad creds"));
+            }
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -1016,7 +1118,7 @@ mod tests {
         let client = authenticated_mocked_client(mock);
         assert!(matches!(
             client.get_factors().await,
-            Err(ArloError::AuthError(_))
+            Err(ArloError::ApiError { code: 500, .. })
         ));
     }
 
@@ -1068,7 +1170,7 @@ mod tests {
 
         let mut client = authenticated_mocked_client(mock);
         let err = client.finish_auth("FAC-1", "000000").await.unwrap_err();
-        assert!(matches!(err, ArloError::AuthError(_)));
+        assert!(matches!(err, ArloError::ApiError { code: 401, .. }));
     }
 
     #[tokio::test]
@@ -1221,14 +1323,44 @@ mod tests {
     #[tokio::test]
     async fn get_factor_id_posts_browser_payload() {
         let mock = Arc::new(MockTransport::new());
-        mock.queue_post("{}");
+        mock.queue_post(r#"{"meta":{"code":200},"data":{"factorId":"BF-1"}}"#);
 
         let client = authenticated_mocked_client(Arc::clone(&mock));
-        client.get_factor_id().await.unwrap();
+        assert_eq!(client.get_factor_id().await.unwrap(), "BF-1");
 
         let body = parse_body_json(mock.calls()[1].body.as_ref());
         assert_eq!(body["factorType"], "BROWSER");
+        assert_eq!(body["factorData"], "");
         assert_eq!(body["userId"], "U-test");
+    }
+
+    #[tokio::test]
+    async fn get_factor_id_reports_untrusted_browser_as_reauth() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(r#"{"meta":{"code":400,"error":9204}}"#);
+
+        let client = authenticated_mocked_client(mock);
+        let err = client.get_factor_id().await.unwrap_err();
+        assert_eq!(err.action(), ErrorAction::Reauth);
+        assert!(err.to_string().contains("not trusted"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn start_auth_trusted_caches_token_from_startauth_response() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(
+            r#"{"meta":{"code":200},"data":{"accessToken":{"token":"trusted-tok","userId":"U-9"}}}"#,
+        );
+
+        let mut client = authenticated_mocked_client(Arc::clone(&mock));
+        client.start_auth_trusted("BF-1", "U-test").await.unwrap();
+
+        let body = parse_body_json(mock.calls()[1].body.as_ref());
+        assert_eq!(body["factorId"], "BF-1");
+        assert_eq!(body["factorType"], "BROWSER");
+        assert_eq!(body["userId"], "U-test");
+        assert_eq!(client.auth.token(), Some("trusted-tok"));
+        assert_eq!(client.user_id(), Some("U-9"));
     }
 
     #[tokio::test]
@@ -1345,6 +1477,8 @@ mod tests {
         let mock = Arc::new(MockTransport::new());
         // 1. login (POST: OPTIONS + body)
         mock.queue_post(auth_response("preliminary", "U1"));
+        // getFactorId (POST: OPTIONS + body) — browser not trusted yet.
+        mock.queue_post(r#"{"meta":{"code":400,"error":9204}}"#);
         // 2. get_factors (GET)
         mock.queue_get(
             r#"{"meta":{"code":200},"data":{"items":[
@@ -1387,6 +1521,8 @@ mod tests {
     async fn authenticate_errors_when_preferred_factor_not_available() {
         let mock = Arc::new(MockTransport::new());
         mock.queue_post(auth_response("preliminary", "U1"));
+        // getFactorId (POST: OPTIONS + body) — browser not trusted yet.
+        mock.queue_post(r#"{"meta":{"code":400,"error":9204}}"#);
         mock.queue_get(
             r#"{"meta":{"code":200},"data":{"items":[
                 {"factorId":"F1","factorType":"PUSH","factorRole":"PRIMARY"}
@@ -1416,6 +1552,8 @@ mod tests {
     async fn authenticate_errors_when_no_factors_registered() {
         let mock = Arc::new(MockTransport::new());
         mock.queue_post(auth_response("preliminary", "U1"));
+        // getFactorId (POST: OPTIONS + body) — browser not trusted yet.
+        mock.queue_post(r#"{"meta":{"code":400,"error":9204}}"#);
         mock.queue_get(r#"{"meta":{"code":200},"data":{"items":[]}}"#);
 
         let mut client = mocked_client(mock);
@@ -1456,15 +1594,18 @@ mod tests {
         // → start_pairing_factor → validate_session_v3 → device_support_v2.
         let mock = Arc::new(MockTransport::new());
         mock.queue_post(auth_response("preliminary", "U1")); // login
+        mock.queue_post(r#"{"meta":{"code":400,"error":9204}}"#); // getFactorId: untrusted
         mock.queue_get(
             r#"{"meta":{"code":200},"data":{"items":[
                 {"factorId":"F1","factorType":"EMAIL","factorRole":"PRIMARY"}
             ]}}"#,
         );
         mock.queue_post(r#"{"meta":{"code":200},"data":{"factorAuthCode":"FAC-9"}}"#); // start_auth
-        mock.queue_post(auth_response("final", "U1")); // finish_auth
+        mock.queue_post(
+            r#"{"meta":{"code":200},"data":{"token":"final","userId":"U1","authenticated":1,"browserAuthCode":"BAC-1"}}"#,
+        ); // finish_auth (with the pairing code)
         mock.queue_get("{}"); // validate_access_token
-        mock.queue_post("{}"); // start_pairing_factor
+        mock.queue_post("{}"); // start_pairing_factor (with BAC-1)
         mock.queue_get(r#"{"meta":{"code":200},"data":{"userId":"U1","token":"final"}}"#); // validate_session_v3
         mock.queue_get(r#"{"meta":{"code":200},"data":{}}"#); // device_support_v2
 
@@ -1488,6 +1629,46 @@ mod tests {
             .unwrap();
         assert!(matches!(res, AuthResult::Success));
         assert!(client.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn authenticate_skips_otp_when_browser_is_trusted() {
+        // login → getFactorId 200 → startAuth(BROWSER) 200 with token →
+        // validate_access_token → validate_session_v3 → device_support.
+        // No getFactors, no OTP, no pairing.
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(auth_response("preliminary", "U1")); // login
+        mock.queue_post(r#"{"meta":{"code":200},"data":{"factorId":"BF-1"}}"#); // getFactorId
+        mock.queue_post(r#"{"meta":{"code":200},"data":{"token":"trusted","userId":"U1"}}"#); // startAuth
+        mock.queue_get("{}"); // validate_access_token
+        mock.queue_get(r#"{"meta":{"code":200},"data":{"userId":"U1","token":"trusted"}}"#); // session/v3
+        mock.queue_get(r#"{"meta":{"code":200},"data":{}}"#); // device_support
+
+        let mut client = mocked_client(Arc::clone(&mock));
+        let cfg = crate::config::ArloConfig {
+            credentials: Some(crate::config::CredentialsConfig {
+                email: Some("u".into()),
+                password: Some("p".into()),
+            }),
+            mfa: None,
+            client: None,
+            streaming: None,
+        };
+        let res = client.authenticate(&cfg).await.unwrap();
+        assert!(matches!(res, AuthResult::Success));
+        assert_eq!(client.auth.token(), Some("trusted"));
+
+        let calls = mock.calls();
+        assert!(calls.iter().any(|c| c.url.ends_with("/api/getFactorId")));
+        assert!(!calls.iter().any(|c| c.url.contains("/api/getFactors")));
+        let start = calls
+            .iter()
+            .find(|c| c.url.ends_with("/api/startAuth") && c.method == Method::POST)
+            .expect("startAuth sent");
+        let body = parse_body_json(start.body.as_ref());
+        assert_eq!(body["factorType"], "BROWSER");
+        assert_eq!(body["factorId"], "BF-1");
+        assert!(mock.responses_drained());
     }
 
     fn push_cfg() -> crate::config::ArloConfig {

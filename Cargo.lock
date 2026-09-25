@@ -70,6 +70,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "cookie_store",
  "flate2",
  "futures-util",
  "imap-rs-client",

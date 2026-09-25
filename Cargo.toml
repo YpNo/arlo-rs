@@ -46,6 +46,9 @@ stealthscraper-rs = { path = "../stealthscraper-rs", default-features = false }
 # stealthscraper-rs so cargo unifies both onto one build. Drop this entry when
 # stealthscraper-rs publishes `pub use wreq` / an `impersonation_client(profile)`.
 wreq = { version = "5.3.0", default-features = false, features = ["cookies", "socks", "gzip", "deflate", "brotli", "zstd"] }
+# Backing store for the persistent cookie jar (Arlo's "trust this browser"
+# state lives in cookies). Same crate + version wreq's own jar uses.
+cookie_store = "0.21"
 mailparse = "0.16.1"
 regex = "1.12.3"
 imap-rs-client = "0.2.1"

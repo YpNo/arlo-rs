@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — protocol gaps closed against the reference Python client (2026)
+- **Trusted-browser re-login (no OTP after the first pairing).** After
+  `login`, `authenticate` now probes `POST /api/getFactorId
+  {factorType:"BROWSER", factorData:"", userId}`; when Arlo recognises
+  this client it answers with a BROWSER `factorId`, and
+  `POST /api/startAuth {factorId, factorType:"BROWSER", userId}` returns
+  the final token directly — no `getFactors`, no OTP. Otherwise the
+  usual factor/OTP ceremony runs. `login` responses with
+  `authCompleted: true` short-circuit the same way. New public methods:
+  `ArloClient::get_factor_id` (now returns the factor id) and
+  `ArloClient::start_auth_trusted`.
+- **Pairing fixed and made durable.** `startPairingFactor` is now called
+  with the `browserAuthCode` that `finishAuth` returns (the OTP path
+  previously sent the MFA `factorAuthCode`, so the browser was never
+  actually trusted), and failures are logged instead of swallowed. The
+  transport's cookie jar — Arlo binds trust to its cookies plus
+  `x-user-device-id` — is exported into the session cache
+  (`cookies` field, `PersistentJar` JSON) and restored on start. When a
+  cached token is stale the client now keeps the paired identity
+  (`device_id` + cookies) and drops only the token; previously it
+  regenerated a fresh `device_id`, discarding the trust.
+- **`HttpTransport::export_cookies` / `import_cookies`** (default no-op)
+  and `client::cookies::PersistentJar`, the `wreq` cookie store behind
+  `WreqTransport`.
+- **Arlo error-code table** (`models::error_codes`, ported from the
+  official web client via the reference Python client): `ErrorAction`
+  (`Retry`, `Reauth`, `AuthPending`, `Fatal`, `OtpRetry`, `Rejected`,
+  `DeviceOffline`, `Unclassified`), `classify`, and the official message
+  text per code. `ArloError::action()` maps any error to an action —
+  9017 lockouts are `Fatal` (never retry), 9204 "browser not trusted" and
+  HTTP 401/403 are `Reauth`, 9233/9276/9278 are `AuthPending` (the push
+  poll now recognises all of them). `Meta::is_success` /
+  `Meta::into_error` build the error with the best available message.
+- **`allowedMqttTopics`** (`Device::allowed_mqtt_topics`, from
+  `/hmsweb/v2/users/devices`) is now the preferred MQTT subscription
+  set — the broker's own ACL grant, valid for owner and shared accounts
+  alike; the hand-built topic list remains the fallback.
+- **Custom modes by name (v3).** `ArloClient::get_automation_config`
+  parses `GET /hmsweb/automation/v3?locationId=…&revisions=false` into
+  `AutomationConfig` (standard mode ids + per-gateway custom-mode
+  name ↔ uuid map, sentinel names resolved like the app);
+  `ArloClient::set_mode_by_name` PUTs `{"mode": <standard>}` or
+  `{"mode":"custom","custom":{<gateway>: <uuid>}}` with the current
+  revision; `ArloClient::location_for_device` resolves a gateway's
+  location through the new `Location::gateway_device_ids`
+  (`"<userId>_<deviceId>"`-aware). `ArloEvent::active_mode` /
+  `active_mode_change()` surface v3 `feedNotification` mode changes.
+- **IMAP OTP parsing** gained the reference client's bare-digit-line
+  match, with fixtures for the 2026 ISO-8859-1 / quoted-printable
+  template (`text/plain` + `text/html`, `©` footer) and plain-only mail.
+
+### Changed — ⚠️ BREAKING (API)
+- `ArloError::ApiError` gained `error: Option<u32>` (Arlo `meta.error`);
+  its `Display` is `API Error [<code>/<error>]: <message>`.
+- Auth-ceremony envelope failures (`login`, `getFactors`, `startAuth`,
+  `finishAuth`, push polls) are now `ApiError` carrying the Arlo code,
+  not `AuthError(String)`; `AuthError` is reserved for local
+  preconditions (missing credentials, no token, missing fields).
+- `Device`, `ArloEvent` and `Location` gained fields
+  (`allowed_mqtt_topics`, `active_mode`, `gateway_device_ids`; all
+  `#[serde(default)]`), which affects struct-literal construction.
+- `ArloClient::get_factor_id` returns `Result<String, _>`.
+- New direct dependency `cookie_store` (already in the graph via wreq).
+
 ### Changed — ⚠️ BREAKING: browser-less default transport
 - **`WreqTransport` is the default transport.** Arlo's Cloudflare front
   admits clients on their TLS + HTTP/2 fingerprint alone (no JS /

@@ -60,3 +60,4 @@ pub use client::{ArloClient, ArloClientBuilder};
 pub use error::ArloError;
 pub use events::{ConnectionState, EventBus};
 pub use models::auth::SessionToken;
+pub use models::error_codes::ErrorAction;

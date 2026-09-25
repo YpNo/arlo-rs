@@ -44,6 +44,7 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
         }
         return Err(ArloError::ApiError {
             code: 500,
+            error: None,
             message: format!("Envelope reports success=false. Body: {body}"),
         });
     }
@@ -57,20 +58,33 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
         if code == 200 {
             return Ok(parsed.get("data").cloned().unwrap_or(Value::Null));
         }
+        let error = parsed
+            .get("meta")
+            .and_then(|m| m.get("error"))
+            .and_then(|e| e.as_u64())
+            .map(|e| e as u32);
         let message = parsed
             .get("meta")
             .and_then(|m| m.get("message"))
             .and_then(|v| v.as_str())
-            .unwrap_or("Envelope reports non-200 meta.code")
-            .to_string();
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                error
+                    .and_then(crate::models::error_codes::message_for)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "Envelope reports non-200 meta.code".to_string());
         return Err(ArloError::ApiError {
             code: code as i32,
+            error,
             message,
         });
     }
 
     Err(ArloError::ApiError {
         code: 500,
+        error: None,
         message: format!("Response is not a recognised Arlo envelope. Body: {body}"),
     })
 }
@@ -130,9 +144,33 @@ mod tests {
         let body = r#"{"meta":{"code":403,"message":"forbidden"}}"#;
         let err = unwrap_envelope(body).unwrap_err();
         match err {
-            ArloError::ApiError { code, message } => {
+            ArloError::ApiError {
+                code,
+                error,
+                message,
+            } => {
                 assert_eq!(code, 403);
+                assert_eq!(error, None);
                 assert_eq!(message, "forbidden");
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unwrap_envelope_carries_arlo_error_code_and_official_text() {
+        // Arlo often sends meta.error with an empty/absent message; the
+        // official web-client text fills the gap.
+        let body = r#"{"meta":{"code":400,"error":9017}}"#;
+        match unwrap_envelope(body).unwrap_err() {
+            ArloError::ApiError {
+                code,
+                error,
+                message,
+            } => {
+                assert_eq!(code, 400);
+                assert_eq!(error, Some(9017));
+                assert!(message.contains("locked"));
             }
             other => panic!("expected ApiError, got {other:?}"),
         }

@@ -44,11 +44,13 @@ impl ArloClient {
         if !response.success {
             return Err(ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: "Failed to create RATLS certificate".to_string(),
             });
         }
         response.data.ok_or_else(|| ArloError::ApiError {
             code: 500,
+            error: None,
             message: "No cert data returned".to_string(),
         })
     }
@@ -68,11 +70,13 @@ impl ArloClient {
         if !response.success {
             return Err(ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: "Failed to retrieve RATLS token".to_string(),
             });
         }
         response.data.ok_or_else(|| ArloError::ApiError {
             code: 500,
+            error: None,
             message: "No token data returned".to_string(),
         })
     }

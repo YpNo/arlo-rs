@@ -81,6 +81,26 @@ fn device_class(device_type: &str) -> Option<&'static str> {
 /// sub-topics are authorized. Result is sorted + deduped for a stable
 /// SUBSCRIBE packet.
 pub(crate) fn subscription_topics(devices: &[Device], user_id: &str) -> Vec<String> {
+    // Preferred: the broker's own ACL grant per device (`allowedMqttTopics`
+    // on the v2 device list) — authoritative for owner and shared
+    // accounts alike, as the reference client subscribes.
+    let mut topics: Vec<String> = devices
+        .iter()
+        .flat_map(|d| d.allowed_mqtt_topics.iter().cloned())
+        .collect();
+    if topics.is_empty() {
+        topics = hand_built_topics(devices);
+    }
+    topics.push(format!("u/{user_id}/in/#"));
+    topics.sort();
+    topics.dedup();
+    topics
+}
+
+/// Fallback topic set for device lists without `allowedMqttTopics`
+/// (legacy endpoint), replicating the web client's fine-grained
+/// subscriptions verified against a shared-account HAR.
+fn hand_built_topics(devices: &[Device]) -> Vec<String> {
     let mut topics: Vec<String> = Vec::new();
     for d in devices {
         let Some(xcloud) = d.x_cloud_id.as_deref() else {
@@ -93,9 +113,6 @@ pub(crate) fn subscription_topics(devices: &[Device], user_id: &str) -> Vec<Stri
             topics.push(format!("d/{xcloud}/out/{res}/#"));
         }
     }
-    topics.push(format!("u/{user_id}/in/#"));
-    topics.sort();
-    topics.dedup();
     topics
 }
 
@@ -415,6 +432,32 @@ mod tests {
         assert_eq!(ev.resource, "basestation");
         assert_eq!(ev.source.as_deref(), Some("A0A0000YA0D00"));
         assert_eq!(ev.trans_id.as_deref(), Some("f2a1985"));
+    }
+
+    #[test]
+    fn subscription_topics_prefer_the_brokers_allowed_list() {
+        let devices: Vec<Device> = serde_json::from_str(
+            r#"[
+            {"deviceId":"A","parentId":"A","deviceType":"camera","deviceName":"a",
+             "uniqueId":"u1","state":"provisioned","xCloudId":"XC-A",
+             "allowedMqttTopics":["d/XC-A/out/cameras/A/#","d/XC-A/out/wifi/#"]},
+            {"deviceId":"B","parentId":"B","deviceType":"doorbell","deviceName":"b",
+             "uniqueId":"u2","state":"provisioned","xCloudId":"XC-B"}
+        ]"#,
+        )
+        .expect("devices parse");
+
+        let topics = subscription_topics(&devices, "U1");
+        // Exactly the granted topics plus the user inbox — the hand-built
+        // set (which would add 14 resources per device) is not mixed in.
+        assert_eq!(
+            topics,
+            vec![
+                "d/XC-A/out/cameras/A/#".to_string(),
+                "d/XC-A/out/wifi/#".to_string(),
+                "u/U1/in/#".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -49,6 +49,13 @@ pub struct Device {
     /// [`crate::ArloClient::set_mode`].
     pub automation_revision: Option<u64>,
 
+    /// MQTT topics the broker's ACL grants this account for the device
+    /// (wire key `allowedMqttTopics`, present on `/hmsweb/v2/users/devices`
+    /// since the v3 migration; empty on the legacy list). When any device
+    /// carries them they are the authoritative subscription set.
+    #[serde(default)]
+    pub allowed_mqtt_topics: Vec<String>,
+
     /// Free-form connectivity object (signal strength, online state, …).
     /// Shape varies by device class, so it's surfaced as raw JSON until
     /// a concrete consumer needs typed access.

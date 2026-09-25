@@ -56,6 +56,7 @@ impl LocalHubClient {
         let pinned = CertificateDer::from_pem_slice(cert_pem.as_bytes()).map_err(|e| {
             ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: format!("Failed to parse SmartHub cert as PEM: {e}"),
             }
         })?;
@@ -70,6 +71,7 @@ impl LocalHubClient {
             .with_safe_default_protocol_versions()
             .map_err(|e| ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: format!("rustls protocol-version setup failed: {e}"),
             })?
             .dangerous()
@@ -106,6 +108,7 @@ impl LocalHubClient {
         if !response.status().is_success() {
             return Err(ArloError::ApiError {
                 code: response.status().as_u16() as i32,
+                error: None,
                 message: "Local SmartHub connectivity check failed".into(),
             });
         }
@@ -133,6 +136,7 @@ impl LocalHubClient {
         if !response.status().is_success() {
             return Err(ArloError::ApiError {
                 code: response.status().as_u16() as i32,
+                error: None,
                 message: "Failed to list local SmartHub media".into(),
             });
         }
@@ -159,6 +163,7 @@ impl LocalHubClient {
         if !response.status().is_success() {
             return Err(ArloError::ApiError {
                 code: response.status().as_u16() as i32,
+                error: None,
                 message: "Failed to download local SmartHub media".into(),
             });
         }

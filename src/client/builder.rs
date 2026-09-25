@@ -265,15 +265,35 @@ async fn browser_transport(
 /// login flow; on failure the cache is wiped and the path is primed so the
 /// next successful login will repopulate it.
 pub(crate) async fn apply_session_cache(client: &mut ArloClient, path: &str) {
+    use secrecy::ExposeSecret;
     use tracing::{info, warn};
 
     if let Some(cached) = AuthManager::load_from_cache(path).await {
+        // Cookies first: the token check below may already depend on them.
+        if let Some(cookies) = cached.cookies.as_ref()
+            && let Err(e) = client.transport.import_cookies(cookies.expose_secret())
+        {
+            warn!(%path, error = %e, "Cached cookie jar could not be restored; ignoring it");
+        }
+        let device_id = cached.device_id.clone();
+        let cookies = cached.cookies.clone();
         client.auth = cached;
         if client.validate_session_v3().await.is_ok() {
             info!(%path, "Restored active Arlo session from cache");
             return;
         }
-        warn!(%path, "Cached Arlo session expired or invalid; resetting");
+        warn!(%path, "Cached Arlo session expired or invalid; token dropped");
+        // Only the token is stale. The identity Arlo paired as a trusted
+        // browser — this device_id plus the cookie jar — is what lets the
+        // next login skip the OTP, so it is kept.
+        client.auth = AuthManager {
+            access_token: None,
+            user_id: None,
+            device_id,
+            cache_path: Some(path.to_string()),
+            cookies,
+        };
+        return;
     }
 
     client.auth = AuthManager::new();
@@ -389,9 +409,11 @@ mod tests {
         let mut client = mocked_client(Arc::clone(&mock));
         apply_session_cache(&mut client, &path).await;
 
-        // Token wiped, but the cache_path is primed for the next login.
+        // Token wiped, but the cache_path is primed for the next login and
+        // the paired identity (device_id) survives.
         assert!(!client.is_authenticated());
         assert_eq!(client.auth.cache_path.as_deref(), Some(path.as_str()));
+        assert_eq!(client.auth.device_id, seeder.device_id);
     }
 
     #[tokio::test]

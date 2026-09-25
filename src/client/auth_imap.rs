@@ -32,6 +32,10 @@ const OTP_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Arlo formats the OTP inside an `<h1>` block. Match exactly 6 digits there.
 static OTP_RE_H1: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)<h1[^>]*>\s*(\d{6})\s*</h1>").expect("static regex"));
+/// Newer templates put the code on a line of its own in the `text/plain`
+/// part (the reference client's `^\W*(\d{6})\W*$` per-line match).
+static OTP_RE_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\W*(\d{6})\W*$").expect("static regex"));
 /// Fallback: 6 digits not preceded by `#`, `=`, `&`, or word chars (avoids
 /// CSS hex colours, quoted-printable artefacts, and HTML entities).
 static OTP_RE_FALLBACK: LazyLock<Regex> =
@@ -55,10 +59,14 @@ pub fn extract_text(parsed: &ParsedMail) -> String {
     }
 }
 
-/// Extracts a 6-digit Arlo OTP from an extracted email body. Returns `None`
-/// if neither the `<h1>` nor the loose-digit fallback regex match.
+/// Extracts a 6-digit Arlo OTP from an extracted email body, trying the
+/// `<h1>` block, then a bare-digits line, then the loose-digit fallback.
+/// Returns `None` if none match.
 pub fn extract_otp(content: &str) -> Option<String> {
     if let Some(caps) = OTP_RE_H1.captures(content) {
+        return Some(caps[1].to_string());
+    }
+    if let Some(caps) = OTP_RE_LINE.captures(content) {
         return Some(caps[1].to_string());
     }
     OTP_RE_FALLBACK.captures(content).map(|c| c[1].to_string())
@@ -254,6 +262,60 @@ mod tests {
         // 6-digit-looking CSS colours and HTML entities must not trip the fallback regex.
         let body = "<div style=\"color:#abc123\">no code here &#123456; either</div>";
         assert_eq!(extract_otp(body), None);
+    }
+
+    #[test]
+    fn extract_otp_matches_bare_digit_line_in_plain_text() {
+        let text = "Your Arlo verification code is below.\n\n  467266  \n\nThis code expires.";
+        assert_eq!(extract_otp(text).as_deref(), Some("467266"));
+    }
+
+    #[test]
+    fn extract_text_decodes_latin1_quoted_printable_plain_part() {
+        // 2026 Arlo template: ISO-8859-1 body, `©` as =A9, code on its own
+        // line in the text/plain part, HTML part with the h1 (pyaarlo #197).
+        let raw = concat!(
+            "From: do_not_reply@arlo.com\r\n",
+            "To: you@example.com\r\n",
+            "Subject: Your Arlo code\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/alternative; boundary=\"b1\"\r\n",
+            "\r\n",
+            "--b1\r\n",
+            "Content-Type: text/plain; charset=iso-8859-1\r\n",
+            "Content-Transfer-Encoding: quoted-printable\r\n",
+            "\r\n",
+            "Your verification code:\r\n",
+            "\r\n",
+            "467266\r\n",
+            "\r\n",
+            "=A9 2026 Arlo Technologies\r\n",
+            "--b1\r\n",
+            "Content-Type: text/html; charset=iso-8859-1\r\n",
+            "Content-Transfer-Encoding: quoted-printable\r\n",
+            "\r\n",
+            "<html><body><h1>467266 </h1><p>=A9 2026 Arlo</p></body></html>\r\n",
+            "--b1--\r\n",
+        );
+        let parsed = mailparse::parse_mail(raw.as_bytes()).expect("fixture parses");
+        let text = extract_text(&parsed);
+        assert!(text.contains("\u{a9} 2026"), "charset decoded: {text}");
+        assert_eq!(extract_otp(&text).as_deref(), Some("467266"));
+    }
+
+    #[test]
+    fn extract_text_handles_plain_only_email() {
+        let raw = concat!(
+            "From: do_not_reply@arlo.com\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "Code:\r\n123456\r\n",
+        );
+        let parsed = mailparse::parse_mail(raw.as_bytes()).expect("fixture parses");
+        assert_eq!(
+            extract_otp(&extract_text(&parsed)).as_deref(),
+            Some("123456")
+        );
     }
 
     #[test]

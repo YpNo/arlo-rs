@@ -207,6 +207,7 @@ impl ArloClient {
                 Ok(Err(RecvError::Closed)) => {
                     return Err(ArloError::ApiError {
                         code: 500,
+                        error: None,
                         message: "SSE bus closed before startStream URL arrived".into(),
                     });
                 }
@@ -486,11 +487,106 @@ impl ArloClient {
         if !response.success {
             return Err(ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: "Failed to fetch automation v3 modes".to_string(),
             });
         }
 
         Ok(response.data)
+    }
+
+    /// Fetches the v3 mode catalogue of a location —
+    /// `GET /hmsweb/automation/v3?locationId=…&revisions=false` — parsed
+    /// into an [`AutomationConfig`] (standard mode ids plus the
+    /// name ↔ uuid map of every gateway's custom modes).
+    ///
+    /// [`AutomationConfig`]: crate::models::automation::AutomationConfig
+    #[instrument(skip(self))]
+    pub async fn get_automation_config(
+        &self,
+        location_id: &str,
+    ) -> Result<crate::models::automation::AutomationConfig, ArloError> {
+        let url = format!(
+            "{}{}?locationId={}&revisions=false",
+            self.endpoints.api_host, API_AUTOMATION_V3, location_id
+        );
+        let body = self.execute_request::<()>(Method::GET, &url, None).await?;
+        let data = crate::models::envelope::unwrap_envelope(&body)?;
+        Ok(crate::models::automation::AutomationConfig::from_value(
+            &data,
+        ))
+    }
+
+    /// The location whose gateways include `device_id`
+    /// ([`Location::hosts_device`]), or the account's first location when
+    /// Arlo lists no gateways (single-location accounts).
+    ///
+    /// [`Location::hosts_device`]: crate::models::automation::Location::hosts_device
+    pub async fn location_for_device(
+        &self,
+        device_id: &str,
+    ) -> Result<crate::models::automation::Location, ArloError> {
+        let locations = self.get_locations().await?;
+        locations
+            .iter()
+            .find(|l| l.hosts_device(device_id))
+            .or_else(|| locations.first())
+            .cloned()
+            .ok_or_else(|| ArloError::DeviceNotFound(format!("no location for {device_id}")))
+    }
+
+    /// Switches `device_id`'s location to the mode called `mode_name` on
+    /// the v3 automation API, resolving names the way the Arlo app does:
+    /// a standard mode (`standby`, `armHome`, `armAway`, case-insensitive)
+    /// is sent as `{"mode": <id>}`; anything else is looked up among the
+    /// gateway's custom modes (by name or uuid) and sent as
+    /// `{"mode":"custom","custom":{<deviceId>: <uuid>}}`. Base stations
+    /// delegate to their location, so `device_id` may be a base station
+    /// or a self-hosted camera.
+    ///
+    /// # Errors
+    ///
+    /// [`ArloError::DeviceNotFound`] when `mode_name` is neither a
+    /// standard mode nor a custom mode of that gateway; transport and
+    /// envelope errors propagate.
+    #[instrument(skip(self))]
+    pub async fn set_mode_by_name(
+        &self,
+        device_id: &str,
+        mode_name: &str,
+    ) -> Result<(), ArloError> {
+        use crate::models::automation::CUSTOM_MODE_SENTINEL;
+
+        let location = self.location_for_device(device_id).await?;
+        let config = self.get_automation_config(&location.id).await?;
+        let payload = if let Some(id) = config.standard_mode_id(mode_name) {
+            json!({ "mode": id })
+        } else if let Some(uuid) = config.custom_mode_id(device_id, mode_name) {
+            json!({ "mode": CUSTOM_MODE_SENTINEL, "custom": { device_id: uuid } })
+        } else {
+            return Err(ArloError::DeviceNotFound(format!(
+                "mode '{mode_name}' is not defined for {device_id} at location {}",
+                location.name
+            )));
+        };
+
+        let get_url = format!(
+            "{}{}?locationId={}",
+            self.endpoints.api_host, API_AUTOMATION_ACTIVE_MODE, location.id
+        );
+        let body = self
+            .execute_request::<()>(Method::GET, &get_url, None)
+            .await?;
+        let revision = extract_active_mode_revision(&body, &location.id).ok_or_else(|| {
+            ArloError::ParseError("activeMode response carries no revision".into())
+        })?;
+        let put_url = format!(
+            "{}{}?locationId={}&revision={}",
+            self.endpoints.api_host, API_AUTOMATION_ACTIVE_MODE, location.id, revision
+        );
+        self.execute_request(Method::PUT, &put_url, Some(&payload))
+            .await?;
+        Ok(())
     }
 
     /// Retrieves legacy v2 automation definitions
@@ -506,6 +602,7 @@ impl ArloClient {
         if !response.success {
             return Err(ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: "Failed to fetch automation definitions".to_string(),
             });
         }
@@ -525,6 +622,7 @@ impl ArloClient {
         if !response.success {
             return Err(ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: "Failed to fetch emergency locations".to_string(),
             });
         }
@@ -835,6 +933,7 @@ impl ArloClient {
         if !response.success {
             return Err(ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: "Failed to fetch ambient sensor history".to_string(),
             });
         }
@@ -1176,6 +1275,7 @@ mod tests {
             properties: Some(properties),
             source: None,
             trans_id: trans_id.map(String::from),
+            active_mode: None,
         }
     }
 

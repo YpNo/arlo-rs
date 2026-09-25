@@ -1,3 +1,4 @@
+use crate::error::ArloError;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +22,34 @@ pub struct Meta {
     pub code: u32,
     pub error: Option<u32>,
     pub message: Option<String>,
+}
+
+impl Meta {
+    /// True when the envelope reports success (`code == 200`).
+    pub fn is_success(&self) -> bool {
+        self.code == 200
+    }
+
+    /// Converts a failed envelope into [`ArloError::ApiError`], keeping
+    /// `code` and `error` for [`ArloError::action`] and choosing the best
+    /// message: Arlo's own, else the official web-client text for
+    /// `error`, else `fallback`.
+    pub fn into_error(self, fallback: &str) -> ArloError {
+        let message = self
+            .message
+            .filter(|m| !m.is_empty())
+            .or_else(|| {
+                self.error
+                    .and_then(crate::models::error_codes::message_for)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| fallback.to_string());
+        ArloError::ApiError {
+            code: self.code as i32,
+            error: self.error,
+            message,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
