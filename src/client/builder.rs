@@ -6,7 +6,7 @@
 //! than [`crate::client::ArloClient::from_config`].
 //!
 //! ```no_run
-//! use rs_arlo::ArloClient;
+//! use arlo_rs::ArloClient;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = ArloClient::builder()
@@ -29,8 +29,8 @@ use crate::client::{ArloClient, AuthManager};
 use crate::config::ClientConfig;
 use crate::error::ArloError;
 use reqwest::Client;
-use stealthscraper_rs::{BrowserProfile, CloudScraper};
 use std::sync::Arc;
+use stealthscraper_rs::{BrowserProfile, CloudScraper};
 
 /// Programmatic builder for an [`ArloClient`]. Construct via
 /// [`ArloClient::builder`].

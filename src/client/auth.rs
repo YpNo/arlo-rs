@@ -5,7 +5,7 @@
 //! - Initial credential payload submission (Base64 encoded)
 //! - Parsing and triggering dynamic 2FA/MFA Email and Push challenges
 //! - Orchestrating the backend continuation chain (Trust Devices, V3 Session Verification)
-//! required to generate a persistent telemetry token.
+//!   required to generate a persistent telemetry token.
 
 use crate::client::ArloClient;
 use crate::endpoints::*;
@@ -234,6 +234,10 @@ impl ArloClient {
     }
 
     /// Drives the full MFA flow with a pluggable [`MfaHandler`].
+    ///
+    /// [`MfaHandler`]: crate::client::mfa::MfaHandler
+    /// [`MfaHandler::prepare`]: crate::client::mfa::MfaHandler::prepare
+    /// [`MfaHandler::provide_otp`]: crate::client::mfa::MfaHandler::provide_otp
     ///
     /// Fully end-to-end: captures any pre-dispatch state via
     /// [`MfaHandler::prepare`], runs [`Self::authenticate`] to trigger the
@@ -785,14 +789,14 @@ impl ArloClient {
     ///         ?clientId={x-user-device-id}&eventId=FE!{uuid}&time={ms}`
     ///
     /// The `clientId` query parameter equals the `x-user-device-id`
-    /// header value — i.e. our locally-generated [`AuthManager::device_id`].
+    /// header value — i.e. our locally-generated `AuthManager::device_id`.
     /// `eventId` and `time` are the same telemetry params other v3 GETs
     /// (`validate_session_v3`, `device_support`) emit.
     ///
     /// Falls back to the legacy `PUT /hmsweb/logout` when:
     /// - the client has no `user_id` yet (rare, only if invoked before
     ///   any auth call), or
-    /// - the per-instance `api_version` is pinned to [`ApiVersion::Legacy`].
+    /// - the per-instance `api_version` is pinned to [`ApiVersion::Legacy`](crate::config::ApiVersion::Legacy).
     ///
     /// The local session state (token, user_id) is wiped **regardless**
     /// of the HTTP outcome — a network-level logout failure must not

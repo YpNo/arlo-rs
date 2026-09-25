@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! The `rs-arlo` library provides asynchronous, programmatic access to the Arlo security camera ecosystem.
+//! The `arlo-rs` library provides asynchronous, programmatic access to the Arlo security camera ecosystem.
 //!
 //! Because Arlo does not provide an official API, this library rigorously emulates the behavior of the
 //! Arlo Web Dashboard. It circumvents Cloudflare bot protections by tunneling all traffic through a local
@@ -14,7 +14,7 @@
 //!
 //! # Example
 //! ```no_run
-//! use rs_arlo::ArloClient;
+//! use arlo_rs::ArloClient;
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -38,7 +38,6 @@ pub mod config;
 pub mod endpoints;
 /// Unified strictly-typed error structures.
 pub mod error;
-/// Subscription event router interpreting SSE responses async.
 pub mod events;
 /// Hardcoded request headers and domain constants.
 pub mod headers;

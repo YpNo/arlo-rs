@@ -6,8 +6,8 @@
 //!   else falls back to `StdinMfaHandler`
 //! - `client.is_authenticated()` accessor
 
-use rs_arlo::config::ArloConfig;
-use rs_arlo::{ArloClient, ImapMfaHandler, StdinMfaHandler};
+use arlo_rs::config::ArloConfig;
+use arlo_rs::{ArloClient, ImapMfaHandler, StdinMfaHandler};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -65,12 +65,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Initialise a `tracing` subscriber honoring `RUST_LOG`. Defaults to INFO
-/// for `rs_arlo`, WARN elsewhere, so example runs aren't drowned in noisy
+/// for `arlo_rs`, WARN elsewhere, so example runs aren't drowned in noisy
 /// dependency logs by default.
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
 
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,rs_arlo=info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,arlo_rs=info"));
     fmt().with_env_filter(filter).init();
 }

@@ -29,6 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # boring-sys (BoringSSL, via stealthscraper-rs/wreq) needs cmake, a C++
+      # toolchain, libclang for bindgen, nasm and go.
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -40,7 +44,7 @@ jobs:
         # blanket `-A dead_code` allowance was dropped in PR 5 — any
         # genuinely-needed dead code now requires a localised
         # `#[allow(dead_code)]` with a one-line rationale.
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   test:
     name: Run Tests
@@ -57,7 +61,7 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Run cargo test
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
 
   security:
     name: Security & License Audit
@@ -81,9 +85,13 @@ jobs:
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
       - name: Run cargo audit
-        # Blocks the merge on any RUSTSEC advisory affecting our
-        # dependency tree. Run weekly via the scheduled trigger above.
-        run: cargo audit --deny warnings
+        # Blocks the merge on any RUSTSEC advisory, unmaintained or unsound
+        # crate in our dependency tree. Run weekly via the scheduled trigger
+        # above. `yanked` is deliberately NOT denied: the lockfile pins the
+        # yanked `wreq 5.3.0` on purpose (every wreq 5.x is yanked and
+        # stealthscraper-rs has not moved to wreq 6 yet — see Cargo.toml).
+        # Restore `--deny warnings` once that dependency is republished.
+        run: cargo audit --deny unmaintained --deny unsound
 
   sonarqube:
     name: SonarQube
@@ -105,11 +113,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential nasm golang-go
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
       - name: Rust Cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Check Documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --locked --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -146,7 +154,7 @@ jobs:
         # EventBus, an IMAP server mock for the OTP fetcher, and a
         # CloudScraper-boot harness for the production transport path.
         # CHANGELOG.md `[Unreleased]` tracks those as the path to 85%+.
-        run: cargo tarpaulin --all-features --workspace --timeout 120 --out xml --fail-under 65
+        run: cargo tarpaulin --locked --all-features --workspace --timeout 120 --out xml --fail-under 65
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6

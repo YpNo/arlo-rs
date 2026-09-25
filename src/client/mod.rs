@@ -1,26 +1,15 @@
-/// Pure REST API calls that don't fit into devices or auth cleanly.
 pub mod api;
-/// All authentication protocols, multi-factor challenges, and session caching.
 pub mod auth;
-/// Automated secure polling of IMAP mailboxes for MFA text extraction.
 pub mod auth_imap;
-/// Programmatic builder for [`ArloClient`].
 pub mod builder;
-/// Camera streaming, topology tracking, mode adjustments, and actuations.
 pub mod devices;
-/// Runtime-configurable Arlo host endpoints (auth + api hosts).
 pub mod endpoints;
 /// S3 Video chunk parsing and media decryption logic.
 pub mod library;
-/// v3 WebRTC live-stream signaling (sipInfo + hmswebsocketproxy WSS).
 pub mod livestream;
-/// Direct LAN client for an Arlo SmartHub with pinned-leaf TLS.
 pub mod local_hub;
-/// Pluggable Multi-Factor-Authentication handler trait + bundled impls.
 pub mod mfa;
-/// Raw token spoofing for connecting natively to local hubs bypassing Cloudflare.
 pub mod ratls;
-/// HTTP transport abstraction (production CloudScraper impl + test doubles).
 pub mod transport;
 
 #[cfg(test)]

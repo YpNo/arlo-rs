@@ -9,12 +9,12 @@
 //! The downstream streamer app's own test suite will follow exactly
 //! this pattern.
 
-use async_trait::async_trait;
-use reqwest::{Method, StatusCode};
-use rs_arlo::{
+use arlo_rs::{
     ArloClient, ArloEndpoints, ArloError, HttpRequest, HttpResponse, HttpTransport,
     StaticOtpHandler,
 };
+use async_trait::async_trait;
+use reqwest::{Method, StatusCode};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -167,13 +167,13 @@ async fn public_api_full_authenticated_flow_via_static_otp() {
     );
 }
 
-fn make_test_config() -> rs_arlo::config::ArloConfig {
-    rs_arlo::config::ArloConfig {
-        credentials: Some(rs_arlo::config::CredentialsConfig {
+fn make_test_config() -> arlo_rs::config::ArloConfig {
+    arlo_rs::config::ArloConfig {
+        credentials: Some(arlo_rs::config::CredentialsConfig {
             email: Some("user@example.test".into()),
             password: Some("p".into()),
         }),
-        mfa: Some(rs_arlo::config::MfaConfig {
+        mfa: Some(arlo_rs::config::MfaConfig {
             preferred_method: Some("EMAIL".into()),
             imap: None,
         }),

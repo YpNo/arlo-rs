@@ -20,7 +20,7 @@ description: Protocol emulation and state management for the Arlo ecosystem.
 
 ## Arlo v3 Live Signaling (WebRTC)
 
-Arlo v3 replaces the RTSP live source with a WebRTC call brokered by a **non-bundled `FreeSWITCH`** gateway. Signaling stays here in `rs-arlo`; media negotiation is delegated to a `webrtcbin` pipeline in the consumer (see the streamer's `media-specialist`).
+Arlo v3 replaces the RTSP live source with a WebRTC call brokered by a **non-bundled `FreeSWITCH`** gateway. Signaling stays here in `arlo-rs`; media negotiation is delegated to a `webrtcbin` pipeline in the consumer (see the streamer's `media-specialist`).
 
 1. **Discover ICE servers**: `GET /hmsweb/users/devices/sipInfo/v2` with `cameraId` + `xcloudId` headers → `SipInfo { domain, ws_endpoint, ice_servers: { data: [...] } }`. Filter out `transport=tcp` TURN entries (negotiates flakily); keep STUN + UDP TURN.
 2. **Open the signaling WS**: `wss://{domain}:7443/`, WebSocket subprotocol `sip`, `Origin: https://my.arlo.com`. No auth header — the WS is authenticated by the session cookies attached to the SipInfo REST call.

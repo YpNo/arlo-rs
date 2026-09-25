@@ -11,7 +11,7 @@
 //! 3. A bare JSON array — some `/devices` and `/locations` responses
 //!    elide the wrapper entirely.
 //!
-//! [`unwrap_envelope`] normalises all three into a single
+//! `unwrap_envelope` (crate-internal) normalises all three into a single
 //! `Result<serde_json::Value, ArloError>` so callers can stop reinventing
 //! the same dispatch.
 

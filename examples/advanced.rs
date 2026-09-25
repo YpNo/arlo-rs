@@ -4,7 +4,7 @@
 //! call returns a `StreamUrl` directly instead of `()`, removing the need
 //! for the consumer to wire its own SSE plumbing.
 
-use rs_arlo::ArloClient;
+use arlo_rs::ArloClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -65,6 +65,6 @@ fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
 
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,rs_arlo=info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,arlo_rs=info"));
     fmt().with_env_filter(filter).init();
 }

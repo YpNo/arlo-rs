@@ -1,10 +1,10 @@
-# rs-arlo
+# arlo-rs
 
-[![Rust CI](https://github.com/YpNo/rs-arlo/actions/workflows/ci.yml/badge.svg)](https://github.com/YpNo/rs-arlo/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/rs-arlo.svg)](https://crates.io/crates/rs-arlo)
+[![Rust CI](https://github.com/YpNo/arlo-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/YpNo/arlo-rs/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/arlo-rs.svg)](https://crates.io/crates/arlo-rs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-`rs-arlo` is a robust, asynchronous Rust client for the Arlo camera ecosystem. It natively fully replaces legacy Python implementations by dynamically adapting strictly to Arlo's constantly updating telemetry metrics and undocumented headers.
+`arlo-rs` is a robust, asynchronous Rust client for the Arlo camera ecosystem. It natively fully replaces legacy Python implementations by dynamically adapting strictly to Arlo's constantly updating telemetry metrics and undocumented headers.
 
 Powered by `rs-cloudscraper`, this library natively bridges Cloudflare's advanced bot-protection by launching a stealthy headless Chrome proxy and shaping perfect JA4 TLS signatures for all REST API interactions.
 
@@ -25,7 +25,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rs-arlo = "0.1.0"
+arlo-rs = "0.1.0"
 ```
 
 ## 💻 Configuration
@@ -35,7 +35,7 @@ Two ways to configure the client:
 **Programmatic (recommended for libraries / servers):**
 
 ```rust
-let client = rs_arlo::ArloClient::builder()
+let client = arlo_rs::ArloClient::builder()
     .session_cache(".arlo_session.json")
     .headless(true)
     .build()
@@ -63,13 +63,13 @@ headless = true # Set to false to visibly debug the browser automation
 
 ## 🔐 Multi-Factor Authentication (MFA)
 
-Arlo enforces strict MFA on all accounts. `rs-arlo` provides flexible tools to handle these challenges interactively or programmatically:
+Arlo enforces strict MFA on all accounts. `arlo-rs` provides flexible tools to handle these challenges interactively or programmatically:
 
 1. **Push Notifications (Default)**: The easiest method if you have the Arlo app installed on your smartphone. When `start_auth()` is called with a Push factor, Arlo sends a notification to your phone. You simply tap "Approve", and the `finish_auth()` call (which does not require an OTP string for push) will succeed.
-2. **Email OTP**: Arlo sends a One-Time Password to your registered email address. This method is ideal for fully automated headless servers. You can configure a background worker to connect to your mailbox via IMAP, parse the 6-digit OTP from the incoming Arlo email, and automatically supply it to `finish_auth()`. `rs-arlo` includes built-in fast IMAP polling natively (`client.fetch_imap_otp()`) which supports easy provider shortcuts (`"gmail"`, `"outlook"`, `"yahoo"`) so you don't even need to configure hosts manually!
+2. **Email OTP**: Arlo sends a One-Time Password to your registered email address. This method is ideal for fully automated headless servers. You can configure a background worker to connect to your mailbox via IMAP, parse the 6-digit OTP from the incoming Arlo email, and automatically supply it to `finish_auth()`. `arlo-rs` includes built-in fast IMAP polling natively (`client.fetch_imap_otp()`) which supports easy provider shortcuts (`"gmail"`, `"outlook"`, `"yahoo"`) so you don't even need to configure hosts manually!
 3. **SMS OTP**: Similar to Email, Arlo sends a text message to your registered phone number. You must retrieve this code and provide it to the client.
 
-To avoid repeated MFA prompts, `rs-arlo` automatically serializes successful session tokens to the file specified in `session_cache_path` (e.g., `.arlo_session.json`). On subsequent startups, `ArloClient::from_config()` will instantly hydrate and validate this cached token without requiring user interaction.
+To avoid repeated MFA prompts, `arlo-rs` automatically serializes successful session tokens to the file specified in `session_cache_path` (e.g., `.arlo_session.json`). On subsequent startups, `ArloClient::from_config()` will instantly hydrate and validate this cached token without requiring user interaction.
 
 ## 🧪 Scenarios & Examples
 
@@ -83,7 +83,7 @@ else falls back to `StdinMfaHandler`), and a top-level dump of every
 location and device on the account.
 
 ```bash
-RUST_LOG=rs_arlo=info cargo run --example simple
+RUST_LOG=arlo_rs=info cargo run --example simple
 ```
 
 ### `advanced` — Streaming & Actuation
@@ -92,7 +92,7 @@ returning the playable RTSPS / HLS / DASH URL directly — the library
 handles the SSE correlation internally.
 
 ```bash
-RUST_LOG=rs_arlo=info cargo run --example advanced
+RUST_LOG=arlo_rs=info cargo run --example advanced
 ```
 
 ### `imap` — IMAP OTP Extraction Debugger
@@ -101,12 +101,12 @@ Arlo email, and prints the OTP-extraction trace. Useful when retuning
 the regex layer against a new Arlo email template.
 
 ```bash
-RUST_LOG=rs_arlo=info cargo run --example imap
+RUST_LOG=arlo_rs=info cargo run --example imap
 ```
 
 ## 🛠️ Development & Cargo Commands
 
-When contributing or debugging the `rs-arlo` library, you can use these essential `cargo` commands:
+When contributing or debugging the `arlo-rs` library, you can use these essential `cargo` commands:
 
 - **Check for compilation errors without building binaries:**
   ```bash

@@ -28,7 +28,7 @@ impl ArloClient {
     /// Discovers all devices attached to the user's Arlo account.
     ///
     /// Tolerates Arlo's three response shapes via
-    /// [`crate::models::envelope::unwrap_envelope_array`]: a bare array,
+    /// `unwrap_envelope_array` (crate-internal): a bare array,
     /// `{ success: true, data: [...] }`, or
     /// `{ success: true, data: { devices: [...] } }`.
     #[instrument(skip(self))]
@@ -141,7 +141,7 @@ impl ArloClient {
     /// arrives later as an SSE event correlated by `transId`. This
     /// subscribes to the event bus *before* the POST (closing the race
     /// where the SSE response could beat the subscription) and waits up
-    /// to [`STREAM_URL_TIMEOUT`]. Returns [`ArloError::Timeout`] if no
+    /// to `STREAM_URL_TIMEOUT` (30 s). Returns [`ArloError::Timeout`] if no
     /// URL arrives in time, or [`ArloError::AuthError`] if not yet
     /// authenticated.
     #[instrument(skip(self), fields(device = %device.device_id))]

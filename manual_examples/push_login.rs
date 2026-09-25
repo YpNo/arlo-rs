@@ -41,7 +41,7 @@
 //! ## Run it
 //!
 //! ```bash
-//! RUST_LOG=rs_arlo=info cargo run --example push_login
+//! RUST_LOG=arlo_rs=info cargo run --example push_login
 //! ```
 //!
 //! Then **watch your phone** and tap "Approve" within the timeout
@@ -60,8 +60,8 @@
 //! time out, or did it error — and paste the `RUST_LOG=info` lines
 //! around "Awaiting push approval" / "finishAuth" if it failed.
 
-use rs_arlo::ArloClient;
-use rs_arlo::config::ArloConfig;
+use arlo_rs::ArloClient;
+use arlo_rs::config::ArloConfig;
 use std::path::Path;
 
 const CONFIG_PATH: &str = "config.toml";
@@ -71,7 +71,7 @@ const CACHE_PATH: &str = ".arlo_session_push.json";
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
-    println!("=== rs-arlo manual smoke test: PUSH login ===\n");
+    println!("=== arlo-rs manual smoke test: PUSH login ===\n");
 
     // ---- 1. Validate config ----
     let config = match load_and_validate_config() {
@@ -192,11 +192,11 @@ fn load_and_validate_config() -> Result<ArloConfig, String> {
 }
 
 /// `tracing` subscriber matching the other examples. Defaults to INFO
-/// for `rs_arlo`, WARN elsewhere; `RUST_LOG` overrides.
+/// for `arlo_rs`, WARN elsewhere; `RUST_LOG` overrides.
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
 
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,rs_arlo=info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,arlo_rs=info"));
     fmt().with_env_filter(filter).init();
 }

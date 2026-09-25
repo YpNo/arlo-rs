@@ -1,9 +1,9 @@
-# Arlo Rust Library (rs-arlo) - Technical Context
+# Arlo Rust Library (arlo-rs) - Technical Context
 
-This document provides a comprehensive technical overview of the `rs-arlo` library for AI agents and developers.
+This document provides a comprehensive technical overview of the `arlo-rs` library for AI agents and developers.
 
 ## 1. Project Mission & Core Strategy
-`rs-arlo` is a high-fidelity, asynchronous Rust library for interacting with the Arlo security camera ecosystem. Since Arlo lacks an official API, this library **emulates the Arlo Web Dashboard** exactly.
+`arlo-rs` is a high-fidelity, asynchronous Rust library for interacting with the Arlo security camera ecosystem. Since Arlo lacks an official API, this library **emulates the Arlo Web Dashboard** exactly.
 
 ### Core Strategy:
 - **Stealth**: All traffic is routed through a local headless-browser proxy (`rs-cloudscraper`) to forge JA4 TLS fingerprints and bypass Cloudflare bot detection.
@@ -95,7 +95,7 @@ Three entry points, all `&Device`-typed (the stream POST targets
 > **Future direction (de-scoped, not implemented):** Arlo's web portal
 > has moved live video to **SIP-over-WSS** (`sipInfo/v2` →
 > `wss://livestream-z1-prod.arlo.com:7443/`, `Sec-WebSocket-Protocol:
-> sip`). `rs-arlo` keeps the legacy `/startStream` + SSE path for
+> sip`). `arlo-rs` keeps the legacy `/startStream` + SSE path for
 > backward compatibility. A `LiveStreamWss` adapter is tracked future
 > work — see `workfile.md` and `CHANGELOG.md`.
 
@@ -114,7 +114,7 @@ Handles S3 chunk parsing and media decryption. Arlo video chunks are often encry
 
 ### Instrumentation
 - **Tracing**: `tracing` is the *only* logging facade. Critical async paths use `#[tracing::instrument(skip(sensitive_fields))]`.
-- **`log` / `env_logger` fully removed** (PR 5). Examples use `tracing-subscriber` with a `RUST_LOG`-driven `EnvFilter` (default `warn,rs_arlo=info`). Do not reintroduce `log`.
+- **`log` / `env_logger` fully removed** (PR 5). Examples use `tracing-subscriber` with a `RUST_LOG`-driven `EnvFilter` (default `warn,arlo_rs=info`). Do not reintroduce `log`.
 
 ### Testing
 - **Unit Tests**: Must use `ArloClient::with_transport()` to avoid booting the `rs-cloudscraper` browser.

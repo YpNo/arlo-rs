@@ -24,8 +24,8 @@ use crate::error::ArloError;
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, StatusCode};
-use stealthscraper_rs::CloudScraper;
 use std::str::FromStr;
+use stealthscraper_rs::CloudScraper;
 
 /// Description of a single HTTP request to dispatch through the transport.
 /// Headers and body are pre-built by the orchestration layer; the

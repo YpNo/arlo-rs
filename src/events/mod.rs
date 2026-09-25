@@ -9,12 +9,12 @@
 //! Under the v3 Arlo API the legacy SSE channel
 //! (`/hmsweb/client/subscribe`) returns **403**; the modern client
 //! receives all device events over MQTT (`wss://mqtt-cluster-*`). The
-//! wire details live in [`mqtt`]; this module only owns lifecycle and
+//! wire details live in the crate-internal `mqtt` submodule; this module only owns lifecycle and
 //! the JSON→[`ArloEvent`] routing (shared, since MQTT `PUBLISH`
 //! payloads have the same shape the SSE frames did).
 //!
 //! Lifecycle:
-//! - [`EventBus::start`] (crate-internal) is invoked lazily by
+//! - `EventBus::start` (crate-internal) is invoked lazily by
 //!   [`crate::ArloClient::events`] on first use.
 //! - [`Drop`] aborts the background task, so dropping the owning
 //!   [`crate::ArloClient`] cleans up the listener.
@@ -38,7 +38,7 @@ const BROADCAST_CAPACITY: usize = 256;
 /// wildcard arm — adding a new variant is a deliberate breaking change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionState {
-    /// Initial state after [`EventBus::start`] returns and during every
+    /// Initial state after the bus starts (crate-internal `EventBus::start`) and during every
     /// reconnect attempt (WSS dial + MQTT `CONNECT`).
     Connecting,
     /// `CONNACK` accepted; we are subscribed and pumping events.

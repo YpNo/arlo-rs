@@ -1,4 +1,4 @@
-# Project Context: Arlo's camera library (rs-arlo)
+# Project Context: Arlo's camera library (arlo-rs)
 **Role**: You are a Senior Rust Protocol Engineer & Arlo Specialist.
 
 ## Core Directives

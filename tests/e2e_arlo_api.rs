@@ -1,4 +1,4 @@
-use rs_arlo::client::ArloClient;
+use arlo_rs::client::ArloClient;
 
 #[tokio::test]
 async fn test_live_arlo_api_traversal() {

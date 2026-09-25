@@ -1,13 +1,56 @@
 # Changelog
 
-All notable changes to `rs-arlo` are documented in this file.
+All notable changes to `arlo-rs` are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Removed — ⚠️ BREAKING: rs-arlo is now signaling-only for v3 live
+### Changed — ⚠️ BREAKING: crate renamed `rs-arlo` → `arlo-rs`
+- The package is now `arlo-rs` (library crate `arlo_rs`), matching the
+  repository `YpNo/arlo-rs`. Every `use rs_arlo::…` becomes
+  `use arlo_rs::…`; the `RUST_LOG` target is `arlo_rs`. Path-dependent
+  consumers point at `../arlo-rs`.
+
+### Changed — build reproducibility
+- `stealthscraper-rs` is consumed from the sibling checkout
+  (`../stealthscraper-rs`, v1.0.0) instead of crates.io 0.4.0, which can
+  no longer be resolved from a clean lock: it requires `wreq 5.3.0` and
+  every `wreq 5.x` is yanked. The committed `Cargo.lock` pins the yanked
+  `wreq` on purpose; CI now runs every cargo step with `--locked` so a
+  fresh resolution can never silently break the build. The clippy and doc
+  jobs gained the native BoringSSL build deps (cmake, libclang, nasm, go)
+  they were missing.
+- Against `stealthscraper-rs` 1.0.0 the browser-proxy call sites
+  (`builder.rs`, `transport.rs`) compile unchanged. One silent behavioural
+  change: `BrowserProfile::random()` now presents Chrome 153 instead of
+  124–126.
+
+### Security
+- Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
+  (RUSTSEC-2026-0285, TLS 1.3 handshake across encryption levels) and
+  `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);
+  `chacha20` moved off a yanked release. `deny.toml`'s duplicate-version
+  skip list was rebuilt against the current graph (the old entries named
+  `headless_chrome`, `rquest-util` and `rcgen`, none of which remain).
+  `cargo deny check` passes; the CI audit job denies unmaintained and
+  unsound crates but no longer `--deny warnings`, since the pinned
+  yanked `wreq` would trip it.
+
+### Fixed
+- `cargo doc` is warning-free again: duplicated one-line outer docs on
+  `pub mod` declarations were removed (rustdoc merged them with the
+  modules' own `//!` docs and then resolved the inner links in the wrong
+  scope), and links to crate-private items became plain code spans.
+
+### Removed — repository hygiene
+- `.arlo_session_push.json`, `examples/log.txt` and `examples/email.txt`
+  are no longer tracked (session artefact, a live-run log carrying account
+  identifiers and presigned URLs, and a real OTP email). `.gitignore` now
+  covers `.arlo_session*.json`.
+
+### Removed — ⚠️ BREAKING: arlo-rs is now signaling-only for v3 live
 - Deleted the in-crate WebRTC **media** plane: `ArloClient::start_live`,
   `ArloClient::start_live_rtsp`, `LiveStream`, `RtspLiveStream`, the
   built-in localhost RTSP publisher (`client::rtsp_pub`), the SDP
@@ -223,7 +266,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`wss://livestream-z1-prod.arlo.com:7443/`,
   `Sec-WebSocket-Protocol: sip`, seeded by
   `GET /hmsweb/users/devices/sipInfo/v2`). The legacy `/startStream`
-  + SSE path remains and is what `rs-arlo` uses. A `LiveStreamWss`
+  + SSE path remains and is what `arlo-rs` uses. A `LiveStreamWss`
   adapter is future work for accounts where the legacy path is retired.
 
 ### Added (PR 6)
@@ -273,7 +316,7 @@ structurally hard areas. Each is its own PR-sized investment.
 
 ## [0.1.0] - Initial public-API freeze
 
-This release sequence (PR 1 → PR 5) lifted `rs-arlo` from a half-broken
+This release sequence (PR 1 → PR 5) lifted `arlo-rs` from a half-broken
 prototype to a production-ready library suitable for downstream
 streaming applications.
 
@@ -308,7 +351,7 @@ streaming applications.
   constructor that skips the heavyweight CloudScraper bootstrap
   entirely (PR 4).
 - **`tracing-subscriber`-driven examples** with sensible default
-  filters (`warn,rs_arlo=info`) (PR 5).
+  filters (`warn,arlo_rs=info`) (PR 5).
 - **`rust-toolchain.toml`** pinning Rust 1.95.0 to match the sibling
   `imap-rs` workspace (PR 5).
 - **CHANGELOG.md** itself (this file) (PR 5).
