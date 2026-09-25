@@ -91,7 +91,10 @@ jobs:
         # yanked `wreq 5.3.0` on purpose (every wreq 5.x is yanked and
         # stealthscraper-rs has not moved to wreq 6 yet — see Cargo.toml).
         # Restore `--deny warnings` once that dependency is republished.
-        run: cargo audit --deny unmaintained --deny unsound
+        # The two ignored `lru 0.13` unsound advisories are pinned by that
+        # same `wreq 5.3.0` (`lru = "0.13"`); keep them in sync with
+        # `[advisories].ignore` in deny.toml and drop both with the wreq bump.
+        run: cargo audit --deny unmaintained --deny unsound --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0253
 
   sonarqube:
     name: SonarQube

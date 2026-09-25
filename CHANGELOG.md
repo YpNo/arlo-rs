@@ -31,7 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
   (RUSTSEC-2026-0285, TLS 1.3 handshake across encryption levels) and
   `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);
-  `chacha20` moved off a yanked release. `deny.toml`'s duplicate-version
+  `chacha20` moved off a yanked release; `quinn-proto` 0.11.18
+  (RUSTSEC-2026-0185) and `anyhow` 1.0.104 (RUSTSEC-2026-0190) likewise.
+  Two `lru 0.13` unsound advisories (RUSTSEC-2026-0002, -0253) are
+  explicitly ignored in both `deny.toml` and the CI audit flags because
+  `wreq 5.3.0` pins that `lru` line. `deny.toml`'s duplicate-version
   skip list was rebuilt against the current graph (the old entries named
   `headless_chrome`, `rquest-util` and `rcgen`, none of which remain).
   `cargo deny check` passes; the CI audit job denies unmaintained and

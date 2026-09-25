@@ -74,6 +74,11 @@ ignore = [
     #{ id = "RUSTSEC-0000-0000", reason = "you can specify a reason the advisory is ignored" },
     #"a-crate-that-is-yanked@0.1.1", # you can also ignore yanked crate versions if you wish
     #{ crate = "a-crate-that-is-yanked@0.1.1", reason = "you can specify why you are ignoring the yanked crate" },
+    # `lru 0.13` is pinned by `wreq 5.3.0` (stealthscraper-rs); the patched
+    # lru needs wreq 6. Mirrored in the CI `cargo audit --ignore` flags —
+    # drop both together when stealthscraper-rs moves to wreq 6.
+    { id = "RUSTSEC-2026-0002", reason = "lru 0.13 IterMut Stacked Borrows — pinned by wreq 5.3.0, fixed lru needs wreq 6" },
+    { id = "RUSTSEC-2026-0253", reason = "lru 0.13 LruCache::pop panic safety — pinned by wreq 5.3.0, fixed lru needs wreq 6" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
