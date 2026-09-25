@@ -82,38 +82,51 @@ regardless of the HTTP outcome.
 
 ## 4. Subsystem Deep-Dive
 
-### SSE Event Bus (`src/events/`)
-The `EventBus` is a lazy-initialized singleton that owns two background tasks:
-1. **Listener**: Maintains a persistent connection to `/hmsweb/client/subscribe`. Uses `SseFramer` to handle WHATWG-compliant chunked SSE data.
-2. **Pinger**: Sends a keep-alive ping to `session/v3` every 10 minutes to prevent token expiration.
-- **Broadcasting**: Events are sent via `tokio::sync::broadcast`; connection state via `tokio::sync::watch`.
+### MQTT Event Bus (`src/events/`)
+The legacy SSE channel (`/hmsweb/client/subscribe`) returns 403 under
+the v3 API. `EventBus` (lazily started by `ArloClient::events`) owns one
+reconnecting background task that speaks **MQTT 3.1.1 over WebSocket**
+to the broker `session/v3` advertises (`mqttUrl`), through the
+`WsConnector` seam:
+- `CONNECT` with clientId `user_<userId>_<rand>`, username `<userId>`,
+  password `<accessToken>`; `PINGREQ` every 30 s.
+- `SUBSCRIBE` to the per-device `allowedMqttTopics` the broker grants
+  (from `/hmsweb/v2/users/devices`), falling back to the hand-built
+  per-resource topic set keyed by `xCloudId`, plus `u/<userId>/in/#`.
+- Inbound `PUBLISH` payloads are the same JSON shape the SSE frames were;
+  they are broadcast as `ArloEvent` via `tokio::sync::broadcast`,
+  connection state via `tokio::sync::watch`.
 
 ### Local Hub / RATLS (`src/client/local_hub.rs`)
 Direct SmartHub communication (LAN) uses **Remote Authenticated TLS (RATLS)**:
 - **Cert Pinning**: The cloud returns a leaf certificate for the hub. `LocalHubClient` uses `rustls` with a custom `PinnedLeafVerifier` to trust **only** that exact certificate, ignoring CA chains and hostnames.
 - **Token Spoofing**: Requests to the local hub use special headers to bypass Cloudflare-style checks locally.
 
-### Live Streaming (`src/client/devices.rs`)
-Three entry points, all `&Device`-typed (the stream POST targets
+### Live Streaming
+**v3 cameras (`src/client/livestream.rs`)**: live video is a WebRTC call
+brokered by a non-bundled `FreeSWITCH` gateway. `sip_info(&Device)`
+fetches `sipInfo/v2` (SIP callee URI, per-call password, ICE servers);
+`webrtc_negotiate(&sip, offer_sdp)` opens `wss://<domain>:7443/`
+(subprotocol `sip`, via `WsConnector`) and exchanges the consumer's SDP
+offer for the gateway's answer over the `hmswebsocketproxy` HTTP-over-WS
+framing; `SignalingSocket::disconnect` sends `sessionDisconnected`. The
+media plane (ICE/DTLS/SRTP, H.264) lives in the consumer — the
+streamer's GStreamer `webrtcbin`.
+
+**Legacy cameras (`src/client/devices/stream.rs`)**: three
+`/startStream` entry points, all `&Device`-typed (the stream POST targets
 `device.parent_id` and attaches an `xcloudId` header derived from
 `device.x_cloud_id`; `Device::is_self_hosted()` reports
 `parent_id == device_id`):
 - **`get_stream_url`**: synchronous peek (`action:"get"` on
   `/startStream`) — returns an already-active stream (e.g. one opened
-  from the Arlo mobile app) or `None`. URL in the POST body, no SSE.
+  from the Arlo mobile app) or `None`. URL in the POST body, no event.
 - **`force_start_stream`**: always issues a fresh `startUserStream`
-  (`action:"set"`); the real URL arrives over SSE and is correlated by
-  `transId`.
+  (`action:"set"`); the real URL arrives on the event bus and is
+  correlated by `transId`.
 - **`start_stream`**: peeks via `get_stream_url`, falls back to
   `force_start_stream`. All returned URLs are rewritten
   `rtsp://` → `rtsps://`.
-
-> **Future direction (de-scoped, not implemented):** Arlo's web portal
-> has moved live video to **SIP-over-WSS** (`sipInfo/v2` →
-> `wss://livestream-z1-prod.arlo.com:7443/`, `Sec-WebSocket-Protocol:
-> sip`). `arlo-rs` keeps the legacy `/startStream` + SSE path for
-> backward compatibility. A `LiveStreamWss` adapter is tracked future
-> work — see `workfile.md` and `CHANGELOG.md`.
 
 ### Media Library (`src/client/library.rs`)
 Handles S3 chunk parsing and media decryption. Arlo video chunks are often encrypted; this module contains the logic to assemble and decrypt them into playable streams.
@@ -147,5 +160,6 @@ Handles S3 chunk parsing and media decryption. Arlo video chunks are often encry
 ## 7. Error Handling
 Library uses `thiserror` with 10 variants:
 - `AuthError`, `ApiError`, `HttpError`, `NetworkError`, `ScraperError`, `SerializationError`, `DeviceNotFound`, `ParseError`, `IoError`, `Timeout`.
-- `Timeout` is used by `start_stream`/`force_start_stream` when the SSE-correlated URL doesn't arrive within `STREAM_URL_TIMEOUT` (30 s).
+- `Timeout` is used by `start_stream`/`force_start_stream` when the event-bus-correlated URL doesn't arrive within `STREAM_URL_TIMEOUT` (30 s), and by the push-approval poll.
+- `ArloError::action()` classifies any error (retry / re-auth / pending / fatal / …) from Arlo's own code table (`models::error_codes`).
 - **Rule**: Never use `anyhow` in `src/`. Only for tests and examples.

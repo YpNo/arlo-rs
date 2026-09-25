@@ -103,3 +103,7 @@ path = "manual_examples/list_cameras.rs"
 [[example]]
 name = "push_login"
 path = "manual_examples/push_login.rs"
+
+[[example]]
+name = "record_stream"
+path = "manual_examples/record_stream.rs"

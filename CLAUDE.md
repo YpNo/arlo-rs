@@ -14,29 +14,29 @@
 |---|---|
 | `mod.rs` | `ArloClient` struct: transport injection, lazy `EventBus` init, `reattach()` / `session_token()` |
 | `builder.rs` | `ArloClientBuilder` (fluent) + internal `bootstrap()`: default `WreqTransport`, or the headless-Chrome proxy with `.browser(true)` (`browser` feature) |
-| `auth.rs` | `AuthManager` (token + cookies + cache) + the OAuth state machine on `ArloClient`: trusted-browser fast path (`getFactorId` → `startAuth` BROWSER) before the OTP ceremony; pairing with `browserAuthCode`; `persist_session()` |
+| `auth/` | `mod.rs`: `AuthManager` (token + cookies + `device_id` + `0600` cache), `persist_session()`. `ceremony.rs`: the raw `ocapi` calls (`login` … `session/v3`, `devicesupport`, `getFactorId`, trusted `startAuth`). `flow.rs`: `authenticate*`, trusted-browser fast path, `complete_session` (pairing with `browserAuthCode`). `push.rs`: PUSH polling. `session.rs`: `login_v2`, `logout` |
 | `auth_imap.rs` | IMAP OTP fetcher over the `imap-rs-client` / `imap-rs-tls` crates; OTP regexes on `regex-lite` |
 | `mfa.rs` | `MfaHandler` trait + `ImapMfaHandler`, `StdinMfaHandler`, `StaticOtpHandler` |
 | `transport.rs` | `HttpTransport` trait (+ `export_cookies`/`import_cookies`) + `WreqTransport` (prod default) + `CloudScraperTransport` (`browser` feature) + `MockTransport` (tests) |
 | `cookies.rs` | `PersistentJar`: `wreq` cookie store with JSON export/import — Arlo's "trusted browser" state |
 | `ws.rs` | `WsConnector` port (+ `TungsteniteConnector` adapter, `MockWsConnector` in tests) — the seam the MQTT bus and WebRTC signaling open sockets through |
 | `api.rs` | Generic REST helpers: `execute_request`, OPTIONS preflight, 429/1015 rate-limit retry, JSON envelope unwrap |
-| `devices.rs` | Camera topology, mode management, actuations, `local_hub()` factory |
+| `devices/` | `mod.rs`: `get_devices`, `xcloud_header`. `stream.rs`: legacy `/startStream` trio + URL helpers. `modes.rs`: v3 `activeMode` (+ legacy fallbacks), locations, `AutomationConfig`, `set_mode_by_name`. `actuation.rs`: `notify`-style commands. `media.rs`: audio playback. `sensors.rs`: ambient history decoder |
 | `local_hub.rs` | `LocalHubClient`: LAN-direct SmartHub client with rustls leaf-cert pinning (RATLS) |
 | `ratls.rs` | Raw RATLS token spoofing for Cloudflare-bypass on local hub connections |
 | `library.rs` | S3 video chunk parsing and media decryption |
 | `endpoints.rs` | `ArloEndpoints`: overrideable auth + API hosts (mockito-friendly) |
 
-### `src/events/` — SSE telemetry bus
-- `EventBus`: two background tokio tasks (SSE listener with auto-reconnect + 10-min keep-alive pinger), `broadcast::Sender<ArloEvent>`, `watch::Receiver<ConnectionState>`
-- `SseFramer`: WHATWG-compliant stateful frame parser (handles chunk-boundary splits, `\r\n\r\n` and `\n\n`, multi-line `data:`, batch JSON arrays)
+### `src/events/` — MQTT-over-WSS telemetry bus
+- `EventBus` (`mod.rs`): one reconnecting background task, `broadcast::Sender<ArloEvent>`, `watch::Receiver<ConnectionState>`; `dispatch_payload` routes single events and batches
+- `mqtt.rs`: MQTT 3.1.1 over the `WsConnector` seam — `CONNECT` (`user_<uid>_<rand>` / `<uid>` / `<token>`), `SUBSCRIBE` to `allowedMqttTopics` (fallback: hand-built `d/<xCloudId>/out/…` set) + `u/<uid>/in/#`, `PINGREQ` every 30 s, `PUBLISH` → `ArloEvent`
 - `ConnectionState`: `Connecting | Connected | Disconnected` — exhaustive enum, no wildcard arms
 
 ### `src/models/` — Pure data layer (no I/O)
 `auth.rs` (+ `Meta::into_error`), `auth_advanced.rs`, `events.rs` (`ArloEvent::active_mode_change`), `envelope.rs`, `error_codes.rs` (`ErrorAction`, `classify`, official messages — branch on `ArloError::action()`, never on raw codes), `automation.rs` (`AutomationConfig`, `Location::hosts_device`), `library.rs`, `ratls.rs`, `sip.rs`, `api.rs`
 
 ### Other modules
-- `src/error.rs` — `ArloError` (9 `thiserror` variants)
+- `src/error.rs` — `ArloError` (10 `thiserror` variants) + `action()` classifier
 - `src/config.rs` — TOML `ArloConfig` (`credentials`, `client`, `mfa`, `mfa.imap`)
 - `src/endpoints.rs` — Static Arlo URL constants
 - `src/headers.rs` — Host constants

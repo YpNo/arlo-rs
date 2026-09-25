@@ -2,7 +2,7 @@
 //!
 //! Demonstrates the new `start_stream` correlation flow from PR 2 — the
 //! call returns a `StreamUrl` directly instead of `()`, removing the need
-//! for the consumer to wire its own SSE plumbing.
+//! for the consumer to wire its own event-bus plumbing.
 
 use arlo_rs::ArloClient;
 
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Found camera: {} (ID: {})", cam.device_name, cam.device_id);
 
     println!("\nRequesting stream URL (reuses an app-triggered stream if one");
-    println!("is already live; otherwise starts a fresh one over SSE)...");
+    println!("is already live; otherwise starts a fresh one and waits for the event-bus reply)...");
     match client.start_stream(cam).await {
         Ok(stream_url) => {
             println!(">>> Stream URL: {stream_url}");

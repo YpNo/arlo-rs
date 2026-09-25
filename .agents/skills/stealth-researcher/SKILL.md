@@ -21,8 +21,16 @@ description: High-sensitivity skill for fingerprinting evasion and network steal
 
 ## Daemon browser lifetime
 
-`headless_chrome::LaunchOptions::idle_browser_timeout` defaults to a short interval (crate default ~30 s; `rs-cloudscraper` historically set 120 s). In a long-lived daemon where the browser is needed only *sporadically* (auth refresh, Cloudflare challenge, session revalidation), the event loop times out and the `Browser` is torn down mid-session, breaking the TLS-spoofing proxy for every subsequent request.
+`arlo-rs`'s default transport (`WreqTransport`) runs no browser, so there is no
+browser lifetime to manage in the daemon. The headless-Chrome MITM proxy
+(`CloudScraperTransport`, crate feature `browser`, `ArloClientBuilder::browser(true)`)
+is an escalation path only. If it is ever enabled in a long-lived process:
 
-- Set an effectively-daemon-lifetime timeout — e.g. `Duration::from_secs(60 * 60 * 24 * 365 * 10)` (10 y, well within `Instant` range so the internal `recv_timeout` cannot overflow).
-- Never `Duration::MAX` — some `recv_timeout` impls do `Instant::now() + timeout` and panic on overflow.
-- Document *why* with a named constant (e.g. `BROWSER_IDLE_TIMEOUT`) — not a magic literal. Explain the daemon use case in the doc-comment so future readers don't reset it to a "reasonable" 60 s.
+- `stealthscraper-rs` 1.0 drives Chrome over its own CDP client (no
+  `headless_chrome`, no idle-timeout event loop); the proxy lives as long as the
+  `CloudScraper` held by the transport, which is the client's lifetime.
+- Keep it that way: never drop or rebuild the `CloudScraper` between requests —
+  the `reqwest` client is routed through its per-process proxy and trusts its
+  per-process CA.
+- Re-evaluate whether the browser is needed at all before enabling it: Arlo's
+  Cloudflare front only fingerprints TLS/HTTP2 today, which `wreq` satisfies.

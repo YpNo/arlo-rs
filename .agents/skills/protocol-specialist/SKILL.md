@@ -7,12 +7,13 @@ description: Protocol emulation and state management for the Arlo ecosystem.
 ## Arlo API Emulation
 - When implementing new endpoints:
   1. Audit the `X-Arlo-...` headers (Telemetry, Browser version, App version).
-  2. Ensure the User-Agent is consistent with the `BrowserProfile` provided by `rs-cloudscraper`.
+  2. Ensure the User-Agent and `Sec-CH-UA*` hints come from the same `BrowserProfile` (`stealthscraper-rs`) as the `wreq` emulation.
 
-## SSE & Event Management
-- **Keep-Alives**: Implement a robust heartbeat mechanism for SSE connections.
-- **Actor Isolation**: Ensure the `EventManager` uses `tokio::sync::broadcast` to prevent head-of-line blocking.
-- **State Hydration**: Periodically refresh device states from the REST API to ensure SSE events haven't been missed.
+## MQTT Event Management
+- **Keep-Alives**: `PINGREQ` at half the 60 s keep-alive; reconnect with backoff on any stream end.
+- **Actor Isolation**: the `EventBus` task publishes through `tokio::sync::broadcast` to prevent head-of-line blocking; never block it on a consumer.
+- **Topics**: prefer the broker's `allowedMqttTopics`; the broad `d/<xCloudId>/out/#` wildcard is owner-only.
+- **State Hydration**: Periodically refresh device states from the REST API to ensure events haven't been missed.
 
 ## MFA Flow Orchestration
 - Manage the transition from `start_auth` to `finish_auth` using a clear state machine.

@@ -14,10 +14,11 @@ Arlo's Cloudflare front admits clients by their TLS and HTTP/2 fingerprint and s
 
 - **Cloudflare Bypass without a browser**: every REST request carries a measured Chrome JA4 TLS + HTTP/2 fingerprint and matching `User-Agent` / `Sec-CH-UA` client hints via `wreq`; rate limits (429 / Cloudflare 1015) are retried automatically. Opt into headless Chrome with the `browser` feature + `ArloClientBuilder::browser(true)` only if Cloudflare ever starts challenging.
 - **MFA Support**: Integrated Multi-Factor Authentication (Email, Push, SMS) with persistent JSON disk caching to prevent 2FA lockouts.
-- **Asynchronous Actor System**: Decoupled `tokio::sync::broadcast` tasks handle background Server-Sent Events (SSE) keep-alives and device topology states natively without thread-locking.
+- **Event bus over MQTT**: a reconnecting MQTT-over-WebSocket listener (the v3 successor to Arlo's SSE channel) broadcasts typed `ArloEvent`s on a `tokio::sync::broadcast` channel, subscribing to the exact topics the broker grants the account.
 - **Camera Actuation**: Instantly toggle modes, trigger sirens, trigger snapshots, or start manual recordings with simple Rust methods.
 - **Local Storage Access (RATLS)**: Issue specialized x509 certificates to bypass the cloud entirely and download videos natively off local Arlo SmartHubs over your LAN.
-- **Stream Redirection**: Plugs directly into FFmpeg or native browser decoders by fetching authorized RTSP/HLS stream URLs instantly.
+- **Live video**: v3 WebRTC signaling (`sipInfo/v2` + the `hmswebsocketproxy` offer/answer exchange) for the consumer's WebRTC stack, plus the legacy `/startStream` RTSPS path for un-migrated cameras.
+- **Modes by name**: arm/disarm through the v3 automation API, resolving user-defined mode names to their UUIDs the way the Arlo app does.
 
 ## 📦 Installation
 
@@ -103,9 +104,11 @@ RUST_LOG=arlo_rs=info cargo run --example simple
 ```
 
 ### `advanced` — Streaming & Actuation
-Reattaches to the cached session and demonstrates `start_stream(id)`
-returning the playable RTSPS / HLS / DASH URL directly — the library
-handles the SSE correlation internally.
+Reattaches to the cached session and demonstrates the legacy
+`start_stream(&device)` path returning a playable RTSPS URL — the library
+correlates the event-bus response internally. v3 cameras stream over
+WebRTC instead (`sip_info` + `webrtc_negotiate`; media plane in the
+consumer).
 
 ```bash
 RUST_LOG=arlo_rs=info cargo run --example advanced

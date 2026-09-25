@@ -5,7 +5,7 @@
 
 - **Domain Layer (Pure)**: 
     - Must be free of I/O and external transport dependencies.
-    - Contains: Device state machines, Browser Profile definitions, SSE event enums.
+    - Contains: Device state machines, Arlo error-code table, event / automation / auth models.
     
 - **Application Layer (Use Cases)**: 
     - Orchestrates logic using Ports (Traits).
@@ -13,8 +13,8 @@
     
 - **Infrastructure Layer (Adapters)**: 
     - Implementation of Output Ports using specialized crates.
-    - **`arlo-rs`**: `imap-tokio` for OTP fetching, `reqwest` for the Arlo fallback client, and **`rs-cloudscraper`** for stealth-compliant transport.
-    - **`rs-cloudscraper`**: `rquest` for JA4 forging, `headless_chrome` for CDP automation, `hyper` for MITM proxy.
+    - **`arlo-rs`**: `wreq` (Chrome emulation from **`stealthscraper-rs`**) for the Cloudflare-fronted REST hosts, `tokio-tungstenite` for the MQTT / signaling WebSockets (`WsConnector`), `reqwest` + `rustls` for the LAN local-hub client, `imap-rs-*` for OTP fetching.
+    - **`stealthscraper-rs`** (`browser` feature only): first-party CDP client for headless Chrome + `hyper`/BoringSSL MITM proxy.
 
 - **Error Handling**: 
     - Use `thiserror` for all library/domain errors.
@@ -24,8 +24,8 @@
 
 When working in this codebase, the following specialized skills are activated:
 - **`rust-core`**: Governs hexagonal boilerplate, crate management, and instrumentation.
-- **`protocol-specialist`**: Governs Arlo-specific API emulation and SSE actor management.
-- **`stealth-researcher`**: Governs JA4 auditing and CDP stealth hooks (for `rs-cloudscraper`).
+- **`protocol-specialist`**: Governs Arlo-specific API emulation and the MQTT event-bus actor.
+- **`stealth-researcher`**: Governs JA4 auditing and CDP stealth hooks (for `stealthscraper-rs`).
 
 ## Coding Style & Safety
 

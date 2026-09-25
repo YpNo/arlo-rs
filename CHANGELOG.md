@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — module splits and documentation (Phase 5)
+- `src/client/auth.rs` (1825 lines) → `auth/{mod, ceremony, flow, push,
+  session}.rs` and `src/client/devices.rs` (2148 lines) →
+  `devices/{mod, stream, modes, actuation, media, sensors}.rs`, every
+  file under the 800-line limit, each submodule an `impl ArloClient`
+  block with its own tests. No public path changed (`arlo_rs::client::
+  {auth, devices}` still resolve); `ArloClient::spawn_ffmpeg_recorder`
+  was removed from the library (a process spawner does not belong in a
+  protocol crate) and lives on as the `record_stream` manual example.
+- New tests for `set_mode_by_name` (custom-uuid PUT with revision,
+  standard-name PUT, unknown-mode error).
+- README, CONTEXT.md, CLAUDE.md, the `.agents` rules / workflow / skill
+  files and the `advanced` example no longer describe the SSE bus, the
+  `rs-cloudscraper` browser proxy, `rquest`, `imap-tokio` or the
+  "RTSPS / HLS / DASH" stream story; they describe the MQTT bus, the
+  `wreq` transport, the `WsConnector` seam and v3 WebRTC signaling.
+  `GEMINI.md` is now a symlink to `CLAUDE.md` instead of a stale copy.
+
 ### Changed — crate diet (Phase 4)
 - Removed five direct dependencies that pulled their own subtrees for
   next to nothing: `chrono` (six calls to get epoch millis → a
