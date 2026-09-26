@@ -195,8 +195,6 @@ pub(crate) async fn bootstrap(cfg: BootstrapConfig) -> Result<ArloClient, ArloEr
         .install_default()
         .ok();
 
-    cfg.endpoints.warn_if_insecure();
-
     let mut profile = BrowserProfile::random();
     if let Some(ua) = cfg.user_agent {
         profile.user_agent = ua;
@@ -211,15 +209,7 @@ pub(crate) async fn bootstrap(cfg: BootstrapConfig) -> Result<ArloClient, ArloEr
         Arc::new(WreqTransport::new(profile, cfg.upstream_proxy.as_deref())?)
     };
 
-    Ok(ArloClient {
-        transport,
-        endpoints: cfg.endpoints,
-        auth: AuthManager::new(),
-        debug_mode: cfg.debug_mode,
-        ws: Arc::new(crate::client::ws::TungsteniteConnector),
-        event_bus: tokio::sync::OnceCell::new(),
-        api_version: crate::client::ApiVersionCell::default(),
-    })
+    Ok(ArloClient::with_transport(transport, cfg.endpoints).with_debug(cfg.debug_mode))
 }
 
 /// Boots headless Chrome + the MITM proxy and returns a `reqwest` client

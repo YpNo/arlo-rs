@@ -71,10 +71,16 @@ pub struct StreamingConfig {
     pub media_path: Option<String>,
 }
 
+/// The rwx bits for group and others in a Unix mode.
+const GROUP_OTHER_BITS: u32 = 0o077;
+/// The permission bits of a Unix mode (rwx for owner/group/others plus
+/// setuid/setgid/sticky), without the file-type bits.
+const PERMISSION_BITS: u32 = 0o7777;
+
 /// True when `mode` grants no permission to group or others — the only
 /// acceptable mode for a file that holds a password.
 pub(crate) const fn mode_is_private(mode: u32) -> bool {
-    mode & 0o077 == 0
+    mode & GROUP_OTHER_BITS == 0
 }
 
 /// Warns when a file that carries a password is readable by other users.
@@ -86,7 +92,7 @@ fn warn_if_shared(path: &str) {
     match fs::metadata(path) {
         Ok(meta) if !mode_is_private(meta.permissions().mode()) => warn!(
             path,
-            mode = format_args!("{:04o}", meta.permissions().mode() & 0o7777),
+            mode = format_args!("{:04o}", meta.permissions().mode() & PERMISSION_BITS),
             "config file holds a password but is readable by other users; chmod 600 it"
         ),
         Ok(_) => {}

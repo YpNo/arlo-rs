@@ -147,6 +147,9 @@ impl ArloClient {
         ws: Arc<dyn WsConnector>,
         endpoints: ArloEndpoints,
     ) -> Self {
+        // Every client is built here (the builder included), so an
+        // overridden cleartext host is reported whichever way it came in.
+        endpoints.warn_if_insecure();
         Self {
             transport,
             endpoints,

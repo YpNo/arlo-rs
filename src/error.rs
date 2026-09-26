@@ -90,15 +90,16 @@ fn is_tls_failure(err: &(dyn std::error::Error + 'static)) -> bool {
         return true;
     }
     // `io::Error::source` returns its inner error's source, skipping the
-    // inner error itself (where rustls puts the certificate error).
-    if err
+    // inner error itself (where rustls puts the certificate error), so an
+    // io::Error's next link is its `get_ref`; everything else uses `source`.
+    let next: Option<&(dyn std::error::Error + 'static)> = match err
         .downcast_ref::<std::io::Error>()
         .and_then(std::io::Error::get_ref)
-        .is_some_and(|inner| is_tls_failure(inner))
     {
-        return true;
-    }
-    err.source().is_some_and(is_tls_failure)
+        Some(inner) => Some(inner),
+        None => err.source(),
+    };
+    next.is_some_and(is_tls_failure)
 }
 
 /// True when `body` is a JSON object with Arlo's `meta` or `success` key.

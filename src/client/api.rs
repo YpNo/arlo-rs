@@ -28,12 +28,6 @@ use reqwest::Method;
 use serde::Serialize;
 use tracing::{debug, instrument, warn};
 
-/// `Accept-Language` the web dashboard sends on every request.
-const ACCEPT_LANGUAGE: &str = "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7";
-
-/// The custom headers a real preflight asks permission for.
-const PREFLIGHT_REQUEST_HEADERS: &str = "auth-version,content-type,source,x-service-version,x-user-device-automation-name,x-user-device-id,x-user-device-type";
-
 /// True when `url` and `base` share scheme, host and port. A prefix
 /// comparison would accept `https://ocapi-app.arlo.com.evil.tld/`.
 fn same_origin(url: &str, base: &str) -> bool {

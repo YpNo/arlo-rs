@@ -41,6 +41,30 @@ pub struct LocalHubClient {
     token: SecretString,
 }
 
+/// The SmartHub presented a leaf certificate other than the pinned one.
+/// `Debug` prints the same text as `Display`: rustls renders
+/// `CertificateError::Other` through `Debug`, and that is what reaches
+/// the operator.
+#[derive(Clone, Copy)]
+struct PinMismatch;
+
+const PIN_MISMATCH_MESSAGE: &str =
+    "SmartHub presented a certificate that does not match the pinned cloud-issued certificate";
+
+impl std::fmt::Display for PinMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(PIN_MISMATCH_MESSAGE)
+    }
+}
+
+impl std::fmt::Debug for PinMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(PIN_MISMATCH_MESSAGE)
+    }
+}
+
+impl std::error::Error for PinMismatch {}
+
 impl std::fmt::Debug for LocalHubClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocalHubClient")
@@ -226,8 +250,11 @@ impl ServerCertVerifier for PinnedLeafVerifier {
         if end_entity.as_ref() == self.pinned.as_ref() {
             Ok(ServerCertVerified::assertion())
         } else {
-            Err(rustls::Error::General(
-                "SmartHub presented a certificate that does not match the pinned cloud-issued certificate".into(),
+            // `InvalidCertificate`, not `General`: `ArloError::action`
+            // classifies a certificate failure as `Fatal`, and a pin
+            // mismatch must never be retried through.
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Other(rustls::OtherError(Arc::new(PinMismatch))),
             ))
         }
     }
@@ -351,8 +378,18 @@ nIYANCqJYEogTQfBuZJ8KB8=\n\
         let res = v.verify_server_cert(&other, &[], &name, &[], UnixTime::now());
         let err = res.expect_err("mismatched cert must be rejected");
         assert!(
-            format!("{err:?}").contains("does not match the pinned"),
-            "error should explain the pin mismatch: {err:?}"
+            err.to_string().contains("does not match the pinned"),
+            "error should explain the pin mismatch: {err}"
+        );
+        assert!(
+            matches!(err, rustls::Error::InvalidCertificate(_)),
+            "pin mismatch must be a certificate error so it classifies Fatal: {err:?}"
+        );
+        // As reqwest/tokio-rustls surface it: wrapped in an io::Error.
+        let io = std::io::Error::new(std::io::ErrorKind::InvalidData, err);
+        assert_eq!(
+            ArloError::NetworkError(Box::new(io)).action(),
+            crate::models::error_codes::ErrorAction::Fatal
         );
     }
 

@@ -118,17 +118,10 @@ async fn main() -> Result<(), arlo_rs::error::ArloError> {
     }
 
     match extract_otp(&raw_text) {
-        Some(otp) => println!("SUCCESS — Extracted OTP: {}", mask_otp(&otp)),
+        Some(otp) => println!("SUCCESS — extracted a {}-digit OTP", otp.chars().count()),
         None => println!("FAILURE — Regexes did not match. Re-run with ARLO_IMAP_DUMP=1."),
     }
 
     let _ = selected.logout().await;
     Ok(())
-}
-
-/// Shows the shape of the OTP (`12****`) without the value.
-fn mask_otp(otp: &str) -> String {
-    let shown: String = otp.chars().take(2).collect();
-    let hidden = otp.chars().count().saturating_sub(2);
-    format!("{shown}{}", "*".repeat(hidden))
 }

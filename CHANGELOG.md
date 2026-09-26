@@ -373,7 +373,8 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   chain (rustls `InvalidCertificate`, a `wreq` TLS error, BoringSSL's
   `CERTIFICATE_VERIFY_FAILED`) now classifies as `ErrorAction::Fatal`
   rather than `Retry`: interception or a rotated pinned certificate is
-  not a condition to retry through.
+  not a condition to retry through. The local-hub `PinnedLeafVerifier`
+  reports a mismatch as `InvalidCertificate` so it takes that path.
 - Secrets that were plain `String`s are `secrecy::SecretString` (zeroized
   on drop): `AuthResponseData::token`, `SessionV3Response::token`,
   `StartAuthData::factor_auth_code`, `SipCallInfo::password`,
