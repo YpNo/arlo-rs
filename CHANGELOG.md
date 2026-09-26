@@ -191,6 +191,13 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   consumers point at `../arlo-rs`.
 
 ### Changed — build reproducibility
+- `Cargo.lock` refreshed to the latest semver-compatible versions (136
+  packages; direct: async-trait 0.1.92, bytes 1.12, flate2 1.1.10,
+  imap-rs 0.2.4, reqwest 0.13.5, uuid 1.26, toml 1.1.6, serde 1.0.229).
+  Verified on the CI-pinned 1.95.0 toolchain and on 1.98.1. The
+  `cargo-deny` duplicate skip list follows: `base64 0.22` (charset,
+  imap-rs-client; reqwest is on 0.23), `shlex 1` and `syn 2` (bindgen),
+  `rand 0.9.5`; the `wit-bindgen` entry is gone (single version now).
 - `stealthscraper-rs` is consumed from crates.io at **1.0.0**, which ships
   on `wreq` 6 and, in its default build, both `impersonation_client()` and
   a `pub use wreq` re-export. `arlo-rs` therefore has no direct `wreq`
