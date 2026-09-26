@@ -32,6 +32,13 @@ coverage.out
 config.toml
 .arlo_session*.json
 *.har
+# Debug logs, mail dumps and recordings from the examples / recorder — a
+# debug log and an OTP mail fixture were each committed once by accident.
+*.log
+examples/*.txt
+media/
+*.mp4
+*.mkv
 
 # Security sweep reports (never commit — a report is a map for an attacker)
 .security/

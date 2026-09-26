@@ -128,23 +128,23 @@ impl std::fmt::Debug for SipCallInfo {
 mod tests {
     use super::*;
 
-    // Exact `data` object from a live sipInfo/v2 capture (secrets are
-    // already opaque test values).
+    // `data` object in the exact shape of a live sipInfo/v2 capture;
+    // every identifier and secret is synthetic.
     const SAMPLE: &str = r#"{
       "from":"UXXX-000-00000000_server","to":"UXXX-000-00000000",
       "action":"is","resource":"sipDetails","transId":"da2b5172",
       "sipCallInfo":{
-        "id":"Conference_1778878623026_0123456789abcdef0123456789abcdefD_UXXX-000-00000000_A0A0000YA0D00_caller",
-        "calleeUri":"sip:A0A0000YA0D00_1778878623026_0123456789abcdef0123456789abcdefD@livestream-z1-prod.arlo.com:443",
+        "id":"Conference_1700000000000_0123456789abcdef0123456789abcdefD_UXXX-000-00000000_A0A0000YA0D00_caller",
+        "calleeUri":"sip:A0A0000YA0D00_1700000000000_0123456789abcdef0123456789abcdefD@livestream-z1-prod.arlo.com:443",
         "domain":"livestream-z1-prod.arlo.com","port":443,"conferenceId":null,
         "password":"0123456789abcdef0123456789abcdef",
         "deviceId":"A0A0000YA0D00","callId":"0123456789abcdef0123456789abcdefD"},
       "iceServers":{
-        "uSessionId":"UXXX-000-00000000!A01D3C07!1778878623074",
+        "uSessionId":"UXXX-000-00000000!A0000000!1700000000074",
         "data":[
           {"port":"19302","domain":"relay03-z1-prod.ar.arlo.com","type":"stun"},
-          {"credential":"dGVzdC1jcmVkZW50aWFsLXZhbHVl","port":"443","domain":"relay03-z1-prod.ar.arlo.com","transport":"tcp","type":"turn","username":"1778878633:UXXX-000-00000000"},
-          {"credential":"dGVzdC1jcmVkZW50aWFsLXZhbHVl","port":"443","domain":"relay03-z1-prod.ar.arlo.com","transport":"udp","type":"turn","username":"1778878633:UXXX-000-00000000"}
+          {"credential":"dGVzdC1jcmVkZW50aWFsLXZhbHVl","port":"443","domain":"relay03-z1-prod.ar.arlo.com","transport":"tcp","type":"turn","username":"1700000010:UXXX-000-00000000"},
+          {"credential":"dGVzdC1jcmVkZW50aWFsLXZhbHVl","port":"443","domain":"relay03-z1-prod.ar.arlo.com","transport":"udp","type":"turn","username":"1700000010:UXXX-000-00000000"}
         ]}
     }"#;
 

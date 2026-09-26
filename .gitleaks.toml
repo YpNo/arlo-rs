@@ -1,0 +1,33 @@
+# gitleaks configuration — the `secrets` CI job runs it over the full history.
+title = "arlo-rs"
+
+[extend]
+useDefault = true
+
+# Arlo-specific shapes the default rules do not know.
+[[rules]]
+id = "arlo-session-cache"
+description = "Committed arlo-rs session cache (access token / cookie jar)"
+path = '''(^|/)\.arlo_session[^/]*\.json$'''
+
+[[rules]]
+id = "arlo-presigned-s3-url"
+description = "Presigned S3 URL (a bearer capability) in a committed file"
+regex = '''X-Amz-Signature=[0-9a-f]{16,}'''
+
+[[rules]]
+id = "arlo-otp-mail"
+description = "Arlo one-time-code e-mail dump"
+regex = '''(?i)^subject:.*(code d'authentification|one-time|verification code).*arlo'''
+
+[allowlist]
+description = "Documented placeholders and synthetic fixtures"
+paths = [
+  '''config\.toml\.example$''',
+  '''\.security/''',
+]
+regexes = [
+  '''UXXX-000-00000000''',
+  '''0123456789abcdef0123456789abcdef''',
+  '''dGVzdC1jcmVkZW50aWFsLXZhbHVl''',
+]

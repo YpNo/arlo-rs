@@ -221,6 +221,16 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   location coordinates (`Location`), proxy userinfo (`ClientConfig`,
   `ArloClientBuilder`), the session-cache schema, and the transport DTOs
   (`HttpRequest` header values, both bodies).
+- Test fixtures no longer carry live-capture identifiers: the account id,
+  three device serials, two xCloudIds and an expired SIP password / TURN
+  credential were replaced by synthetic values of the same shape.
+- A `secrets` CI job runs gitleaks over the commits of every push and PR
+  (`.gitleaks.toml` adds rules for the session cache, presigned S3 URLs and
+  OTP mail dumps); `.gitignore` and the crate `exclude` list now cover
+  logs, mail dumps, recordings and the sweep reports, so the artefacts
+  that were committed once (`examples/log.txt`, `examples/email.txt`,
+  `.arlo_session_push.json`) cannot recur. Those three files still exist
+  in git history; purging them is a force-push the maintainer runs.
 - Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
   (RUSTSEC-2026-0285, TLS 1.3 handshake across encryption levels) and
   `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);

@@ -22,6 +22,14 @@ exclude = [
     "manual_examples/",
     "tests/",
     "*.json",
+    # Never let a local artefact into the crate tarball, even with --allow-dirty.
+    "config.toml",
+    "*.har",
+    "*.log",
+    "*.mp4",
+    "*.mkv",
+    "media/",
+    ".security/",
 ]
 
 [dependencies]
