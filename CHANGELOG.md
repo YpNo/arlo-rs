@@ -204,6 +204,10 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
 - A decoder robustness test feeds thousands of random, truncated and
   corrupted byte strings through the MQTT packet reader: the unmaintained
   `mqttbytes` codec must return an error or a packet, never panic.
+- The crate tarball excludes repository tooling (`mise.toml`,
+  `codecov.yml`, `sonar-project.properties`, `.gitleaks.toml`,
+  `release-plz.toml`); `mise.toml` pins `rust` (= the toolchain file) and
+  `cmake` instead of floating on `latest`.
 - `Cargo.lock` refreshed to the latest semver-compatible versions (136
   packages; direct: async-trait 0.1.92, bytes 1.12, flate2 1.1.10,
   imap-rs 0.2.4, reqwest 0.13.5, uuid 1.26, toml 1.1.6, serde 1.0.229).

@@ -21,6 +21,12 @@ exclude = [
     "GEMINI.md",
     "CLAUDE.md",
     ".vscode/",
+    # Repository tooling, meaningless inside a crate tarball.
+    "mise.toml",
+    "codecov.yml",
+    "sonar-project.properties",
+    ".gitleaks.toml",
+    "release-plz.toml",
     "examples/",
     "manual_examples/",
     "tests/",
