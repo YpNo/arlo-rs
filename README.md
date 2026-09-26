@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/YpNo/arlo-rs/main/docs/banner.jpeg" alt="arlo-rs — Arlo cameras, natively in Rust" width="100%">
+</p>
+
 # arlo-rs
 
 [![Rust CI](https://github.com/YpNo/arlo-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/YpNo/arlo-rs/actions/workflows/ci.yml)
