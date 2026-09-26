@@ -61,3 +61,7 @@ pub use error::ArloError;
 pub use events::{ConnectionState, EventBus};
 pub use models::auth::SessionToken;
 pub use models::error_codes::ErrorAction;
+/// The `secrecy` crate, re-exported so downstream code builds the
+/// `SecretString` values the config and wire types expect from the
+/// same crate version.
+pub use secrecy;

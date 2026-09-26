@@ -93,10 +93,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         println!("✓ Authenticated; session cached to `{CACHE_PATH}`.");
     }
+    // The device_id is the trusted-browser identity: a prefix is enough
+    // to recognise it in a bug report.
     println!(
-        "  user_id  : {}\n  device_id: {}\n",
+        "  user_id  : {}\n  device_id: {}…\n",
         client.user_id().unwrap_or("<missing>"),
-        client.device_id()
+        client.device_id().chars().take(8).collect::<String>()
     );
 
     // ---- 4. List cameras ----
@@ -127,9 +129,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(fw) = &cam.firm_version {
                 println!("       firmware  : {fw}");
-            }
-            if let Some(mac) = &cam.mac_address {
-                println!("       mac       : {mac}");
             }
             if cam.presigned_last_image_url.is_some() {
                 println!("       thumbnail : (presigned URL available)");
@@ -165,7 +164,11 @@ fn load_and_validate_config() -> Result<ArloConfig, String> {
     if creds.email.as_deref().unwrap_or("").is_empty() {
         return Err("`[credentials].email` is empty in config.toml".to_string());
     }
-    if creds.password.as_deref().unwrap_or("").is_empty() {
+    if creds
+        .password
+        .as_ref()
+        .is_none_or(|p| arlo_rs::secrecy::ExposeSecret::expose_secret(p).is_empty())
+    {
         return Err("`[credentials].password` is empty in config.toml".to_string());
     }
 
@@ -184,7 +187,11 @@ fn load_and_validate_config() -> Result<ArloConfig, String> {
     if imap.username.as_deref().unwrap_or("").is_empty() {
         return Err("`[mfa.imap].username` is empty in config.toml".to_string());
     }
-    if imap.password.as_deref().unwrap_or("").is_empty() {
+    if imap
+        .password
+        .as_ref()
+        .is_none_or(|p| arlo_rs::secrecy::ExposeSecret::expose_secret(p).is_empty())
+    {
         return Err(
             "`[mfa.imap].password` is empty in config.toml — use an app-password \
              (regular passwords don't work for IMAP on most providers)"

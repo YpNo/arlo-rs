@@ -19,6 +19,7 @@ use imap_client::flags::{Flag, StoreAction};
 use imap_client::search::{SearchKey, SearchQuery};
 use mailparse::{MailAddr, MailHeaderMap, ParsedMail};
 use regex_lite::Regex;
+use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -116,7 +117,7 @@ fn resolve_host_and_port(config: &ImapConfig) -> Result<(String, u16), ArloError
     Ok((host, port))
 }
 
-fn require_credentials(config: &ImapConfig) -> Result<(String, String), ArloError> {
+fn require_credentials(config: &ImapConfig) -> Result<(String, SecretString), ArloError> {
     let username = config
         .username
         .clone()
@@ -236,7 +237,10 @@ async fn open_inbox(
         .map_err(|e| ArloError::AuthError(format!("IMAP TLS connect failed: {e}")))?;
 
     let auth = unauth
-        .login(&username, Password::new(password))
+        .login(
+            &username,
+            Password::new(password.expose_secret().to_owned()),
+        )
         .await
         .map_err(|e| ArloError::AuthError(format!("IMAP login failed: {e}")))?;
 

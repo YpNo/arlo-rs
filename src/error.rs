@@ -66,6 +66,41 @@ impl From<stealthscraper_rs::wreq::Error> for ArloError {
     }
 }
 
+/// True when a transport failure is a TLS / certificate verification
+/// failure anywhere in its source chain: a `rustls` certificate error
+/// (local-hub client, WebSockets), a `wreq` TLS-kind error, or a
+/// BoringSSL verification message (`certificate verify failed`). Such a
+/// failure is an active interception or a rotated pinned certificate, not
+/// a transient condition to retry.
+fn is_tls_failure(err: &(dyn std::error::Error + 'static)) -> bool {
+    if err
+        .downcast_ref::<stealthscraper_rs::wreq::Error>()
+        .is_some_and(stealthscraper_rs::wreq::Error::is_tls)
+    {
+        return true;
+    }
+    if matches!(
+        err.downcast_ref::<rustls::Error>(),
+        Some(rustls::Error::InvalidCertificate(_))
+    ) {
+        return true;
+    }
+    let text = err.to_string().to_ascii_lowercase();
+    if text.contains("certificate verify failed") || text.contains("certificate_verify_failed") {
+        return true;
+    }
+    // `io::Error::source` returns its inner error's source, skipping the
+    // inner error itself (where rustls puts the certificate error).
+    if err
+        .downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::get_ref)
+        .is_some_and(|inner| is_tls_failure(inner))
+    {
+        return true;
+    }
+    err.source().is_some_and(is_tls_failure)
+}
+
 /// True when `body` is a JSON object with Arlo's `meta` or `success` key.
 fn looks_like_arlo_envelope(body: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body)
@@ -87,7 +122,8 @@ impl ArloError {
     /// error-code table (see [`crate::models::error_codes`]).
     ///
     /// Envelope failures classify by their Arlo code, HTTP failures by
-    /// status (401/403 ⇒ re-authenticate, 429/5xx ⇒ retry), transport
+    /// status (401/403 ⇒ re-authenticate, 429/5xx ⇒ retry), a TLS /
+    /// certificate failure is [`ErrorAction::Fatal`], other transport
     /// failures and timeouts are retryable, and everything local
     /// (parsing, configuration, missing device) is
     /// [`ErrorAction::Unclassified`].
@@ -106,6 +142,7 @@ impl ArloError {
                     classify(code, None)
                 }
             }
+            ArloError::NetworkError(e) if is_tls_failure(e.as_ref()) => ErrorAction::Fatal,
             ArloError::NetworkError(_) | ArloError::Timeout(_) => ErrorAction::Retry,
             ArloError::AuthError(_)
             | ArloError::ScraperError(_)
@@ -185,5 +222,35 @@ mod redaction_tests {
         if let ArloError::HttpError { body: kept, .. } = err {
             assert_eq!(kept, body);
         }
+    }
+
+    #[derive(Debug)]
+    struct BoringLike;
+    impl std::fmt::Display for BoringLike {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("error:1000007d:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED")
+        }
+    }
+    impl std::error::Error for BoringLike {}
+
+    #[test]
+    fn network_error_with_rustls_certificate_failure_is_fatal() {
+        let inner = rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForName);
+        let io = std::io::Error::new(std::io::ErrorKind::InvalidData, inner);
+        let err = ArloError::NetworkError(Box::new(io));
+        assert_eq!(err.action(), ErrorAction::Fatal);
+    }
+
+    #[test]
+    fn network_error_with_boringssl_verify_failure_is_fatal() {
+        let err = ArloError::NetworkError(Box::new(BoringLike));
+        assert_eq!(err.action(), ErrorAction::Fatal);
+    }
+
+    #[test]
+    fn network_error_without_tls_failure_stays_retryable() {
+        let io = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        let err = ArloError::NetworkError(Box::new(io));
+        assert_eq!(err.action(), ErrorAction::Retry);
     }
 }

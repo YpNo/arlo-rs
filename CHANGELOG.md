@@ -358,6 +358,47 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   the Codecov targets equal tarpaulin's `--fail-under` (65 %) so the two
   never disagree. The decision to keep the unmaintained `mqttbytes`
   codec (bounds reviewed, frames capped) is recorded in `deny.toml`.
+- The session token is attached only to URLs whose origin (scheme, host,
+  port) equals the auth or API host; the old prefix test accepted
+  `https://ocapi-app.arlo.com.evil.tld/`. The OPTIONS preflight now
+  carries what Chrome's does — `Origin`, `Referer`, `Accept`,
+  `Accept-Language`, `DNT` and the two `Access-Control-Request-*`
+  headers — and no longer the token, the device id or the other custom
+  headers it is asking permission for.
+- None of the three HTTP clients follows redirects any more (`wreq`, the
+  browser-path `reqwest` client, the pinned local-hub client): a 3xx
+  surfaces as `HttpError` instead of replaying a login body or the
+  RATLS bearer to whatever host `Location` names.
+- A TLS / certificate failure anywhere in a transport error's source
+  chain (rustls `InvalidCertificate`, a `wreq` TLS error, BoringSSL's
+  `CERTIFICATE_VERIFY_FAILED`) now classifies as `ErrorAction::Fatal`
+  rather than `Retry`: interception or a rotated pinned certificate is
+  not a condition to retry through.
+- Secrets that were plain `String`s are `secrecy::SecretString` (zeroized
+  on drop): `AuthResponseData::token`, `SessionV3Response::token`,
+  `StartAuthData::factor_auth_code`, `SipCallInfo::password`,
+  `CredentialsConfig::password`, `ImapConfig::password` and the
+  local-hub bearer. Those structs, and `ArloConfig` / `MfaConfig` /
+  `SipInfo` which contain them, no longer derive `Serialize` (nothing
+  serialized them); the crate re-exports `secrecy` so callers build the
+  values from the same crate version. The MQTT `CONNECT` password stays a
+  `String` inside `mqttbytes`'s own `Login` for the encode call only.
+- `ArloConfig::load_from_file` warns when the file holds a password and
+  is readable by group or others (Unix mode bits); the file is the
+  operator's, so it is a warning, not a refusal.
+- Text Arlo sends (`meta.message`, the MFA `provider` name) is stripped of
+  control characters and length-capped before it reaches an error
+  message or the interactive prompt, so a hostile value cannot forge log
+  lines or the terminal.
+- `unsafe_code = "forbid"` is set in `[lints.rust]`, covering tests and
+  examples; the crate never contained `unsafe`.
+- Endpoint overrides that are not `https://` (loopback `http://` for
+  mockito excepted) are logged at WARN at bootstrap.
+- Examples no longer print the full stream URL (its path carries the
+  egress token — `StreamUrl::redacted()` is the new log-safe form), print
+  only a prefix of the trusted-browser `device_id`, drop the camera MAC
+  line, and the IMAP debugger masks the OTP and dumps the mail text only
+  with `ARLO_IMAP_DUMP=1`.
 ### Fixed
 - `cargo doc` is warning-free again: duplicated one-line outer docs on
   `pub mod` declarations were removed (rustdoc merged them with the

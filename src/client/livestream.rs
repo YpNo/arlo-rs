@@ -228,7 +228,7 @@ fn envelope_sip_call_info(sip: &SipInfo) -> serde_json::Value {
     json!({
         "calleeUri": sip.sip_call_info.callee_uri,
         "id": sip.sip_call_info.id,
-        "password": sip.sip_call_info.password,
+        "password": secrecy::ExposeSecret::expose_secret(&sip.sip_call_info.password),
         "domain": sip.sip_call_info.ws_domain(),
         "port": "7443",
     })

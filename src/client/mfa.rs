@@ -151,7 +151,9 @@ impl StdinMfaHandler {
 
 impl MfaHandler for StdinMfaHandler {
     async fn provide_otp(&mut self, challenge: &MfaChallenge) -> Result<String, ArloError> {
-        let provider = challenge.provider.clone();
+        // `provider` is wire text from startAuth: strip control characters
+        // (a newline or an escape sequence could forge the prompt) and cap.
+        let provider = crate::models::redact::excerpt(&challenge.provider);
         // Not cancellable: if the caller drops this future, the blocking
         // thread stays parked on `read_line` until the next line arrives.
         // Acceptable for an interactive prompt; use a different handler in

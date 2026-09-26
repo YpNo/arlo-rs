@@ -54,7 +54,11 @@ async fn main() -> Result<(), arlo_rs::error::ArloError> {
     }
     let port = imap_cfg.port.unwrap_or(993);
     let user = imap_cfg.username.clone().unwrap_or_default();
-    let pass = imap_cfg.password.clone().unwrap_or_default();
+    let pass = imap_cfg
+        .password
+        .as_ref()
+        .map(|p| arlo_rs::secrecy::ExposeSecret::expose_secret(p).to_owned())
+        .unwrap_or_default();
 
     println!("Connecting to IMAP Server: {host}:{port}");
     println!("Username: {user}");
@@ -106,13 +110,25 @@ async fn main() -> Result<(), arlo_rs::error::ArloError> {
         .map_err(|e| arlo_rs::error::ArloError::AuthError(format!("MIME parsing failed: {e}")))?;
     let raw_text = extract_text(&parsed);
 
-    println!("\n=== RAW EXTRACTED TEXT ===\n{raw_text}\n==========================\n");
+    // The raw mail carries the live OTP; dump it only on request.
+    if std::env::var_os("ARLO_IMAP_DUMP").is_some_and(|v| v == "1") {
+        println!("\n=== RAW EXTRACTED TEXT ===\n{raw_text}\n==========================\n");
+    } else {
+        println!("(set ARLO_IMAP_DUMP=1 to print the extracted mail text)");
+    }
 
     match extract_otp(&raw_text) {
-        Some(otp) => println!("SUCCESS — Extracted OTP: {otp}"),
-        None => println!("FAILURE — Regexes did not match. Inspect the text above."),
+        Some(otp) => println!("SUCCESS — Extracted OTP: {}", mask_otp(&otp)),
+        None => println!("FAILURE — Regexes did not match. Re-run with ARLO_IMAP_DUMP=1."),
     }
 
     let _ = selected.logout().await;
     Ok(())
+}
+
+/// Shows the shape of the OTP (`12****`) without the value.
+fn mask_otp(otp: &str) -> String {
+    let shown: String = otp.chars().take(2).collect();
+    let hidden = otp.chars().count().saturating_sub(2);
+    format!("{shown}{}", "*".repeat(hidden))
 }

@@ -42,8 +42,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("is already live; otherwise starts a fresh one and waits for the event-bus reply)...");
     match client.start_stream(cam).await {
         Ok(stream_url) => {
-            println!(">>> Stream URL: {stream_url}");
-            println!("    Hand this to ffmpeg, a player, or a transcoder.");
+            // The full URL carries the stream's egress token; keep it out
+            // of the terminal and hand `stream_url.as_str()` to the player.
+            println!(">>> Stream ready at {}", stream_url.redacted());
+            println!("    Pass `stream_url.as_str()` to ffmpeg, a player, or a transcoder.");
         }
         Err(e) => println!("Failed to obtain stream URL: {e}"),
     }

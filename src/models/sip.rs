@@ -6,10 +6,11 @@
 //! model the unwrapped `data`. Unknown sibling fields (`from`, `to`,
 //! `transId`, …) are ignored.
 
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 /// Unwrapped `data` of a `sipInfo/v2` response.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SipInfo {
     pub sip_call_info: SipCallInfo,
@@ -17,8 +18,8 @@ pub struct SipInfo {
 }
 
 /// SIP call coordinates for the `livestream-*` gateway. `Debug` redacts
-/// the per-call `password`.
-#[derive(Clone, Deserialize, Serialize)]
+/// the per-call `password`, which is held as a [`SecretString`].
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SipCallInfo {
     /// Conference id (`Conference_<ts>_<callId>_<userId>_<deviceId>_caller`).
@@ -32,7 +33,7 @@ pub struct SipCallInfo {
     /// 7443; see [`SipCallInfo::ws_domain`].
     pub port: u16,
     /// Per-call shared secret echoed back in the signaling envelope.
-    pub password: String,
+    pub password: SecretString,
     pub device_id: String,
     pub call_id: String,
     #[serde(default)]
@@ -189,7 +190,10 @@ mod tests {
         let s: SipInfo = serde_json::from_str(SAMPLE).expect("parses");
         assert_eq!(s.sip_call_info.device_id, "A0A0000YA0D00");
         assert_eq!(s.sip_call_info.port, 443);
-        assert_eq!(s.sip_call_info.password, "0123456789abcdef0123456789abcdef");
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&s.sip_call_info.password),
+            "0123456789abcdef0123456789abcdef"
+        );
         assert!(s.sip_call_info.callee_uri.starts_with("sip:A0A0000YA0D00_"));
         assert_eq!(s.sip_call_info.conference_id, None);
 

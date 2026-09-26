@@ -55,7 +55,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = client.start_stream(camera).await?;
     println!("✓ Stream URL received; recording {seconds}s to `{output}` with ffmpeg");
 
-    // `-c copy` avoids re-encoding; `-t` bounds the recording.
+    // `-c copy` avoids re-encoding; `-t` bounds the recording. The URL is
+    // an argv element, visible in the process table for the duration of
+    // the recording; its egress token is single-session and short-lived.
     let status = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y"])
         .args([

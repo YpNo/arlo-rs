@@ -159,6 +159,22 @@ impl StreamUrl {
     pub fn into_inner(self) -> String {
         self.0
     }
+
+    /// `scheme://host[:port]/…` — the URL without its path, query or
+    /// credentials, for logs and terminals. The path carries the
+    /// stream's per-session egress token; never print [`Self::as_str`].
+    #[must_use]
+    pub fn redacted(&self) -> String {
+        match url::Url::parse(&self.0) {
+            Ok(u) => format!(
+                "{}://{}{}/…",
+                u.scheme(),
+                u.host_str().unwrap_or_default(),
+                u.port().map(|p| format!(":{p}")).unwrap_or_default()
+            ),
+            Err(_) => "<unparseable stream URL>".to_string(),
+        }
+    }
 }
 
 /// Rewrites a leading `rtsp://` to `rtsps://` (TLS), matching the Arlo
@@ -345,5 +361,16 @@ mod stream_url_tests {
             let err = StreamUrl::parse(bad).unwrap_err().to_string();
             assert!(!err.contains("token=T"), "URL leaked into error: {err}");
         }
+    }
+
+    #[test]
+    fn stream_url_redacted_keeps_only_scheme_host_and_port() {
+        let u = StreamUrl::parse(
+            "rtsp://user:pw@arlostreaming.example.arlo.com:443/vzmodulelive/abc?egressToken=SECRET",
+        )
+        .unwrap();
+        let r = u.redacted();
+        assert_eq!(r, "rtsps://arlostreaming.example.arlo.com:443/…");
+        assert!(!r.contains("SECRET") && !r.contains("pw") && !r.contains("vzmodulelive"));
     }
 }

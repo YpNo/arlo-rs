@@ -1,11 +1,13 @@
-use serde::{Deserialize, Serialize};
+use secrecy::SecretString;
+use serde::Deserialize;
 
-/// `session/v3` payload. `Debug` redacts the `token`.
-#[derive(Serialize, Deserialize)]
+/// `session/v3` payload. `Debug` redacts the `token`, which is held as a
+/// [`SecretString`] (zeroized on drop).
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionV3Response {
     pub user_id: String,
-    pub token: String,
+    pub token: SecretString,
     pub valid_for: Option<u64>,
     /// WebSocket URL of the MQTT event broker for this account/region,
     /// e.g. `wss://mqtt-cluster-z1-1.arloxcld.com:8084`. Present since

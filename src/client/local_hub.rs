@@ -29,6 +29,7 @@ use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signat
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,7 +38,7 @@ use std::time::Duration;
 pub struct LocalHubClient {
     http: reqwest::Client,
     hub_ip: String,
-    token: String,
+    token: SecretString,
 }
 
 impl std::fmt::Debug for LocalHubClient {
@@ -83,12 +84,15 @@ impl LocalHubClient {
             .use_preconfigured_tls(tls_config)
             .connect_timeout(HUB_CONNECT_TIMEOUT)
             .timeout(HUB_REQUEST_TIMEOUT)
+            // A hub has no legitimate redirect; following one could resend
+            // the RATLS bearer to another host or over cleartext.
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
         Ok(Self {
             http,
             hub_ip: hub_ip.to_string(),
-            token: token.to_string(),
+            token: SecretString::from(token),
         })
     }
 
@@ -106,7 +110,7 @@ impl LocalHubClient {
         let response = self
             .http
             .get(&url)
-            .header("Authorization", &self.token)
+            .header("Authorization", self.token.expose_secret())
             .send()
             .await?;
         if !response.status().is_success() {
@@ -140,7 +144,7 @@ impl LocalHubClient {
         let response = self
             .http
             .get(&url)
-            .header("Authorization", &self.token)
+            .header("Authorization", self.token.expose_secret())
             .send()
             .await?;
         if !response.status().is_success() {
@@ -171,7 +175,7 @@ impl LocalHubClient {
         let response = self
             .http
             .get(&url)
-            .header("Authorization", &self.token)
+            .header("Authorization", self.token.expose_secret())
             // Media is the one call that legitimately outlives the
             // request timeout; the byte cap below is the other bound.
             .timeout(HUB_MEDIA_TIMEOUT)

@@ -195,6 +195,8 @@ pub(crate) async fn bootstrap(cfg: BootstrapConfig) -> Result<ArloClient, ArloEr
         .install_default()
         .ok();
 
+    cfg.endpoints.warn_if_insecure();
+
     let mut profile = BrowserProfile::random();
     if let Some(ua) = cfg.user_agent {
         profile.user_agent = ua;
@@ -256,7 +258,9 @@ async fn browser_transport(
     let mut req_builder = reqwest::Client::builder()
         .user_agent(profile.user_agent.clone())
         .connect_timeout(crate::client::transport::CONNECT_TIMEOUT)
-        .timeout(crate::client::transport::REQUEST_TIMEOUT);
+        .timeout(crate::client::transport::REQUEST_TIMEOUT)
+        // Same policy as `WreqTransport`: a 3xx is an error, never followed.
+        .redirect(reqwest::redirect::Policy::none());
     if let Some(ref proxy) = cloud_scraper.proxy {
         let proxy_url = format!("http://127.0.0.1:{}", proxy.port());
         req_builder = req_builder.proxy(reqwest::Proxy::all(&proxy_url)?);

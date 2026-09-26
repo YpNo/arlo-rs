@@ -28,6 +28,21 @@ use reqwest::Method;
 use serde::Serialize;
 use tracing::{debug, instrument, warn};
 
+/// `Accept-Language` the web dashboard sends on every request.
+const ACCEPT_LANGUAGE: &str = "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7";
+
+/// The custom headers a real preflight asks permission for.
+const PREFLIGHT_REQUEST_HEADERS: &str = "auth-version,content-type,source,x-service-version,x-user-device-automation-name,x-user-device-id,x-user-device-type";
+
+/// True when `url` and `base` share scheme, host and port. A prefix
+/// comparison would accept `https://ocapi-app.arlo.com.evil.tld/`.
+fn same_origin(url: &str, base: &str) -> bool {
+    match (url::Url::parse(url), url::Url::parse(base)) {
+        (Ok(u), Ok(b)) => u.origin().is_tuple() && u.origin() == b.origin(),
+        _ => false,
+    }
+}
+
 /// Milliseconds since the Unix epoch, as Arlo's `time=` / `timestamp`
 /// telemetry parameters expect. Saturates at 0 should the clock be
 /// before 1970.
@@ -43,17 +58,16 @@ impl ArloClient {
     /// for the given URL.
     ///
     /// Handles the dual-token architecture:
-    /// - URLs starting with the auth host (`ocapi-app.arlo.com`) get a
+    /// - URLs on the auth host origin (`ocapi-app.arlo.com`) get a
     ///   Base64-encoded token in `Authorization`.
-    /// - Other URLs (the `myapi.arlo.com` / `hmsweb` family) get the
-    ///   raw token.
+    /// - URLs on the API host origin (`myapi.arlo.com` / `hmsweb`) get
+    ///   the raw token.
+    /// - Any other origin gets no `Authorization` at all: the session
+    ///   token never leaves the two Arlo hosts.
     pub(crate) fn build_headers(&self, url: &str) -> Vec<(String, String)> {
         let mut headers: Vec<(String, String)> = vec![
             ("Accept".into(), "application/json, text/plain, */*".into()),
-            (
-                "Accept-Language".into(),
-                "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7".into(),
-            ),
+            ("Accept-Language".into(), ACCEPT_LANGUAGE.into()),
             ("Origin".into(), ARLO_ORIGIN.into()),
             ("Referer".into(), ARLO_REFERER.into()),
             ("DNT".into(), "1".into()),
@@ -71,17 +85,45 @@ impl ArloClient {
         ];
 
         if let Some(token) = self.auth.token() {
-            let value = if url.starts_with(self.endpoints.auth_host.as_str()) {
+            if same_origin(url, &self.endpoints.auth_host) {
                 // ocapi-app expects Base64-encoded tokens.
-                BASE64_STANDARD.encode(token.as_bytes())
-            } else {
+                headers.push((
+                    "Authorization".into(),
+                    BASE64_STANDARD.encode(token.as_bytes()),
+                ));
+            } else if same_origin(url, &self.endpoints.api_host) {
                 // hmsweb/myapi expects raw tokens.
-                token.to_string()
-            };
-            headers.push(("Authorization".into(), value));
+                headers.push(("Authorization".into(), token.to_string()));
+            } else {
+                warn!(
+                    url = %crate::models::redact::redact_userinfo(url),
+                    "no Authorization header: URL is not on the Arlo auth or API host"
+                );
+            }
         }
 
         headers
+    }
+
+    /// The header set of a CORS preflight as Chrome emits it: no
+    /// credentials, no custom headers (those are what the preflight asks
+    /// permission for), just the request metadata.
+    fn build_preflight_headers(method: &Method) -> Vec<(String, String)> {
+        vec![
+            ("Accept".into(), "*/*".into()),
+            ("Accept-Language".into(), ACCEPT_LANGUAGE.into()),
+            ("Origin".into(), ARLO_ORIGIN.into()),
+            ("Referer".into(), ARLO_REFERER.into()),
+            ("DNT".into(), "1".into()),
+            (
+                "Access-Control-Request-Method".into(),
+                method.as_str().to_string(),
+            ),
+            (
+                "Access-Control-Request-Headers".into(),
+                PREFLIGHT_REQUEST_HEADERS.into(),
+            ),
+        ]
     }
 
     /// Executes the OPTIONS preflight that real browsers emit before
@@ -90,16 +132,7 @@ impl ArloClient {
     /// occasional preflight blips.
     #[instrument(skip(self))]
     async fn perform_options_preflight(&self, method: &Method, url: &str) -> Result<(), ArloError> {
-        let mut headers = self.build_headers(url);
-        headers.push((
-            "Access-Control-Request-Method".into(),
-            method.as_str().to_string(),
-        ));
-        headers.push((
-            "Access-Control-Request-Headers".into(),
-            "auth-version,content-type,source,x-service-version,x-user-device-automation-name,x-user-device-id,x-user-device-type"
-                .into(),
-        ));
+        let headers = Self::build_preflight_headers(method);
 
         let response = self
             .transport
@@ -362,6 +395,69 @@ mod tests {
             header_value(&calls[1].headers, "Content-Type"),
             Some("application/json")
         );
+    }
+
+    #[tokio::test]
+    async fn preflight_carries_no_credentials_or_custom_headers() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(r#"{"success":true}"#);
+        let mut client = test_client(Arc::clone(&mock), ArloEndpoints::default());
+        client.auth.set_token("dummy_token".to_string());
+
+        let url = format!("{}/hmsweb/users/devices", client.endpoints.api_host);
+        client
+            .execute_request(Method::PUT, &url, Some(&serde_json::json!({})))
+            .await
+            .unwrap();
+
+        let calls = mock.calls();
+        let preflight = &calls[0].headers;
+        assert_eq!(calls[0].method, Method::OPTIONS);
+        for absent in [
+            "Authorization",
+            "x-user-device-id",
+            "auth-version",
+            "Source",
+        ] {
+            assert!(
+                header_value(preflight, absent).is_none(),
+                "preflight must not carry {absent}"
+            );
+        }
+        assert_eq!(
+            header_value(preflight, "Access-Control-Request-Method"),
+            Some("PUT")
+        );
+        assert_eq!(header_value(preflight, "Origin"), Some(ARLO_ORIGIN));
+        // The main request still authenticates.
+        assert_eq!(
+            header_value(&calls[1].headers, "Authorization"),
+            Some("dummy_token")
+        );
+    }
+
+    #[tokio::test]
+    async fn build_headers_omits_authorization_off_the_arlo_origins() {
+        let mut client = test_client(Arc::new(MockTransport::new()), ArloEndpoints::default());
+        client.auth.set_token("dummy_token".to_string());
+
+        for url in [
+            "https://ocapi-app.arlo.com.evil.tld/api/auth",
+            "http://ocapi-app.arlo.com/api/auth",
+            "https://ocapi-app.arlo.com:8443/api/auth",
+            "https://myapi.arlo.com.evil.tld/hmsweb/x",
+            "https://example.test/",
+            "not a url",
+        ] {
+            let headers = client.build_headers(url);
+            assert!(
+                header_value(&headers, "Authorization").is_none(),
+                "token attached to {url}"
+            );
+        }
+        // Same origin, any path.
+        let headers = client.build_headers("https://myapi.arlo.com/hmsweb/x?y=1");
+        assert_eq!(header_value(&headers, "Authorization"), Some("dummy_token"));
     }
 
     #[tokio::test]

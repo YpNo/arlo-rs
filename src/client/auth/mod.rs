@@ -155,8 +155,8 @@ impl AuthManager {
 
     /// Replaces the held access token. The previous value is dropped (and
     /// zeroized by `secrecy`'s `ZeroizeOnDrop`).
-    pub(crate) fn set_token(&mut self, token: String) {
-        self.access_token = Some(SecretString::from(token));
+    pub(crate) fn set_token(&mut self, token: impl Into<SecretString>) {
+        self.access_token = Some(token.into());
         self.token_tx.send_replace(self.access_token.clone());
     }
 
@@ -329,7 +329,7 @@ mod tests {
         drop(temp_file);
 
         let mut manager = AuthManager::new();
-        manager.set_token("sensitive_token".into());
+        manager.set_token("sensitive_token".to_string());
         manager.cache_path = Some(cache_path.clone());
         manager.save_to_cache().await;
 
@@ -353,7 +353,7 @@ mod cache_hygiene_tests {
 
     fn manager_for(path: &str) -> AuthManager {
         let mut m = AuthManager::new();
-        m.set_token("sensitive_token".into());
+        m.set_token("sensitive_token".to_string());
         m.cache_path = Some(path.to_string());
         m
     }

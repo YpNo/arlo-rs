@@ -1,7 +1,9 @@
 #![allow(missing_docs)]
 use crate::error::ArloError;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use tracing::warn;
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -11,7 +13,7 @@ pub enum ApiVersion {
     V3,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ArloConfig {
     pub credentials: Option<CredentialsConfig>,
     pub mfa: Option<MfaConfig>,
@@ -19,29 +21,30 @@ pub struct ArloConfig {
     pub streaming: Option<StreamingConfig>,
 }
 
-/// Arlo account credentials. `Debug` redacts the `password`.
-#[derive(Deserialize, Serialize, Clone)]
+/// Arlo account credentials. `Debug` redacts the `password`, which is
+/// held as a [`SecretString`] (zeroized on drop).
+#[derive(Deserialize, Clone)]
 pub struct CredentialsConfig {
     pub email: Option<String>,
-    pub password: Option<String>,
+    pub password: Option<SecretString>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct MfaConfig {
     pub preferred_method: Option<String>,
     pub imap: Option<ImapConfig>,
 }
 
 /// IMAP mailbox used for automated OTP retrieval. `Debug` redacts the
-/// app `password`.
-#[derive(Deserialize, Serialize, Clone)]
+/// app `password`, which is held as a [`SecretString`].
+#[derive(Deserialize, Clone)]
 pub struct ImapConfig {
     pub enabled: Option<bool>,
     pub provider: Option<String>,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub username: Option<String>,
-    pub password: Option<String>,
+    pub password: Option<SecretString>,
     pub delete_after_read: Option<bool>,
 }
 
@@ -68,8 +71,50 @@ pub struct StreamingConfig {
     pub media_path: Option<String>,
 }
 
+/// True when `mode` grants no permission to group or others — the only
+/// acceptable mode for a file that holds a password.
+pub(crate) const fn mode_is_private(mode: u32) -> bool {
+    mode & 0o077 == 0
+}
+
+/// Warns when a file that carries a password is readable by other users.
+/// A warning rather than a refusal: the file is the operator's, and the
+/// session cache next to it is what the library itself controls.
+#[cfg(unix)]
+fn warn_if_shared(path: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    match fs::metadata(path) {
+        Ok(meta) if !mode_is_private(meta.permissions().mode()) => warn!(
+            path,
+            mode = format_args!("{:04o}", meta.permissions().mode() & 0o7777),
+            "config file holds a password but is readable by other users; chmod 600 it"
+        ),
+        Ok(_) => {}
+        Err(e) => warn!(path, error = %e, "could not check config file permissions"),
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_shared(_path: &str) {}
+
 impl ArloConfig {
-    /// Loads and parses the configuration file at the given path
+    /// True when the file contains an Arlo or IMAP password.
+    fn holds_secret(&self) -> bool {
+        let arlo = self
+            .credentials
+            .as_ref()
+            .is_some_and(|c| c.password.is_some());
+        let imap = self
+            .mfa
+            .as_ref()
+            .and_then(|m| m.imap.as_ref())
+            .is_some_and(|i| i.password.is_some());
+        arlo || imap
+    }
+
+    /// Loads and parses the configuration file at the given path. On
+    /// Unix, a file that holds a password and is readable by other users
+    /// is reported at WARN.
     pub fn load_from_file(path: &str) -> Result<Self, ArloError> {
         let contents = fs::read_to_string(path).map_err(|e| {
             ArloError::ScraperError(format!("Failed to read config file {}: {}", path, e))
@@ -89,6 +134,9 @@ impl ArloConfig {
             ))
         })?;
 
+        if parsed.holds_secret() {
+            warn_if_shared(path);
+        }
         Ok(parsed)
     }
 }
@@ -164,7 +212,10 @@ mod tests {
         // Assert Credentials
         let creds = config.credentials.unwrap();
         assert_eq!(creds.email.unwrap(), "test@example.com");
-        assert_eq!(creds.password.unwrap(), "secure_password");
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&creds.password.unwrap()),
+            "secure_password"
+        );
 
         // Assert Client Config
         let client = config.client.unwrap();
@@ -214,5 +265,37 @@ mod redaction_tests {
         let text = err.to_string();
         assert!(text.contains("Failed to parse config file"), "{text}");
         assert!(!text.contains("hun") && !text.contains("ter2"), "{text}");
+    }
+
+    #[test]
+    fn mode_is_private_accepts_only_owner_bits() {
+        assert!(mode_is_private(0o100600));
+        assert!(mode_is_private(0o400));
+        assert!(!mode_is_private(0o100644));
+        assert!(!mode_is_private(0o640));
+        assert!(!mode_is_private(0o606));
+    }
+
+    #[test]
+    fn holds_secret_reflects_arlo_and_imap_passwords() {
+        let none: ArloConfig = toml::from_str("[credentials]\nemail = \"e@x\"\n").unwrap();
+        assert!(!none.holds_secret());
+        let arlo: ArloConfig = toml::from_str("[credentials]\npassword = \"p\"\n").unwrap();
+        assert!(arlo.holds_secret());
+        let imap: ArloConfig = toml::from_str("[mfa.imap]\npassword = \"p\"\n").unwrap();
+        assert!(imap.holds_secret());
+    }
+
+    #[test]
+    fn config_debug_never_prints_passwords() {
+        let cfg: ArloConfig = toml::from_str(
+            "[credentials]\npassword = \"arlo-pw\"\n[mfa.imap]\npassword = \"imap-pw\"\n",
+        )
+        .unwrap();
+        let dump = format!("{cfg:?}");
+        assert!(
+            !dump.contains("arlo-pw") && !dump.contains("imap-pw"),
+            "{dump}"
+        );
     }
 }

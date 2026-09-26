@@ -337,7 +337,7 @@ mod tests {
             .await
             .expect("login succeeds");
 
-        assert_eq!(data.token, "tok-123");
+        assert_eq!(secrecy::ExposeSecret::expose_secret(&data.token), "tok-123");
         assert_eq!(data.user_id, "U1");
         // Token cached on the client for subsequent calls.
         assert_eq!(client.auth.token(), Some("tok-123"));
@@ -429,7 +429,10 @@ mod tests {
 
         let mut client = authenticated_mocked_client(Arc::clone(&mock));
         let data = client.finish_auth("FAC-1", "123456").await.unwrap();
-        assert_eq!(data.token, "final-tok");
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&data.token),
+            "final-tok"
+        );
         assert_eq!(client.auth.token(), Some("final-tok"));
 
         let body = parse_body_json(mock.calls()[1].body.as_ref());

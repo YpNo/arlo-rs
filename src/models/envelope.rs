@@ -71,7 +71,7 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
             .and_then(|m| m.get("message"))
             .and_then(|v| v.as_str())
             .filter(|m| !m.is_empty())
-            .map(str::to_string)
+            .map(crate::models::redact::excerpt)
             .or_else(|| {
                 error
                     .and_then(crate::models::error_codes::message_for)
@@ -356,5 +356,14 @@ mod status_check_tests {
             ),
             "{err}"
         );
+    }
+
+    #[test]
+    fn unwrap_envelope_strips_control_characters_from_meta_message() {
+        let body = "{\"meta\":{\"code\":400,\"message\":\"x\\ny\\u001b[0m\"}}";
+        let err = unwrap_envelope(body).unwrap_err();
+        let text = err.to_string();
+        assert!(!text.contains('\n') && !text.contains('\x1b'), "{text}");
+        assert!(text.contains("x") && text.contains("y"), "{text}");
     }
 }

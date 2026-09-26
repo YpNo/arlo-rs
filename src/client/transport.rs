@@ -231,10 +231,14 @@ impl WreqTransport {
         // profile's own User-Agent and installs that UA, the `Sec-CH-UA*`
         // hints and `Accept-Language` as default headers, so the JA4
         // signature and the advertised browser cannot disagree.
+        // Arlo's JSON API never redirects. Following one would replay a
+        // login body and the device-identity headers to whatever host the
+        // `Location` names; a 3xx surfaces as an `HttpError` instead.
         let mut builder = impersonation_client(&profile)
             .cookie_provider(Arc::clone(&jar))
             .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT);
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(wreq::redirect::Policy::none());
         if let Some(url) = upstream_proxy {
             let proxy = wreq::Proxy::all(url)
                 .map_err(|e| ArloError::ScraperError(format!("invalid upstream proxy: {e}")))?;
@@ -528,6 +532,38 @@ mod tests {
     //    TLS emulation is exercised only on https, but the header identity
     //    and the request/response plumbing are what we assert here) --
     use mockito::{Matcher, Server};
+
+    #[tokio::test]
+    async fn wreq_transport_does_not_follow_redirects() {
+        let mut server = Server::new_async().await;
+        let _moved = server
+            .mock("GET", "/moved")
+            .with_status(302)
+            .with_header("location", &format!("{}/target", server.url()))
+            .create_async()
+            .await;
+        let target = server
+            .mock("GET", "/target")
+            .with_status(200)
+            .with_body("followed")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let transport = WreqTransport::new(BrowserProfile::random(), None).unwrap();
+        let resp = transport
+            .request(HttpRequest {
+                method: Method::GET,
+                url: format!("{}/moved", server.url()),
+                headers: vec![],
+                body: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status, StatusCode::FOUND);
+        target.assert_async().await;
+    }
 
     #[tokio::test]
     async fn wreq_transport_round_trips_and_sends_profile_identity() {

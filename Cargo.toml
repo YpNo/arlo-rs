@@ -65,7 +65,7 @@ rustls = { version = "0.23", features = ["ring"] }
 flate2 = "1.1.9"
 base64 = "0.22.1"
 tracing = "0.1"
-secrecy = "0.10"
+secrecy = { version = "0.10", features = ["serde"] }
 async-trait = "0.1"
 # MQTT-over-WebSocket event bus (v3 replacement for the dead SSE
 # `/hmsweb/client/subscribe`). tokio-tungstenite gives full control of
@@ -88,6 +88,11 @@ default = []
 # Off by default because Arlo's Cloudflare front only fingerprints TLS/HTTP2 —
 # it serves no JS challenge — so the plain `wreq` transport is sufficient.
 browser = ["stealthscraper-rs/browser"]
+
+# The crate has no `unsafe`; forbid it at the lints level so tests, examples
+# and benches are covered too (CLAUDE.md: no `unsafe`).
+[lints.rust]
+unsafe_code = "forbid"
 
 [dev-dependencies]
 # `test-util` enables the paused clock (`#[tokio::test(start_paused = true)]`)

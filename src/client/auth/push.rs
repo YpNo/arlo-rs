@@ -8,6 +8,7 @@ use crate::error::ArloError;
 use crate::models::auth::*;
 use crate::models::error_codes::{ErrorAction, classify_arlo_error};
 use reqwest::Method;
+use secrecy::{ExposeSecret, SecretString};
 use std::time::{Duration, Instant};
 use tracing::{info, instrument, warn};
 
@@ -83,7 +84,7 @@ impl ArloClient {
             .password
             .as_ref()
             .ok_or_else(|| ArloError::AuthError("Missing 'password' in credentials".into()))?;
-        let login_data = self.login(email, password).await?;
+        let login_data = self.login(email, password.expose_secret()).await?;
         if login_data.auth_completed == Some(true) {
             info!("Arlo reports authentication complete without a second factor");
             self.complete_session(None).await?;
@@ -135,7 +136,7 @@ impl ArloClient {
     /// `factorAuthCode`. An empty `factorType` makes Arlo dispatch the
     /// account's PRIMARY factor; errors if no PUSH factor is registered.
     #[instrument(skip(self))]
-    async fn start_auth_push(&mut self, user_id: &str) -> Result<String, ArloError> {
+    async fn start_auth_push(&mut self, user_id: &str) -> Result<SecretString, ArloError> {
         let url = format!("{}{}", self.endpoints.auth_host, AUTH_START_AUTH);
         let payload = StartAuthUserRequest {
             factor_type: String::new(),
@@ -167,10 +168,13 @@ impl ArloClient {
     /// HTTP-200-with-`meta` envelope to a tri-state: approved (token
     /// cached), still pending (`meta.error == 9233`), or a hard error.
     #[instrument(skip(self, factor_auth_code))]
-    async fn finish_auth_push(&mut self, factor_auth_code: &str) -> Result<PushOutcome, ArloError> {
+    async fn finish_auth_push(
+        &mut self,
+        factor_auth_code: &SecretString,
+    ) -> Result<PushOutcome, ArloError> {
         let url = format!("{}{}", self.endpoints.auth_host, AUTH_FINISH_AUTH);
         let payload = FinishAuthPushRequest {
-            factor_auth_code: factor_auth_code.to_string(),
+            factor_auth_code: factor_auth_code.expose_secret().to_string(),
             is_browser_trusted: true,
         };
         let body = self

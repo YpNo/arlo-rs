@@ -6,6 +6,7 @@ use crate::client::ArloClient;
 use crate::error::ArloError;
 use crate::models::auth::*;
 use crate::models::error_codes::ErrorAction;
+use secrecy::ExposeSecret;
 use tracing::{debug, info, instrument, warn};
 
 impl ArloClient {
@@ -48,7 +49,7 @@ impl ArloClient {
         })?;
 
         // 3. Initiate Standard Login Target
-        let login_data = self.login(email, password).await?;
+        let login_data = self.login(email, password.expose_secret()).await?;
         if login_data.auth_completed == Some(true) {
             info!("Arlo reports authentication complete without a second factor");
             self.complete_session(None).await?;

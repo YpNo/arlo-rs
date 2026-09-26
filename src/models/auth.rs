@@ -36,9 +36,12 @@ impl Meta {
     /// message: Arlo's own, else the official web-client text for
     /// `error`, else `fallback`.
     pub fn into_error(self, fallback: &str) -> ArloError {
+        // Arlo's text is wire input: control characters stripped and
+        // length-capped before it can reach a log line.
         let message = self
             .message
             .filter(|m| !m.is_empty())
+            .map(|m| crate::models::redact::excerpt(&m))
             .or_else(|| {
                 self.error
                     .and_then(crate::models::error_codes::message_for)
@@ -53,11 +56,12 @@ impl Meta {
     }
 }
 
-/// Session payload of `auth` / `finishAuth`. `Debug` redacts the `token`.
-#[derive(Serialize, Deserialize)]
+/// Session payload of `auth` / `finishAuth`. `Debug` redacts the `token`,
+/// which is held as a [`SecretString`] (zeroized on drop).
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthResponseData {
-    pub token: String,
+    pub token: SecretString,
     pub user_id: String,
     pub authenticated: u64,
     pub mfa: Option<bool>,
@@ -121,11 +125,13 @@ pub struct FinishAuthPushRequest {
     pub is_browser_trusted: bool,
 }
 
-/// `data` payload of a successful `POST /api/startAuth`.
-#[derive(Serialize, Deserialize)]
+/// `data` payload of a successful `POST /api/startAuth`. The
+/// `factor_auth_code` alone yields a session once the factor is
+/// approved, so it is a [`SecretString`].
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartAuthData {
-    pub factor_auth_code: String,
+    pub factor_auth_code: SecretString,
     #[serde(default)]
     pub factors: Vec<SecondFactor>,
 }
@@ -374,5 +380,17 @@ mod redaction_tests {
             dbg.contains("is_browser_trusted: true") && !dbg.contains("FAC-SECRET"),
             "{dbg}"
         );
+    }
+
+    #[test]
+    fn into_error_strips_control_characters_from_arlo_message() {
+        let meta = Meta {
+            code: 401,
+            error: Some(9017),
+            message: Some("bad\n\x1b[31mline".into()),
+        };
+        let text = meta.into_error("fallback").to_string();
+        assert!(!text.contains('\n') && !text.contains('\x1b'), "{text}");
+        assert!(text.contains("bad") && text.contains("line"), "{text}");
     }
 }
