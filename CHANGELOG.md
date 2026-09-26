@@ -336,6 +336,28 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   old entries named `headless_chrome`, `rquest-util` and `rcgen`, none of
   which remain).
 
+- CI: `cargo-tarpaulin` and `cargo-audit` are installed at exact versions
+  through `taiki-e/install-action` (checksum-verified) instead of an
+  unverified "latest" GitHub release download / `cargo install` of
+  whatever is newest. Every job has a `timeout-minutes`. The release is
+  now a job of the CI workflow that `needs` every gate (format, clippy,
+  tests, cargo-deny, gitleaks, cargo-audit, docs, coverage) and runs only
+  on a push to the default branch under its own non-cancelling
+  concurrency group, so a red `main` can no longer produce a release and
+  two quick pushes cannot race on one tag; `release.yml` is gone. The
+  version is read with `cargo metadata`, validated as semver and passed
+  to the shell as an environment variable rather than interpolated as an
+  expression. SonarQube is skipped on fork and Dependabot pull requests,
+  where its token is withheld. The live-account test in
+  `tests/e2e_arlo_api.rs` is `#[ignore]`, additionally requires
+  `ARLO_E2E=1`, and runs under a 180 s deadline.
+- Policy files: Renovate now waits three days before proposing a new
+  crate or action version (vulnerability alerts bypass the wait), enables
+  OSV vulnerability alerts, keeps action digests pinned and maintains the
+  lockfile weekly; `cargo-deny` rejects wildcard version requirements;
+  the Codecov targets equal tarpaulin's `--fail-under` (65 %) so the two
+  never disagree. The decision to keep the unmaintained `mqttbytes`
+  codec (bounds reviewed, frames capped) is recorded in `deny.toml`.
 ### Fixed
 - `cargo doc` is warning-free again: duplicated one-line outer docs on
   `pub mod` declarations were removed (rustdoc merged them with the

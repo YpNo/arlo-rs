@@ -147,10 +147,19 @@ registries = [
 # More documentation about the 'bans' section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
 [bans]
+# Accepted maintenance risk (security sweep 2026-09-26, L19): `mqttbytes`
+# 0.6.0 decodes every broker frame and has had no release since 2021
+# (superseded in-tree by rumqttc, whose codec is not published on its
+# own). Its bounds handling was reviewed line by line — fixed-header
+# guard, 4-byte varint cap, `remaining_len` checked against
+# `MAX_PACKET_BYTES` before framing — and the bus additionally caps the
+# WebSocket frame at 1 MiB. Revisit when a maintained standalone MQTT
+# 3.1.1 codec exists or if a RUSTSEC advisory lands.
 # Lint level for when multiple versions of the same crate are detected
 multiple-versions = "deny"
-# Lint level for when a crate version requirement is `*`
-wildcards = "allow"
+# Lint level for when a crate version requirement is `*` — a wildcard
+# lets `cargo update` pull any future major, so it is an error here.
+wildcards = "deny"
 # The graph highlighting used when creating dotgraphs for crates
 # with multiple versions
 # * lowest-version - The path to the lowest versioned duplicate is highlighted

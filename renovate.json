@@ -1,6 +1,24 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "osvVulnerabilityAlerts": true,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 6am on monday"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Let a freshly published crate or action age before it is proposed \u2014 the window in which a hijacked release is usually yanked. Renovate lifts the window for vulnerability-alert updates by default.",
+      "matchManagers": [
+        "cargo",
+        "github-actions"
+      ],
+      "minimumReleaseAge": "3 days"
+    }
   ]
 }

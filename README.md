@@ -143,9 +143,11 @@ When contributing or debugging the `arlo-rs` library, you can use these essentia
   ```bash
   cargo doc --no-deps --open
   ```
-- **Run the E2E Integration tests (requires valid config.toml credentials):**
+- **Run the live-account smoke test** (opt-in: it is `#[ignore]` and needs
+  both a valid `config.toml` and `ARLO_E2E=1`, because it triggers a real
+  second factor):
   ```bash
-  RUST_LOG=info cargo test --test e2e_arlo_api -- --nocapture
+  ARLO_E2E=1 RUST_LOG=info cargo test --test e2e_arlo_api -- --ignored --nocapture
   ```
 
 ## 🤝 Contributing

@@ -1,12 +1,15 @@
+# Reporting only. The enforced gate is `cargo tarpaulin --fail-under`
+# in .github/workflows/ci.yml; keep the targets here equal to that
+# number so the PR annotation and the gate never disagree.
 coverage:
   status:
     project:
       default:
-        target: 70%
+        target: 65%
         threshold: 1%
     patch:
       default:
-        target: 70%
+        target: 65%
         threshold: 0%
 
 ignore:
