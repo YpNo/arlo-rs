@@ -10,3 +10,4 @@ pub mod library;
 pub mod ratls;
 pub(crate) mod redact;
 pub mod sip;
+pub(crate) mod validate;

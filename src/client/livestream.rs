@@ -55,14 +55,18 @@ impl ArloClient {
     /// errors from the `sipInfo/v2` call propagate.
     #[instrument(skip(self), fields(device = %device.device_id))]
     pub async fn sip_info(&self, device: &Device) -> Result<SipInfo, ArloError> {
-        let user_id = self.require_user_id()?;
+        let user_id = crate::models::validate::id_segment("userId", self.require_user_id()?)?;
+        let device_id = crate::models::validate::id_segment("device_id", &device.device_id)?;
         let model = device.model_id.as_deref().unwrap_or_default();
-        let unique_id = format!("{user_id}_{}", device.device_id);
+        if !model.is_empty() {
+            crate::models::validate::id_segment("model_id", model)?;
+        }
+        let unique_id = format!("{user_id}_{device_id}");
         let event_id = format!("FE!{}", uuid::Uuid::new_v4());
         let ts = crate::client::api::now_millis();
         let url = format!(
             "{}{}?cameraId={}&modelId={}&uniqueId={}&eventId={}&time={}",
-            self.endpoints.api_host, API_SIP_INFO, device.device_id, model, unique_id, event_id, ts,
+            self.endpoints.api_host, API_SIP_INFO, device_id, model, unique_id, event_id, ts,
         );
 
         // `sipInfo/v2` reads the camera id from a **required request
@@ -74,8 +78,10 @@ impl ArloClient {
             .execute_request_with_headers::<()>(Method::GET, &url, None, &headers)
             .await?;
         let data = unwrap_envelope(&body)?;
-        serde_json::from_value(data)
-            .map_err(|e| ArloError::ParseError(format!("Failed to parse sipInfo: {e}")))
+        let sip: SipInfo = serde_json::from_value(data)
+            .map_err(|e| ArloError::ParseError(format!("Failed to parse sipInfo: {e}")))?;
+        sip.validate()?;
+        Ok(sip)
     }
 
     /// Opens the signaling WS, sends the WebRTC `offer_sdp` (generated
@@ -97,11 +103,15 @@ impl ArloClient {
         let session_id = uuid::Uuid::new_v4().to_string();
         let camera_id = sip.sip_call_info.device_id.clone();
 
+        // Fail closed on a signaling host that is not Arlo's: the frame
+        // we are about to send carries the per-call SIP password.
+        let ws_url = crate::models::validate::arlo_wss_url(
+            "sipInfo signaling domain",
+            &sip.sip_call_info.ws_url(),
+            Some(7443),
+        )?;
         // Arlo's upgrade extras: `Origin` + the `sip` subprotocol.
-        let mut ws = self
-            .ws
-            .connect(&sip.sip_call_info.ws_url(), WS_ORIGIN, "sip")
-            .await?;
+        let mut ws = self.ws.connect(ws_url.as_str(), WS_ORIGIN, "sip").await?;
         info!("livestream signaling WS connected");
 
         let frame = build_initiate_offer(sip, &session_id, &camera_id, offer_sdp);

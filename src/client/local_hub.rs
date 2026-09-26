@@ -99,6 +99,7 @@ impl LocalHubClient {
     /// SmartHub to confirm the LAN path is healthy.
     pub async fn check_connectivity(&self) -> Result<String, ArloError> {
         let url = format!("https://{}{}", self.hub_ip, API_HMSLS_CONNECTIVITY);
+        use crate::client::transport::{MAX_RESPONSE_BYTES, read_reqwest_body};
         let response = self
             .http
             .get(&url)
@@ -112,7 +113,8 @@ impl LocalHubClient {
                 message: "Local SmartHub connectivity check failed".into(),
             });
         }
-        Ok(response.text().await?)
+        let body = read_reqwest_body(response, MAX_RESPONSE_BYTES).await?;
+        Ok(String::from_utf8_lossy(&body).into_owned())
     }
 
     /// `GET /hmsls/list?dateFrom=…&dateTo=…` — lists media stored locally
@@ -123,9 +125,14 @@ impl LocalHubClient {
         date_from: &str,
         date_to: &str,
     ) -> Result<serde_json::Value, ArloError> {
+        use crate::client::transport::{MAX_RESPONSE_BYTES, read_reqwest_body};
+        use crate::models::validate::date_yyyymmdd;
         let url = format!(
             "https://{}{}?dateFrom={}&dateTo={}",
-            self.hub_ip, API_HMSLS_LIST, date_from, date_to
+            self.hub_ip,
+            API_HMSLS_LIST,
+            date_yyyymmdd("dateFrom", date_from)?,
+            date_yyyymmdd("dateTo", date_to)?
         );
         let response = self
             .http
@@ -140,19 +147,23 @@ impl LocalHubClient {
                 message: "Failed to list local SmartHub media".into(),
             });
         }
-        let body = response.text().await?;
-        let parsed: HmslsListResponse = serde_json::from_str(&body)?;
+        let body = read_reqwest_body(response, MAX_RESPONSE_BYTES).await?;
+        let parsed: HmslsListResponse = serde_json::from_slice(&body)?;
         Ok(parsed.data.unwrap_or_else(|| serde_json::json!([])))
     }
 
     /// `GET /<url_path>` — downloads a media artefact from the SmartHub.
     /// `url_path` is typically the `mediaUrl` field returned by
     /// [`Self::list_media`]. Leading slashes are normalized.
+    ///
+    /// The whole artefact is buffered, capped at [`MAX_HUB_MEDIA_BYTES`].
     pub async fn download_media(&self, url_path: &str) -> Result<Vec<u8>, ArloError> {
+        use crate::client::transport::read_reqwest_body;
+        use crate::models::validate::hub_media_path;
         let url = format!(
             "https://{}/{}",
             self.hub_ip,
-            url_path.trim_start_matches('/')
+            hub_media_path(url_path.trim_start_matches('/'))?
         );
         let response = self
             .http
@@ -167,9 +178,14 @@ impl LocalHubClient {
                 message: "Failed to download local SmartHub media".into(),
             });
         }
-        Ok(response.bytes().await?.to_vec())
+        read_reqwest_body(response, MAX_HUB_MEDIA_BYTES).await
     }
 }
+
+/// Largest media artefact [`LocalHubClient::download_media`] will buffer.
+/// Hub recordings are minutes of 1080p at most; this is a hard stop
+/// against a hub that never ends the response.
+pub const MAX_HUB_MEDIA_BYTES: usize = 512 * 1024 * 1024;
 
 /// rustls verifier that accepts exactly one leaf certificate, byte-for-
 /// byte equal to the one the cloud returned. Hostname/SNI is intentionally

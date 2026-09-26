@@ -18,6 +18,7 @@ impl ArloClient {
         action: &str,
         properties: Option<serde_json::Value>,
     ) -> Result<(), ArloError> {
+        let device_id = crate::models::validate::id_segment("device_id", device_id)?;
         let url = format!("{}{}{}", self.endpoints.api_host, API_NOTIFY, device_id);
 
         let user_id = self.require_user_id()?;
@@ -353,6 +354,7 @@ impl ArloClient {
         action: &str,
         properties: Option<serde_json::Value>,
     ) -> Result<(), ArloError> {
+        let device_id = crate::models::validate::id_segment("device_id", device_id)?;
         let url = format!("{}{}{}", self.endpoints.api_host, API_NOTIFY, device_id);
 
         let user_id = self.require_user_id()?;

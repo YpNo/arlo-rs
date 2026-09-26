@@ -109,6 +109,42 @@ impl IceServer {
     }
 }
 
+impl SipInfo {
+    /// Rejects a `sipInfo/v2` payload whose hosts are not Arlo's own or
+    /// whose ICE entries are malformed, before any of them is dialed.
+    /// `domain` values are interpolated into `wss://…:7443/` and
+    /// `stun:/turn:` URLs, so they must be bare host names.
+    pub(crate) fn validate(&self) -> Result<(), crate::error::ArloError> {
+        use crate::error::ArloError;
+        use crate::models::validate::is_arlo_host;
+        let bare_host = |h: &str| !h.contains(['/', '?', '#', '@', ':', ' ']) && is_arlo_host(h);
+        if !bare_host(&self.sip_call_info.domain) {
+            return Err(ArloError::ParseError(
+                "sipInfo: signaling domain is not an Arlo host".into(),
+            ));
+        }
+        for server in &self.ice_servers.data {
+            if !matches!(server.kind.as_str(), "stun" | "turn" | "turns") {
+                return Err(ArloError::ParseError(format!(
+                    "sipInfo: unknown ICE server type '{}'",
+                    server.kind
+                )));
+            }
+            if server.port.parse::<u16>().is_err() {
+                return Err(ArloError::ParseError(
+                    "sipInfo: ICE server port is not a port".into(),
+                ));
+            }
+            if !bare_host(&server.domain) {
+                return Err(ArloError::ParseError(
+                    "sipInfo: ICE server domain is not an Arlo host".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for SipCallInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SipCallInfo")
@@ -204,5 +240,46 @@ mod redaction_tests {
             dbg.contains("relay.example") && !dbg.contains("TURN-SECRET"),
             "{dbg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+
+    fn sample() -> SipInfo {
+        serde_json::from_str(
+            r#"{"sipCallInfo":{"id":"c","calleeUri":"sip:x@livestream-z1-prod.arlo.com:443",
+                "domain":"livestream-z1-prod.arlo.com","port":443,"conferenceId":null,
+                "password":"p","deviceId":"D","callId":"c"},
+               "iceServers":{"uSessionId":"u","data":[
+                 {"port":"19302","domain":"relay03-z1-prod.ar.arlo.com","type":"stun"},
+                 {"credential":"x","port":"443","domain":"relay03-z1-prod.ar.arlo.com","transport":"tcp","type":"turn","username":"1:U"}]}}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn live_shaped_payload_validates() {
+        assert!(sample().validate().is_ok());
+    }
+
+    #[test]
+    fn foreign_or_malformed_hosts_are_rejected() {
+        let mut s = sample();
+        s.sip_call_info.domain = "evil.example".into();
+        assert!(s.validate().is_err());
+        let mut s = sample();
+        s.sip_call_info.domain = "livestream.arlo.com/?x=1".into();
+        assert!(s.validate().is_err());
+        let mut s = sample();
+        s.ice_servers.data[1].domain = "relay.evil.example".into();
+        assert!(s.validate().is_err());
+        let mut s = sample();
+        s.ice_servers.data[0].kind = "file".into();
+        assert!(s.validate().is_err());
+        let mut s = sample();
+        s.ice_servers.data[0].port = "99999".into();
+        assert!(s.validate().is_err());
     }
 }

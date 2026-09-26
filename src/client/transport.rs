@@ -143,6 +143,55 @@ fn to_header_map(headers: Vec<(String, String)>) -> Result<HeaderMap, ArloError>
     Ok(header_map)
 }
 
+/// Largest response body either HTTP transport will buffer. Arlo's
+/// biggest normal reply (`devicesupport`) is a few hundred KB; the cap
+/// stops a hostile or broken upstream (or a decompression bomb — the
+/// clients inflate gzip/brotli/zstd transparently) from exhausting the
+/// consumer's memory. The 30 s timeout bounds time, not size.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+fn body_too_large(max: usize) -> ArloError {
+    ArloError::ParseError(format!("response body exceeds {max} bytes"))
+}
+
+/// Reads a `wreq` body chunk by chunk, failing as soon as `max` would be
+/// exceeded (declared `Content-Length` first, then the actual bytes).
+async fn read_wreq_body(response: wreq::Response, max: usize) -> Result<String, ArloError> {
+    use futures_util::StreamExt;
+    if response.content_length().is_some_and(|n| n > max as u64) {
+        return Err(body_too_large(max));
+    }
+    let mut stream = response.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if buf.len() + chunk.len() > max {
+            return Err(body_too_large(max));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Same contract as `read_wreq_body` for a `reqwest` response; shared
+/// with the local-hub client, which is why it returns bytes.
+pub(crate) async fn read_reqwest_body(
+    mut response: reqwest::Response,
+    max: usize,
+) -> Result<Vec<u8>, ArloError> {
+    if response.content_length().is_some_and(|n| n > max as u64) {
+        return Err(body_too_large(max));
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if buf.len() + chunk.len() > max {
+            return Err(body_too_large(max));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 /// Per-request timeout for the default transport. Arlo's slowest normal
 /// call (`devicesupport`, a few hundred KB) completes well inside this.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -231,7 +280,7 @@ impl HttpTransport for WreqTransport {
 
         let response = builder.send().await?;
         let status = response.status();
-        let body = response.text().await?;
+        let body = read_wreq_body(response, MAX_RESPONSE_BYTES).await?;
         Ok(HttpResponse { status, body })
     }
 
@@ -303,7 +352,8 @@ impl HttpTransport for CloudScraperTransport {
 
         let response = builder.send().await?;
         let status = response.status();
-        let body = response.text().await?;
+        let body = String::from_utf8_lossy(&read_reqwest_body(response, MAX_RESPONSE_BYTES).await?)
+            .into_owned();
         Ok(HttpResponse { status, body })
     }
 }
@@ -630,5 +680,53 @@ mod redaction_tests {
             dbg.contains("200") && !dbg.contains("TOKEN-SECRET"),
             "{dbg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod body_cap_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reqwest_body_reader_stops_at_the_cap() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/big")
+            .with_body("x".repeat(100))
+            .create_async()
+            .await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/big", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let err = read_reqwest_body(resp, 50).await.unwrap_err().to_string();
+        assert!(err.contains("exceeds 50 bytes"), "{err}");
+        let resp = client
+            .get(format!("{}/big", server.url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(read_reqwest_body(resp, 100).await.unwrap().len(), 100);
+    }
+
+    #[tokio::test]
+    async fn wreq_transport_rejects_oversized_bodies() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/big")
+            .with_body("x".repeat(100))
+            .create_async()
+            .await;
+        let transport = WreqTransport::new(BrowserProfile::random(), None).unwrap();
+        let resp = transport
+            .client
+            .get(format!("{}/big", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let err = read_wreq_body(resp, 50).await.unwrap_err().to_string();
+        assert!(err.contains("exceeds 50 bytes"), "{err}");
     }
 }

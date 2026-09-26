@@ -52,6 +52,10 @@ pub trait WsConnector: Send + Sync + std::fmt::Debug {
     ) -> Result<BoxWsStream, ArloError>;
 }
 
+/// Largest WebSocket message or frame the production connector will
+/// reassemble (see the note in [`TungsteniteConnector::connect`]).
+const MAX_WS_MESSAGE_BYTES: usize = 1024 * 1024;
+
 /// Production adapter over `tokio-tungstenite` (rustls, WebPKI roots).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TungsteniteConnector;
@@ -64,6 +68,11 @@ impl WsConnector for TungsteniteConnector {
         origin: &str,
         subprotocol: &str,
     ) -> Result<BoxWsStream, ArloError> {
+        if !url.starts_with("wss://") {
+            return Err(ArloError::ScraperError(format!(
+                "refusing non-TLS websocket scheme in '{url}'"
+            )));
+        }
         let mut request = url
             .into_client_request()
             .map_err(|e| ArloError::ScraperError(format!("bad websocket url '{url}': {e}")))?;
@@ -80,9 +89,18 @@ impl WsConnector for TungsteniteConnector {
                 ArloError::ScraperError(format!("invalid subprotocol '{subprotocol}'"))
             })?,
         );
-        let (ws, _response) = tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(|e| ArloError::ScraperError(format!("WSS connect to {url} failed: {e}")))?;
+        // Bound reassembly: the MQTT layer rejects packets above its own
+        // 256 KiB cap and signaling frames are a few KB, so tungstenite's
+        // 64 MiB default would only ever serve a hostile peer.
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(MAX_WS_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_WS_MESSAGE_BYTES));
+        let (ws, _response) =
+            tokio_tungstenite::connect_async_with_config(request, Some(config), false)
+                .await
+                .map_err(|e| {
+                    ArloError::ScraperError(format!("WSS connect to {url} failed: {e}"))
+                })?;
         Ok(Box::new(ws))
     }
 }
@@ -221,5 +239,21 @@ mod tests {
             Err(other) => panic!("expected ScraperError, got {other:?}"),
             Ok(_) => panic!("a malformed URL must not connect"),
         }
+    }
+}
+
+#[cfg(test)]
+mod scheme_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connector_refuses_plaintext_ws_before_dialing() {
+        let err = TungsteniteConnector
+            .connect("ws://127.0.0.1:1/mqtt", "https://my.arlo.com", "mqtt")
+            .await
+            .err()
+            .expect("must refuse")
+            .to_string();
+        assert!(err.contains("non-TLS"), "{err}");
     }
 }

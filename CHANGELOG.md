@@ -231,6 +231,22 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   that were committed once (`examples/log.txt`, `examples/email.txt`,
   `.arlo_session_push.json`) cannot recur. Those three files still exist
   in git history; purging them is a force-push the maintainer runs.
+- Values the cloud hands back are validated before use (`models::validate`,
+  fail-closed): the `session/v3` `mqttUrl` and the `sipInfo/v2` signaling
+  domain must be `wss://` on an Arlo host (the WebSocket connector itself
+  refuses non-TLS schemes); ICE servers must be stun/turn/turns on Arlo
+  hosts with a numeric port; a stream URL is accepted only as `rtsps`
+  or `https` with a host (`StreamUrl::parse`, plain `rtsp` upgraded as
+  before); identifiers interpolated into request paths and queries
+  (device, location, user ids; hub dates and media paths) must be plain
+  tokens; MQTT filters from `allowedMqttTopics` must stay inside the
+  device or own-inbox namespace with well-formed wildcards.
+- Every body read is bounded: 8 MiB on both HTTP transports (chunked
+  read, `Content-Length` checked first), 512 MiB for a local-hub media
+  download, 1 MiB per WebSocket message/frame, 256 KiB per MQTT frame
+  before reassembly, and the ambient-history decoder caps its base64
+  input (1 MiB) and inflated output (4 MiB). The envelope unwrapper moves
+  `data` out instead of cloning the whole body.
 - Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
   (RUSTSEC-2026-0285, TLS 1.3 handshake across encryption levels) and
   `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);

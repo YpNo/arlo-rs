@@ -234,6 +234,11 @@ impl ArloClient {
                         "session/v3 returned no mqttUrl — account not on the v3 event bus".into(),
                     )
                 })?;
+                // The access token becomes the MQTT password: never dial a
+                // host Arlo did not name, and never over plaintext.
+                let mqtt_url =
+                    crate::models::validate::arlo_wss_url("session/v3 mqttUrl", &mqtt_url, None)?
+                        .to_string();
 
                 // Subscribe to the web client's fine-grained per-resource
                 // topics keyed by each device's xCloudId (the broad

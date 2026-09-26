@@ -124,12 +124,51 @@ pub struct StreamResponse {
 pub struct StreamUrl(pub String);
 
 impl StreamUrl {
+    /// Validates a stream URL received from Arlo (the `/startStream`
+    /// reply or the bus event). A plain `rtsp://` is upgraded to
+    /// `rtsps://` as the web client does; only `rtsps` and `https`
+    /// (HLS / DASH) with a host are accepted, so a hostile `file:`,
+    /// `concat:` or cleartext `http:` value never reaches a player.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::error::ArloError::ParseError`] for any other scheme, a
+    /// missing host, or an unparseable value. The offending URL is not
+    /// included in the error: it carries the stream's egress token.
+    pub fn parse(raw: &str) -> Result<Self, crate::error::ArloError> {
+        use crate::error::ArloError;
+        let upgraded = rewrite_rtsp_to_rtsps(raw);
+        let u = url::Url::parse(&upgraded)
+            .map_err(|e| ArloError::ParseError(format!("stream URL is not a URL: {e}")))?;
+        if !matches!(u.scheme(), "rtsps" | "https") {
+            return Err(ArloError::ParseError(format!(
+                "stream URL scheme '{}' is not rtsps or https",
+                u.scheme()
+            )));
+        }
+        if u.host_str().is_none_or(str::is_empty) {
+            return Err(ArloError::ParseError("stream URL has no host".into()));
+        }
+        Ok(Self(upgraded))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+/// Rewrites a leading `rtsp://` to `rtsps://` (TLS), matching the Arlo
+/// web client. Leaves `rtsps://`, `https://` (HLS/DASH), and anything
+/// else untouched; `strip_prefix` guarantees only the exact `rtsp://`
+/// scheme is touched, never `rtsps://`.
+pub(crate) fn rewrite_rtsp_to_rtsps(url: &str) -> String {
+    match url.strip_prefix("rtsp://") {
+        Some(rest) => format!("rtsps://{rest}"),
+        None => url.to_string(),
     }
 }
 
@@ -274,5 +313,37 @@ mod redaction_tests {
             dbg.contains("Front") && !dbg.contains("SIG") && !dbg.contains("s3.example"),
             "{dbg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod stream_url_tests {
+    use super::*;
+
+    #[test]
+    fn parse_upgrades_rtsp_and_accepts_rtsps_and_https() {
+        assert_eq!(
+            StreamUrl::parse("rtsp://cam.arlo.example/live?egressToken=T")
+                .unwrap()
+                .as_str(),
+            "rtsps://cam.arlo.example/live?egressToken=T"
+        );
+        assert!(StreamUrl::parse("rtsps://h/p").is_ok());
+        assert!(StreamUrl::parse("https://h/p.m3u8").is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_other_schemes_and_hostless_urls() {
+        for bad in [
+            "http://h/p?token=T",
+            "file:///etc/passwd",
+            "concat:a|b",
+            "rtsps:///nohost",
+            "",
+            "not a url",
+        ] {
+            let err = StreamUrl::parse(bad).unwrap_err().to_string();
+            assert!(!err.contains("token=T"), "URL leaked into error: {err}");
+        }
     }
 }

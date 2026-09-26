@@ -30,7 +30,7 @@ use serde_json::Value;
 /// success, with the wire-side `meta.message` (when present) preserved
 /// in the error.
 pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
-    let parsed: Value = serde_json::from_str(body)?;
+    let mut parsed: Value = serde_json::from_str(body)?;
 
     // Bare array — the whole body is the data.
     if parsed.is_array() {
@@ -40,7 +40,7 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
     // `success: bool`
     if let Some(success) = parsed.get("success").and_then(|s| s.as_bool()) {
         if success {
-            return Ok(parsed.get("data").cloned().unwrap_or(Value::Null));
+            return Ok(take_data(&mut parsed));
         }
         return Err(ArloError::ApiError {
             code: 500,
@@ -59,7 +59,7 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
         .and_then(|c| c.as_u64())
     {
         if code == 200 {
-            return Ok(parsed.get("data").cloned().unwrap_or(Value::Null));
+            return Ok(take_data(&mut parsed));
         }
         let error = parsed
             .get("meta")
@@ -93,6 +93,15 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
             crate::models::redact::excerpt(body)
         ),
     })
+}
+
+/// Moves `data` out of the envelope instead of cloning it, so a large
+/// body is held once, not twice.
+fn take_data(parsed: &mut Value) -> Value {
+    parsed
+        .get_mut("data")
+        .map(Value::take)
+        .unwrap_or(Value::Null)
 }
 
 /// Convenience for the deeply-wrapped list endpoints (`get_devices`,

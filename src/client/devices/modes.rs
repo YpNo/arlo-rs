@@ -135,7 +135,10 @@ impl ArloClient {
 
         let get_url = format!(
             "{}{}?locationId={}",
-            self.endpoints.api_host, API_AUTOMATION_ACTIVE_MODE, loc.id
+            self.endpoints.api_host,
+            API_AUTOMATION_ACTIVE_MODE,
+            crate::models::validate::id_segment("locationId", &loc.id)
+                .map_err(SetModeV3Outcome::Error)?
         );
 
         let revision = match self
@@ -169,7 +172,11 @@ impl ArloClient {
 
         let put_url = format!(
             "{}{}?locationId={}&revision={}",
-            self.endpoints.api_host, API_AUTOMATION_ACTIVE_MODE, loc.id, revision
+            self.endpoints.api_host,
+            API_AUTOMATION_ACTIVE_MODE,
+            crate::models::validate::id_segment("locationId", &loc.id)
+                .map_err(SetModeV3Outcome::Error)?,
+            revision
         );
         // V3 wire shape — always `{"mode":"custom","custom":{<id>:<mode>}}`.
         // The leaf value is the mode name (`"armed"`/`"disarmed"`) or a
@@ -253,6 +260,7 @@ impl ArloClient {
         &self,
     ) -> Result<Vec<crate::models::automation::Location>, ArloError> {
         let user_id = self.require_user_id()?;
+        let user_id = crate::models::validate::id_segment("userId", user_id)?;
         let endpoint_path = API_LOCATIONS.replace("{user_id}", user_id);
         let url = format!("{}{}", self.endpoints.api_host, endpoint_path);
 
@@ -273,8 +281,10 @@ impl ArloClient {
         location_id: &str,
     ) -> Result<Vec<crate::models::automation::AutomationMode>, ArloError> {
         let url = format!(
-            "{}{}{}?locationId={}",
-            self.endpoints.api_host, API_AUTOMATION_MODES, "", location_id
+            "{}{}?locationId={}",
+            self.endpoints.api_host,
+            API_AUTOMATION_MODES,
+            crate::models::validate::id_segment("locationId", location_id)?
         );
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
@@ -305,7 +315,9 @@ impl ArloClient {
     ) -> Result<crate::models::automation::AutomationConfig, ArloError> {
         let url = format!(
             "{}{}?locationId={}&revisions=false",
-            self.endpoints.api_host, API_AUTOMATION_V3, location_id
+            self.endpoints.api_host,
+            API_AUTOMATION_V3,
+            crate::models::validate::id_segment("locationId", location_id)?
         );
         let body = self.execute_request::<()>(Method::GET, &url, None).await?;
         let data = crate::models::envelope::unwrap_envelope(&body)?;
@@ -367,7 +379,9 @@ impl ArloClient {
 
         let get_url = format!(
             "{}{}?locationId={}",
-            self.endpoints.api_host, API_AUTOMATION_ACTIVE_MODE, location.id
+            self.endpoints.api_host,
+            API_AUTOMATION_ACTIVE_MODE,
+            crate::models::validate::id_segment("locationId", &location.id)?
         );
         let body = self
             .execute_request::<()>(Method::GET, &get_url, None)
@@ -377,7 +391,10 @@ impl ArloClient {
         })?;
         let put_url = format!(
             "{}{}?locationId={}&revision={}",
-            self.endpoints.api_host, API_AUTOMATION_ACTIVE_MODE, location.id, revision
+            self.endpoints.api_host,
+            API_AUTOMATION_ACTIVE_MODE,
+            crate::models::validate::id_segment("locationId", &location.id)?,
+            revision
         );
         self.execute_request(Method::PUT, &put_url, Some(&payload))
             .await?;

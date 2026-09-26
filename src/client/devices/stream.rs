@@ -59,8 +59,9 @@ impl ArloClient {
             .await?;
 
         let parsed: serde_json::Value = serde_json::from_str(&body)?;
-        Ok(extract_post_response_stream_url(&parsed)
-            .map(|raw| StreamUrl(rewrite_rtsp_to_rtsps(&raw))))
+        extract_post_response_stream_url(&parsed)
+            .map(|raw| StreamUrl::parse(&raw))
+            .transpose()
     }
 
     /// Triggers a live stream for `device` and returns its playable URL,
@@ -151,7 +152,7 @@ impl ArloClient {
                         continue;
                     }
                     if let Some(found) = extract_stream_url(&event) {
-                        return Ok(StreamUrl(rewrite_rtsp_to_rtsps(&found)));
+                        return StreamUrl::parse(&found);
                     }
                 }
                 Ok(Err(RecvError::Lagged(n))) => {
@@ -172,17 +173,6 @@ impl ArloClient {
                 }
             }
         }
-    }
-}
-
-/// Rewrites a leading `rtsp://` to `rtsps://` (TLS), matching the Arlo
-/// web client. Leaves `rtsps://`, `https://` (HLS/DASH), and anything
-/// else untouched. `strip_prefix` guarantees we only touch the exact
-/// `rtsp://` scheme, never `rtsps://`.
-fn rewrite_rtsp_to_rtsps(url: &str) -> String {
-    match url.strip_prefix("rtsp://") {
-        Some(rest) => format!("rtsps://{rest}"),
-        None => url.to_string(),
     }
 }
 
@@ -440,13 +430,19 @@ mod tests {
 
     #[test]
     fn rewrite_rtsp_to_rtsps_only_touches_plain_rtsp() {
-        assert_eq!(super::rewrite_rtsp_to_rtsps("rtsp://h/p"), "rtsps://h/p");
-        assert_eq!(super::rewrite_rtsp_to_rtsps("rtsps://h/p"), "rtsps://h/p");
         assert_eq!(
-            super::rewrite_rtsp_to_rtsps("https://h/p.m3u8"),
+            crate::models::api::rewrite_rtsp_to_rtsps("rtsp://h/p"),
+            "rtsps://h/p"
+        );
+        assert_eq!(
+            crate::models::api::rewrite_rtsp_to_rtsps("rtsps://h/p"),
+            "rtsps://h/p"
+        );
+        assert_eq!(
+            crate::models::api::rewrite_rtsp_to_rtsps("https://h/p.m3u8"),
             "https://h/p.m3u8"
         );
-        assert_eq!(super::rewrite_rtsp_to_rtsps(""), "");
+        assert_eq!(crate::models::api::rewrite_rtsp_to_rtsps(""), "");
     }
 
     #[test]

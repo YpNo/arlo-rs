@@ -88,11 +88,13 @@ impl ArloClient {
                 .user_id
                 .as_deref()
                 .expect("SAFETY: user_id checked non-None just above");
+            let uid = crate::models::validate::id_segment("userId", uid)?;
+            let device_id = crate::models::validate::id_segment("device_id", &self.auth.device_id)?;
             let event_id = format!("FE!{}", uuid::Uuid::new_v4());
             let time_ms = crate::client::api::now_millis();
             let url = format!(
                 "{}/hmsweb/user/{}/client/smart/devices/logout?clientId={}&eventId={}&time={}",
-                self.endpoints.api_host, uid, self.auth.device_id, event_id, time_ms
+                self.endpoints.api_host, uid, device_id, event_id, time_ms
             );
             self.execute_request::<()>(Method::DELETE, &url, None).await
         };

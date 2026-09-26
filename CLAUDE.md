@@ -33,7 +33,7 @@
 - `ConnectionState`: `Connecting | Connected | Disconnected` — exhaustive enum, no wildcard arms
 
 ### `src/models/` — Pure data layer (no I/O)
-`auth.rs` (+ `Meta::into_error`), `auth_advanced.rs`, `events.rs` (`ArloEvent::active_mode_change`), `envelope.rs`, `redact.rs` (`redact_for_log`, `excerpt`, `redact_userinfo` — the one place the log/error redaction policy lives), `error_codes.rs` (`ErrorAction`, `classify`, official messages — branch on `ArloError::action()`, never on raw codes), `automation.rs` (`AutomationConfig`, `Location::hosts_device`), `library.rs`, `ratls.rs`, `sip.rs`, `api.rs`
+`auth.rs` (+ `Meta::into_error`), `auth_advanced.rs`, `events.rs` (`ArloEvent::active_mode_change`), `envelope.rs`, `validate.rs` (`arlo_wss_url`, `id_segment`, `date_yyyymmdd`, `hub_media_path`, `mqtt_filter_ok` — fail-closed checks on cloud-supplied hosts, ids and filters; `StreamUrl::parse` and `SipInfo::validate` build on it), `redact.rs` (`redact_for_log`, `excerpt`, `redact_userinfo` — the one place the log/error redaction policy lives), `error_codes.rs` (`ErrorAction`, `classify`, official messages — branch on `ArloError::action()`, never on raw codes), `automation.rs` (`AutomationConfig`, `Location::hosts_device`), `library.rs`, `ratls.rs`, `sip.rs`, `api.rs`
 
 ### Other modules
 - `src/error.rs` — `ArloError` (10 `thiserror` variants) + `action()` classifier
@@ -61,6 +61,7 @@
 - **IMAP MFA**: `ImapMfaHandler::prepare()` captures UNSEEN-baseline **before** OTP dispatch. Uses the published `imap-rs-client` / `imap-rs-tls` crates.
 - **Dependencies**: stdlib first — epoch millis come from `client::api::now_millis()` (no `chrono`), patterns from `regex-lite`, cert types from `rustls::pki_types`. `tokio` is on a narrow feature list; do not re-enable `full`. Run `cargo deny check` after any manifest change (the duplicate skip list is curated per crate).
 - **RATLS / Local Hub**: `LocalHubClient` uses a custom rustls `PinnedLeafVerifier` — fails closed on cert mismatch.
+- **Trust boundary**: Arlo responses are input, not truth. A host from a response is dialed only through `models::validate::arlo_wss_url`; an id goes into a URL only through `id_segment`; a stream URL exists only via `StreamUrl::parse`; bodies are read through the capped readers in `transport.rs` (`MAX_RESPONSE_BYTES`) — never `.text()`/`.bytes()` directly.
 - **Stealth Integrity**: Arlo's Cloudflare gate is TLS/HTTP2-fingerprint only (no JS challenge). `WreqTransport` is built from `stealthscraper_rs::impersonation_client(&profile)` — never build a `wreq` client any other way, and never depend on `wreq` directly (use the `stealthscraper_rs::wreq` re-export so client and emulation cannot drift). `BrowserProfile::random()` is selected at bootstrap; the builder already installs the `User-Agent`, `Sec-CH-UA*` and `Accept-Language` defaults from that same profile, and per-request headers from the orchestration layer win over them.
 
 <!-- rtk-instructions v2 -->

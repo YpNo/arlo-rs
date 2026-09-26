@@ -92,10 +92,23 @@ pub(crate) fn subscription_topics(devices: &[Device], user_id: &str) -> Vec<Stri
         topics = hand_built_topics(devices);
     }
     topics.push(format!("u/{user_id}/in/#"));
+    // The broker enforces authorization; this only drops filters that are
+    // malformed or outside the namespaces this client has any business in.
+    topics.retain(|t| {
+        let ok = crate::models::validate::mqtt_filter_ok(t, user_id);
+        if !ok {
+            warn!(filter = ?t, "dropping malformed MQTT topic filter from device list");
+        }
+        ok
+    });
     topics.sort();
     topics.dedup();
+    topics.truncate(MAX_TOPIC_FILTERS);
     topics
 }
+
+/// Upper bound on the SUBSCRIBE list; a real account has a few dozen.
+const MAX_TOPIC_FILTERS: usize = 256;
 
 /// Fallback topic set for device lists without `allowedMqttTopics`
 /// (legacy endpoint), replicating the web client's fine-grained
@@ -219,6 +232,11 @@ async fn run_session(
             msg = ws.next() => {
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
+                        if rx_buf.len() + data.len() > MAX_PACKET_BYTES {
+                            return Err(ArloError::ScraperError(
+                                "MQTT frame exceeds MAX_PACKET_BYTES".into(),
+                            ));
+                        }
                         rx_buf.extend_from_slice(&data);
                         drain_packets(&mut rx_buf, sender);
                     }
@@ -289,6 +307,11 @@ where
     while let Some(msg) = ws.next().await {
         let msg = msg.map_err(|e| ArloError::ScraperError(format!("WSS read: {e}")))?;
         if let Message::Binary(data) = msg {
+            if rx_buf.len() + data.len() > MAX_PACKET_BYTES {
+                return Err(ArloError::ScraperError(
+                    "MQTT frame exceeds MAX_PACKET_BYTES".into(),
+                ));
+            }
             rx_buf.extend_from_slice(&data);
             while let Some(packet) = next_packet(rx_buf)? {
                 if let Packet::ConnAck(ack) = packet {
@@ -550,5 +573,29 @@ mod tests {
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&[0x30, 0x7f]); // PUBLISH header claiming 127 bytes
         assert!(next_packet(&mut buf).expect("no hard error").is_none());
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_allowed_topics_are_dropped() {
+        let device: Device = serde_json::from_str(
+            r##"{"deviceId":"A0A0000YA0D00","parentId":"A0A0000YA0D00","deviceType":"camera",
+                "deviceName":"n","uniqueId":"u","state":"provisioned",
+                "allowedMqttTopics":["#","d/x/out/../#","d/x\u0000/out/#","u/OTHER/in/#",
+                                     "d/RXXXXXXX-0000-000-000000000/out/cameras/A0A0000YA0D00/#"]}"##,
+        )
+        .unwrap();
+        let topics = subscription_topics(&[device], "UXXX-000-00000000");
+        assert_eq!(
+            topics,
+            vec![
+                "d/RXXXXXXX-0000-000-000000000/out/cameras/A0A0000YA0D00/#".to_string(),
+                "u/UXXX-000-00000000/in/#".to_string(),
+            ]
+        );
     }
 }
