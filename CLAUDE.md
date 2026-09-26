@@ -30,7 +30,7 @@
 ### `src/events/` — MQTT-over-WSS telemetry bus
 - `EventBus` (`mod.rs`): one reconnecting background task, `broadcast::Sender<ArloEvent>`, `watch::Receiver<ConnectionState>`; `dispatch_payload` routes single events and batches
 - `mqtt.rs`: MQTT 3.1.1 over the `WsConnector` seam — `CONNECT` (`user_<uid>_<rand>` / `<uid>` / `<token>`), `SUBSCRIBE` to `allowedMqttTopics` (fallback: hand-built `d/<xCloudId>/out/…` set) + `u/<uid>/in/#`, `PINGREQ` every 30 s, `PUBLISH` → `ArloEvent`
-- `ConnectionState`: `Connecting | Connected | Disconnected` — exhaustive enum, no wildcard arms
+- `ConnectionState`: `Connecting | Connected | Disconnected` — exhaustive enum, no wildcard arms. Liveness: backoff `next_backoff` (jittered, capped), `IDLE_TIMEOUT` half-open detection, SUBACK all-rejected ⇒ session error, decode error ⇒ reconnect. The token is a `watch::Receiver` from `AuthManager::token_rx()`, read at every CONNECT — never replace `client.auth` after `events()` has started, and never copy the token into `MqttParams`
 
 ### `src/models/` — Pure data layer (no I/O)
 `auth.rs` (+ `Meta::into_error`), `auth_advanced.rs`, `events.rs` (`ArloEvent::active_mode_change`), `envelope.rs`, `validate.rs` (`arlo_wss_url`, `id_segment`, `date_yyyymmdd`, `hub_media_path`, `mqtt_filter_ok` — fail-closed checks on cloud-supplied hosts, ids and filters; `StreamUrl::parse` and `SipInfo::validate` build on it), `redact.rs` (`redact_for_log`, `excerpt`, `redact_userinfo` — the one place the log/error redaction policy lives), `error_codes.rs` (`ErrorAction`, `classify`, official messages — branch on `ArloError::action()`, never on raw codes), `automation.rs` (`AutomationConfig`, `Location::hosts_device`), `library.rs`, `ratls.rs`, `sip.rs`, `api.rs`

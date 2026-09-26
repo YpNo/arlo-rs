@@ -174,7 +174,7 @@ pub(crate) mod test_support {
     /// subscribe to a bus before the first frame is replayed.
     #[derive(Debug, Default)]
     pub struct MockWsConnector {
-        scripts: Mutex<VecDeque<Vec<WsMessage>>>,
+        scripts: Mutex<VecDeque<(Vec<WsMessage>, bool)>>,
         sent: Arc<Mutex<Vec<WsMessage>>>,
         connects: Mutex<Vec<(String, String, String)>>,
         gate: Notify,
@@ -190,7 +190,17 @@ pub(crate) mod test_support {
             self.scripts
                 .lock()
                 .expect("SAFETY: test mutex")
-                .push_back(frames);
+                .push_back((frames, false));
+        }
+
+        /// Like [`Self::script`], but the socket stays open and silent
+        /// once the frames are replayed instead of closing — a half-open
+        /// connection.
+        pub fn script_then_hang(&self, frames: Vec<WsMessage>) {
+            self.scripts
+                .lock()
+                .expect("SAFETY: test mutex")
+                .push_back((frames, true));
         }
 
         /// Lets one pending (or the next) `connect` proceed.
@@ -223,10 +233,14 @@ pub(crate) mod test_support {
                 origin.to_string(),
                 subprotocol.to_string(),
             ));
-            let script = self.scripts.lock().expect("SAFETY: test mutex").pop_front();
-            let hang_when_empty = script.is_none();
+            let (frames, hang_when_empty) = self
+                .scripts
+                .lock()
+                .expect("SAFETY: test mutex")
+                .pop_front()
+                .unwrap_or((Vec::new(), true));
             Ok(Box::new(ScriptedWs {
-                inbound: script.unwrap_or_default().into(),
+                inbound: frames.into(),
                 hang_when_empty,
                 sent: Arc::clone(&self.sent),
             }))

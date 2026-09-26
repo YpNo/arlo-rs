@@ -296,6 +296,20 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   honours `authCompleted` and the trusted browser before dispatching a
   push, floors `poll_interval` at 1 s, and no longer panics on
   `Duration::MAX`.
+- Event-bus liveness. The listener reconnects with exponential backoff
+  and ±20 % jitter (5 s doubling to a 5 min cap) instead of a fixed 5 s;
+  a refused CONNACK jumps to the cap, is logged once at ERROR, and the
+  loop wakes early the moment a re-authentication publishes a new token
+  — the bus now holds a `watch` on the access token rather than a copy,
+  so a revoked token no longer means ~17 000 failed broker logins a day
+  for the life of the process. Ninety seconds of inbound silence (1.5 ×
+  keep-alive, PINGRESP included) marks the socket half-open and
+  reconnects. A SUBACK that rejects every filter fails the session (the
+  rejected filters are logged either way); a decode error ends the
+  session instead of continuing desynchronised; unparseable payloads are
+  logged and a bad batch element no longer drops its siblings; SUBSCRIBE
+  carries packet id 1 as MQTT 3.1.1 requires and the SUBACK id is
+  checked.
 - Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
   (RUSTSEC-2026-0285, TLS 1.3 handshake across encryption levels) and
   `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);

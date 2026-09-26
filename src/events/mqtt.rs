@@ -18,13 +18,13 @@
 use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
 use mqttbytes::QoS;
-use mqttbytes::v4::{Connect, Login, Packet, Subscribe, SubscribeFilter};
+use mqttbytes::v4::{Connect, Login, Packet, Subscribe, SubscribeFilter, SubscribeReasonCode};
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
-use tracing::{Instrument, error, info, info_span, warn};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::client::ws::{WsConnector, WsMessage as Message};
 use crate::error::ArloError;
@@ -135,8 +135,21 @@ fn hand_built_topics(devices: &[Device]) -> Vec<String> {
 /// forever, with no reconnect.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Backoff between reconnect attempts. Mirrors the old SSE listener.
-const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
+/// Reconnect backoff: starts here, doubles per consecutive failure with
+/// ±20 % jitter, and is capped at [`RECONNECT_BACKOFF_MAX`]. A refused
+/// CONNACK jumps straight to the cap: a revoked token does not become
+/// valid by asking every five seconds (that was ~17 000 failed broker
+/// logins a day), and a token refresh wakes the loop early anyway.
+const RECONNECT_BACKOFF_MIN: Duration = Duration::from_secs(5);
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(300);
+/// Consecutive failures after which the backoff has reached the cap.
+const BACKOFF_CAP_FAILURES: u32 = 6;
+/// Inbound silence after which the socket is presumed half-open. The
+/// broker answers every PINGREQ, so 1.5 × keep-alive of nothing means the
+/// path is dead even though `ws.next()` still pends.
+const IDLE_TIMEOUT: Duration = Duration::from_secs((KEEP_ALIVE_SECS as u64) * 3 / 2);
+/// Packet identifier of our single SUBSCRIBE (MQTT-2.3.1-1 forbids 0).
+const SUBSCRIBE_PKID: u16 = 1;
 /// MQTT `CONNECT` keep-alive, in seconds (matches the web client).
 const KEEP_ALIVE_SECS: u16 = 60;
 /// Send a `PINGREQ` at half the keep-alive so the broker never times us out.
@@ -153,8 +166,9 @@ pub(crate) struct MqttParams {
     /// (from `session/v3`'s `mqttUrl`). `/mqtt` is appended here.
     pub mqtt_url: String,
     pub user_id: String,
-    /// MQTT password. Secret: `Debug` prints `[REDACTED]`.
-    pub access_token: SecretString,
+    /// MQTT password, read at every CONNECT so a re-authenticated token
+    /// is used on the next reconnect. `None` while logged out.
+    pub token: watch::Receiver<Option<SecretString>>,
     /// Topic filters to subscribe, built by [`subscription_topics`]
     /// (fine-grained per-resource, keyed by `xCloudId`, + user inbox).
     pub topics: Vec<String>,
@@ -171,18 +185,76 @@ pub(crate) fn spawn_mqtt_listener(
 ) -> JoinHandle<()> {
     tokio::spawn(
         async move {
+            let mut failures: u32 = 0;
+            let mut refused_logged = false;
+            let mut token_rx = params.token.clone();
             loop {
                 let _ = state_tx.send(ConnectionState::Connecting);
-                match run_session(&params, ws.as_ref(), &sender, &state_tx).await {
-                    Ok(()) => warn!("MQTT stream ended; reconnecting"),
-                    Err(e) => error!(error = %e, "MQTT connection error"),
-                }
+                token_rx.mark_unchanged();
+                let outcome = run_session(&params, ws.as_ref(), &sender, &state_tx).await;
+                let was_connected = *state_tx.borrow() == ConnectionState::Connected;
                 let _ = state_tx.send(ConnectionState::Disconnected);
-                tokio::time::sleep(RECONNECT_BACKOFF).await;
+
+                let mut refused = false;
+                match outcome {
+                    Ok(()) if was_connected => {
+                        failures = 0;
+                        refused_logged = false;
+                        warn!("MQTT stream ended; reconnecting");
+                    }
+                    Ok(()) => {
+                        failures = failures.saturating_add(1);
+                        warn!("MQTT stream ended before it was connected; reconnecting");
+                    }
+                    Err(ArloError::AuthError(e)) => {
+                        refused = true;
+                        failures = failures.max(BACKOFF_CAP_FAILURES);
+                        if !refused_logged {
+                            error!(
+                                error = %e,
+                                "MQTT broker refused the session; retrying at the maximum backoff until the token is refreshed"
+                            );
+                            refused_logged = true;
+                        }
+                    }
+                    Err(e) => {
+                        failures = failures.saturating_add(1);
+                        error!(error = %e, failures, "MQTT connection error");
+                    }
+                }
+
+                let delay = next_backoff(failures);
+                if refused {
+                    // Sleep the full backoff, or reconnect as soon as a
+                    // re-authentication publishes a new token.
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        changed = token_rx.changed() => {
+                            if changed.is_ok() {
+                                info!("access token refreshed; reconnecting the event bus now");
+                            }
+                        }
+                    }
+                } else {
+                    tokio::time::sleep(delay).await;
+                }
             }
         }
         .instrument(info_span!("mqtt_listener")),
     )
+}
+
+/// Exponential backoff with ±20 % jitter: `MIN · 2^failures`, capped at
+/// [`RECONNECT_BACKOFF_MAX`]. Jitter keeps a fleet of clients from
+/// reconnecting in lockstep after a broker restart.
+fn next_backoff(failures: u32) -> Duration {
+    let exp = failures.min(BACKOFF_CAP_FAILURES);
+    let base = RECONNECT_BACKOFF_MIN
+        .saturating_mul(1u32 << exp)
+        .min(RECONNECT_BACKOFF_MAX);
+    // 0.8 ..= 1.2, from the same CSPRNG the client ids come from.
+    let jitter = 0.8 + (uuid::Uuid::new_v4().as_u128() % 401) as f64 / 1000.0;
+    base.mul_f64(jitter).min(RECONNECT_BACKOFF_MAX)
 }
 
 /// One full connect → subscribe → pump cycle. Returns `Ok(())` on a
@@ -205,7 +277,7 @@ async fn run_session(
     .map_err(|_| ArloError::Timeout(format!("MQTT WSS dial exceeded {HANDSHAKE_TIMEOUT:?}")))??;
 
     // -- MQTT CONNECT --
-    ws.send(Message::Binary(encode(&connect_packet(params))?.into()))
+    ws.send(Message::Binary(encode(&connect_packet(params)?)?.into()))
         .await
         .map_err(|e| ArloError::ScraperError(format!("CONNECT send failed: {e}")))?;
 
@@ -235,9 +307,17 @@ async fn run_session(
     // -- Pump: inbound PUBLISH ↔ periodic PINGREQ --
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_rx = tokio::time::Instant::now();
     loop {
         tokio::select! {
             _ = ping.tick() => {
+                if last_rx.elapsed() > IDLE_TIMEOUT {
+                    warn!(
+                        idle_secs = last_rx.elapsed().as_secs(),
+                        "no inbound MQTT traffic (not even PINGRESP); socket presumed half-open, reconnecting"
+                    );
+                    return Ok(());
+                }
                 let mut b = BytesMut::new();
                 mqttbytes::v4::PingReq
                     .write(&mut b)
@@ -247,6 +327,9 @@ async fn run_session(
                 }
             }
             msg = ws.next() => {
+                if matches!(msg, Some(Ok(_))) {
+                    last_rx = tokio::time::Instant::now();
+                }
                 match msg {
                     Some(Ok(Message::Binary(data))) => {
                         if rx_buf.len() + data.len() > MAX_PACKET_BYTES {
@@ -255,7 +338,7 @@ async fn run_session(
                             ));
                         }
                         rx_buf.extend_from_slice(&data);
-                        drain_packets(&mut rx_buf, sender);
+                        drain_packets(&mut rx_buf, sender, &params.topics)?;
                     }
                     Some(Ok(Message::Ping(p))) => {
                         let _ = ws.send(Message::Pong(p)).await;
@@ -273,16 +356,19 @@ async fn run_session(
 
 /// MQTT 3.1.1 `CONNECT`: clientId `user_<uid>_<rand>`, username `<uid>`,
 /// password `<accessToken>`, clean session, 60 s keep-alive.
-fn connect_packet(p: &MqttParams) -> Connect {
+fn connect_packet(p: &MqttParams) -> Result<Connect, ArloError> {
+    let token = p.token.borrow().clone().ok_or_else(|| {
+        ArloError::AuthError("no access token for MQTT CONNECT (logged out)".into())
+    })?;
     let rand = uuid::Uuid::new_v4().as_u128() % 10_000_000_000;
     let mut c = Connect::new(format!("user_{}_{rand}", p.user_id));
     c.keep_alive = KEEP_ALIVE_SECS;
     c.clean_session = true;
     c.login = Some(Login {
         username: p.user_id.clone(),
-        password: p.access_token.expose_secret().to_string(),
+        password: token.expose_secret().to_string(),
     });
-    c
+    Ok(c)
 }
 
 fn subscribe_packet(topics: &[String]) -> Subscribe {
@@ -290,7 +376,9 @@ fn subscribe_packet(topics: &[String]) -> Subscribe {
         .iter()
         .map(|t| SubscribeFilter::new(t.clone(), QoS::AtMostOnce))
         .collect();
-    Subscribe::new_many(filters)
+    let mut subscribe = Subscribe::new_many(filters);
+    subscribe.pkid = SUBSCRIBE_PKID;
+    subscribe
 }
 
 fn encode<P: MqttWritable>(packet: &P) -> Result<BytesMut, ArloError> {
@@ -346,27 +434,51 @@ where
     Err(ArloError::ScraperError("WSS closed before CONNACK".into()))
 }
 
-/// Decode and route every complete packet currently buffered.
-fn drain_packets(rx_buf: &mut BytesMut, sender: &broadcast::Sender<ArloEvent>) {
+/// Decode and route every complete packet currently buffered. A decode
+/// error ends the session (the stream is desynchronised; a clean
+/// reconnect is the only recovery), and a SUBACK that rejects every
+/// filter is an [`ArloError::AuthError`]: `Connected` with no
+/// subscriptions would deliver nothing, silently.
+fn drain_packets(
+    rx_buf: &mut BytesMut,
+    sender: &broadcast::Sender<ArloEvent>,
+    topics: &[String],
+) -> Result<(), ArloError> {
     loop {
-        match next_packet(rx_buf) {
-            Ok(Some(Packet::Publish(p))) => {
-                info!(topic = %p.topic, bytes = p.payload.len(), "MQTT event received");
+        match next_packet(rx_buf)? {
+            Some(Packet::Publish(p)) => {
+                debug!(topic = ?p.topic, bytes = p.payload.len(), "MQTT event received");
                 match std::str::from_utf8(&p.payload) {
                     Ok(json) => dispatch_payload(json, sender),
-                    Err(_) => warn!(topic = %p.topic, "non-UTF8 MQTT payload; dropped"),
+                    Err(_) => warn!(topic = ?p.topic, "non-UTF8 MQTT payload; dropped"),
                 }
             }
-            Ok(Some(Packet::SubAck(ack))) => {
-                info!(codes = ?ack.return_codes, "MQTT SUBACK");
+            Some(Packet::SubAck(ack)) => {
+                if ack.pkid != SUBSCRIBE_PKID {
+                    warn!(pkid = ack.pkid, "SUBACK for a packet id we never sent");
+                }
+                let rejected: Vec<&str> = ack
+                    .return_codes
+                    .iter()
+                    .zip(topics)
+                    .filter(|(code, _)| matches!(code, SubscribeReasonCode::Failure))
+                    .map(|(_, topic)| topic.as_str())
+                    .collect();
+                if !rejected.is_empty() {
+                    warn!(?rejected, "broker rejected MQTT subscriptions");
+                }
+                if !ack.return_codes.is_empty() && rejected.len() == ack.return_codes.len() {
+                    return Err(ArloError::AuthError(
+                        "broker rejected every MQTT subscription".into(),
+                    ));
+                }
+                info!(
+                    granted = ack.return_codes.len() - rejected.len(),
+                    "MQTT SUBACK"
+                );
             }
-            Ok(Some(_)) => {}  // PingResp / etc. — nothing to route
-            Ok(None) => break, // need more bytes
-            Err(e) => {
-                error!(error = %e, "MQTT decode error; clearing buffer");
-                rx_buf.clear();
-                break;
-            }
+            Some(_) => {}          // PingResp / etc. — nothing to route
+            None => return Ok(()), // need more bytes
         }
     }
 }
@@ -388,7 +500,7 @@ mod tests {
         MqttParams {
             mqtt_url: "wss://mqtt-cluster-z1-1.arloxcld.com:8084".into(),
             user_id: "UXXX-000-00000000".into(),
-            access_token: SecretString::from("TOK"),
+            token: watch::channel(Some(SecretString::from("TOK"))).1,
             topics: vec![
                 "d/A0A0000YA0D00/out/#".into(),
                 "u/UXXX-000-00000000/in/#".into(),
@@ -398,7 +510,7 @@ mod tests {
 
     #[test]
     fn connect_packet_matches_web_client_shape() {
-        let c = connect_packet(&params());
+        let c = connect_packet(&params()).expect("token present");
         assert!(c.client_id.starts_with("user_UXXX-000-00000000_"));
         assert!(c.clean_session);
         assert_eq!(c.keep_alive, 60);
@@ -409,7 +521,7 @@ mod tests {
 
     #[test]
     fn connect_packet_round_trips_through_mqtt_codec() {
-        let mut buf = encode(&connect_packet(&params())).expect("encode");
+        let mut buf = encode(&connect_packet(&params()).expect("token present")).expect("encode");
         // First byte 0x10 = CONNECT control packet.
         assert_eq!(buf[0] & 0xF0, 0x10);
         let pkt = mqttbytes::v4::read(&mut buf, MAX_PACKET_BYTES).expect("decode");
@@ -441,7 +553,7 @@ mod tests {
         publish.write(&mut buf).expect("encode publish");
 
         let (tx, mut rx) = broadcast::channel::<ArloEvent>(8);
-        drain_packets(&mut buf, &tx);
+        drain_packets(&mut buf, &tx, &[]).expect("drains cleanly");
 
         let ev = rx.try_recv().expect("an event was routed");
         assert_eq!(ev.action, "is");
@@ -627,7 +739,7 @@ mod handshake_timeout_tests {
         MqttParams {
             mqtt_url: "wss://mqtt-cluster-z1-1.arloxcld.com:8084".into(),
             user_id: "UXXX-000-00000000".into(),
-            access_token: "TOK".to_string().into(),
+            token: watch::channel(Some(SecretString::from("TOK"))).1,
             topics: vec!["u/UXXX-000-00000000/in/#".into()],
         }
     }
@@ -648,5 +760,154 @@ mod handshake_timeout_tests {
         assert!(matches!(err, ArloError::Timeout(_)), "{err}");
         assert_eq!(ws.connects().len(), 1);
         assert_eq!(*state_rx.borrow(), ConnectionState::Connecting);
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+    use crate::client::ws::test_support::MockWsConnector;
+    use mqttbytes::v4::{ConnAck, ConnectReturnCode, SubAck};
+
+    fn packet_bytes(
+        write: impl FnOnce(&mut BytesMut) -> Result<usize, mqttbytes::Error>,
+    ) -> Message {
+        let mut b = BytesMut::new();
+        write(&mut b).expect("SAFETY: test packet encodes");
+        Message::Binary(b.freeze())
+    }
+
+    fn params_with(token: watch::Receiver<Option<SecretString>>) -> MqttParams {
+        MqttParams {
+            mqtt_url: "wss://mqtt-cluster-z1-1.arloxcld.com:8084".into(),
+            user_id: "UXXX-000-00000000".into(),
+            token,
+            topics: vec![
+                "u/UXXX-000-00000000/in/#".into(),
+                "d/X/out/basestation/#".into(),
+            ],
+        }
+    }
+
+    #[test]
+    fn connect_packet_reads_the_latest_token_and_refuses_when_logged_out() {
+        let (tx, rx) = watch::channel(Some(SecretString::from("TOK")));
+        let p = params_with(rx);
+        assert_eq!(connect_packet(&p).unwrap().login.unwrap().password, "TOK");
+        tx.send_replace(Some(SecretString::from("TOK-2")));
+        assert_eq!(connect_packet(&p).unwrap().login.unwrap().password, "TOK-2");
+        tx.send_replace(None);
+        assert!(matches!(connect_packet(&p), Err(ArloError::AuthError(_))));
+    }
+
+    #[test]
+    fn subscribe_packet_has_a_nonzero_packet_id() {
+        assert_eq!(
+            subscribe_packet(&["d/X/out/#".to_string()]).pkid,
+            SUBSCRIBE_PKID
+        );
+    }
+
+    #[test]
+    fn backoff_grows_with_jitter_and_caps() {
+        for _ in 0..20 {
+            let first = next_backoff(0);
+            assert!(
+                first >= Duration::from_secs(4) && first <= Duration::from_secs(6),
+                "{first:?}"
+            );
+            assert!(next_backoff(BACKOFF_CAP_FAILURES) <= RECONNECT_BACKOFF_MAX);
+            assert!(next_backoff(u32::MAX) <= RECONNECT_BACKOFF_MAX);
+        }
+        assert!(next_backoff(3) > next_backoff(0) * 3);
+    }
+
+    #[test]
+    fn drain_fails_the_session_when_every_filter_is_rejected_or_bytes_are_garbage() {
+        let (tx, _rx) = broadcast::channel(8);
+        let topics = vec!["a/#".to_string(), "b/#".to_string()];
+        let mut buf = BytesMut::new();
+        SubAck::new(
+            SUBSCRIBE_PKID,
+            vec![SubscribeReasonCode::Failure, SubscribeReasonCode::Failure],
+        )
+        .write(&mut buf)
+        .unwrap();
+        assert!(matches!(
+            drain_packets(&mut buf, &tx, &topics),
+            Err(ArloError::AuthError(_))
+        ));
+
+        let mut buf = BytesMut::new();
+        SubAck::new(
+            SUBSCRIBE_PKID,
+            vec![
+                SubscribeReasonCode::Success(QoS::AtMostOnce),
+                SubscribeReasonCode::Failure,
+            ],
+        )
+        .write(&mut buf)
+        .unwrap();
+        assert!(
+            drain_packets(&mut buf, &tx, &topics).is_ok(),
+            "one granted filter keeps the session"
+        );
+
+        // Reserved packet type 15 with a complete (zero) remaining length.
+        let mut garbage = BytesMut::from(&[0xF0u8, 0x00][..]);
+        assert!(
+            drain_packets(&mut garbage, &tx, &topics).is_err(),
+            "decode error ends the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_connack_is_an_auth_error() {
+        let ws = Arc::new(MockWsConnector::new());
+        ws.script(vec![packet_bytes(|b| {
+            ConnAck::new(ConnectReturnCode::NotAuthorized, false).write(b)
+        })]);
+        ws.release();
+        let (sender, _rx) = broadcast::channel(8);
+        let (state_tx, _state_rx) = watch::channel(ConnectionState::Connecting);
+        let p = params_with(watch::channel(Some(SecretString::from("stale"))).1);
+        let err = run_session(&p, ws.as_ref(), &sender, &state_tx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ArloError::AuthError(_)), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_half_open_socket_is_noticed_by_the_idle_deadline() {
+        let ws = Arc::new(MockWsConnector::new());
+        ws.script_then_hang(vec![
+            packet_bytes(|b| ConnAck::new(ConnectReturnCode::Success, false).write(b)),
+            packet_bytes(|b| {
+                SubAck::new(
+                    SUBSCRIBE_PKID,
+                    vec![SubscribeReasonCode::Success(QoS::AtMostOnce); 2],
+                )
+                .write(b)
+            }),
+        ]);
+        ws.release();
+        let (sender, _rx) = broadcast::channel(8);
+        let (state_tx, state_rx) = watch::channel(ConnectionState::Connecting);
+        let p = params_with(watch::channel(Some(SecretString::from("TOK"))).1);
+        let started = tokio::time::Instant::now();
+        run_session(&p, ws.as_ref(), &sender, &state_tx)
+            .await
+            .expect("idle deadline ends the session cleanly");
+        assert_eq!(
+            *state_rx.borrow(),
+            ConnectionState::Connected,
+            "it did connect"
+        );
+        assert!(started.elapsed() >= IDLE_TIMEOUT, "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < IDLE_TIMEOUT + PING_INTERVAL * 2,
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

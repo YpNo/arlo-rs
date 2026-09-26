@@ -213,15 +213,14 @@ impl ArloClient {
     pub async fn events(&self) -> Result<&EventBus, ArloError> {
         self.event_bus
             .get_or_try_init(|| async {
-                let access_token = self
-                    .auth
-                    .token()
-                    .ok_or_else(|| {
-                        ArloError::AuthError(
-                            "Cannot start event bus without an active session".into(),
-                        )
-                    })?
-                    .to_string();
+                if !self.auth.has_token() {
+                    return Err(ArloError::AuthError(
+                        "Cannot start event bus without an active session".into(),
+                    ));
+                }
+                // A watch, not a copy: after a re-authentication the next
+                // CONNECT carries the new token.
+                let token = self.auth.token_rx();
                 let user_id = self.auth.user_id.clone().ok_or_else(|| {
                     ArloError::AuthError("event bus requires an authenticated userId".into())
                 })?;
@@ -258,7 +257,7 @@ impl ArloClient {
                     MqttParams {
                         mqtt_url,
                         user_id,
-                        access_token: access_token.into(),
+                        token,
                         topics,
                     },
                     Arc::clone(&self.ws),

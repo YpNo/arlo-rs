@@ -329,6 +329,7 @@ pub(crate) async fn apply_session_cache(client: &mut ArloClient, path: &str) {
             device_id,
             cache_path: Some(path.to_string()),
             cookies,
+            token_tx: tokio::sync::watch::channel(None).0,
         };
         return;
     }

@@ -27,6 +27,7 @@ use crate::error::ArloError;
 use crate::models::events::ArloEvent;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
+use tracing::warn;
 
 /// Default capacity of the broadcast channel. Slow consumers exceeding
 /// this backlog observe `RecvError::Lagged` and skip ahead.
@@ -99,13 +100,25 @@ impl Drop for EventBus {
 /// broadcast channel. Accepts both single-event objects and arrays
 /// (Arlo batches occasionally). Shared with the listener in [`mqtt`].
 fn dispatch_payload(payload: &str, sender: &broadcast::Sender<ArloEvent>) {
-    if let Ok(event) = serde_json::from_str::<ArloEvent>(payload) {
-        let _ = sender.send(event);
-        return;
-    }
-    if let Ok(events) = serde_json::from_str::<Vec<ArloEvent>>(payload) {
-        for event in events {
-            let _ = sender.send(event);
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, bytes = payload.len(), "unparseable MQTT event payload; dropped");
+            return;
+        }
+    };
+    let items = match value {
+        serde_json::Value::Array(items) => items,
+        single => vec![single],
+    };
+    // Element by element: one malformed event in a batch must not cost
+    // its siblings, and schema drift must be visible in the log.
+    for item in items {
+        match serde_json::from_value::<ArloEvent>(item) {
+            Ok(event) => {
+                let _ = sender.send(event);
+            }
+            Err(e) => warn!(error = %e, "MQTT event did not match ArloEvent; dropped"),
         }
     }
 }
@@ -165,5 +178,24 @@ mod tests {
         tx.send(ConnectionState::Connecting).unwrap();
         rx.changed().await.unwrap();
         assert_eq!(*rx.borrow(), ConnectionState::Connecting);
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn a_bad_batch_element_does_not_drop_its_siblings() {
+        let (tx, mut rx) = broadcast::channel::<ArloEvent>(8);
+        dispatch_payload(
+            r#"[{"action":"is","resource":"cameras/C1"},{"nonsense":true},{"action":"is","resource":"cameras/C3"}]"#,
+            &tx,
+        );
+        assert_eq!(rx.try_recv().unwrap().resource, "cameras/C1");
+        assert_eq!(rx.try_recv().unwrap().resource, "cameras/C3");
+        assert!(rx.try_recv().is_err());
+        dispatch_payload("not json", &tx);
+        assert!(rx.try_recv().is_err());
     }
 }

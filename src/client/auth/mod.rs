@@ -26,6 +26,7 @@ use crate::client::ArloClient;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use tokio::sync::watch;
 use tracing::{debug, instrument, warn};
 
 /// Internal credentials caching layer.
@@ -34,7 +35,7 @@ use tracing::{debug, instrument, warn};
 /// mimicking the telemetry logged by single-page Arlo Web Dashboards. The
 /// access token is held in a `SecretString` so it isn't accidentally
 /// formatted via `Debug` and is zeroized on drop.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AuthManager {
     /// Optional OAuth token, populated after successful MFA validations.
     pub(crate) access_token: Option<SecretString>,
@@ -50,6 +51,16 @@ pub struct AuthManager {
     /// [`crate::HttpTransport::import_cookies`]. Secret because the jar
     /// carries session-bearing values.
     pub(crate) cookies: Option<SecretString>,
+    /// Publishes every token change so long-lived consumers (the MQTT
+    /// event bus) can pick up a re-authenticated token on their next
+    /// connect instead of retrying a revoked one forever.
+    pub(crate) token_tx: watch::Sender<Option<SecretString>>,
+}
+
+impl Default for AuthManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -126,6 +137,7 @@ impl AuthManager {
             // Generate a random UUID for the device
             device_id: uuid::Uuid::new_v4().to_string(),
             cache_path: None,
+            token_tx: watch::channel(None).0,
             cookies: None,
         }
     }
@@ -145,11 +157,19 @@ impl AuthManager {
     /// zeroized by `secrecy`'s `ZeroizeOnDrop`).
     pub(crate) fn set_token(&mut self, token: String) {
         self.access_token = Some(SecretString::from(token));
+        self.token_tx.send_replace(self.access_token.clone());
+    }
+
+    /// A watch on the access token: `None` while logged out, updated on
+    /// every [`Self::set_token`] / [`Self::clear_token`].
+    pub(crate) fn token_rx(&self) -> watch::Receiver<Option<SecretString>> {
+        self.token_tx.subscribe()
     }
 
     /// Drops the held access token (zeroized by `secrecy`).
     pub(crate) fn clear_token(&mut self) {
         self.access_token = None;
+        self.token_tx.send_replace(None);
     }
 
     /// Loads the authentication state from a JSON file path if it exists
@@ -167,13 +187,17 @@ impl AuthManager {
             }
         };
         match serde_json::from_str::<AuthCacheSchema>(&contents) {
-            Ok(schema) => Some(Self {
-                access_token: schema.access_token.map(SecretString::from),
-                user_id: schema.user_id,
-                device_id: schema.device_id,
-                cache_path: Some(path.to_string()),
-                cookies: schema.cookies.map(SecretString::from),
-            }),
+            Ok(schema) => {
+                let access_token = schema.access_token.map(SecretString::from);
+                Some(Self {
+                    token_tx: watch::channel(access_token.clone()).0,
+                    access_token,
+                    user_id: schema.user_id,
+                    device_id: schema.device_id,
+                    cache_path: Some(path.to_string()),
+                    cookies: schema.cookies.map(SecretString::from),
+                })
+            }
             Err(e) => {
                 warn!(
                     %path,
