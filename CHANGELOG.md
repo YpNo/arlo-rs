@@ -259,6 +259,11 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   `get_baseline` and `fetch_otp` run under an overall wall-clock budget
   (45 s / 90 s) instead of a per-poll check that let per-command timeouts
   add up to minutes. `delete_after_read` uses `UID STORE`.
+- A session cache that holds only the trusted-browser identity (what
+  `logout()` leaves behind: `device_id` + cookies, no token) is restored
+  without a round trip; it used to be validated against Arlo, which
+  answered the token-less `session/v3` GET with a 400 and a misleading
+  "could not be validated" warning at every start after a logout.
 - The session cache is written through a sibling temp file (created
   `0600`, permissions tightened explicitly, fsynced) and renamed into
   place: never observable half-written, and a pre-existing cache with

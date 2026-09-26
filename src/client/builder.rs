@@ -299,6 +299,17 @@ pub(crate) async fn apply_session_cache(client: &mut ArloClient, path: &str) {
         let device_id = cached.device_id.clone();
         let cookies = cached.cookies.clone();
         client.auth = cached;
+        // After `logout()` the cache keeps only the trusted-browser identity
+        // (device_id + cookies). There is nothing to validate — a session
+        // GET without a token is just a 400 from Arlo — and that identity is
+        // exactly what lets the next login skip the OTP.
+        if !client.auth.has_token() {
+            info!(
+                %path,
+                "Restored trusted-browser identity from cache (no session token); login will re-validate"
+            );
+            return;
+        }
         match client.validate_session_v3().await {
             Ok(_) => {
                 info!(%path, "Restored active Arlo session from cache");
@@ -394,6 +405,30 @@ mod tests {
     use crate::client::transport::test_support::MockTransport;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn apply_session_cache_with_identity_only_makes_no_request() {
+        // A cache written by `logout()`: device_id + cookies, no token.
+        let mock = Arc::new(MockTransport::new());
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_str().unwrap().to_string();
+        let mut seeder = AuthManager::new();
+        seeder.cache_path = Some(path.clone());
+        let device_id = seeder.device_id.clone();
+        seeder.save_to_cache().await;
+
+        let mut client = mocked_client(Arc::clone(&mock));
+        apply_session_cache(&mut client, &path).await;
+
+        assert!(mock.calls().is_empty(), "no session GET without a token");
+        assert!(!client.is_authenticated());
+        assert_eq!(
+            client.device_id(),
+            device_id,
+            "trusted-browser identity kept"
+        );
+        assert_eq!(client.auth.cache_path.as_deref(), Some(path.as_str()));
+    }
 
     #[tokio::test]
     async fn apply_session_cache_restores_validated_session_from_disk() {
