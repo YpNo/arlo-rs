@@ -247,6 +247,18 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   before reassembly, and the ambient-history decoder caps its base64
   input (1 MiB) and inflated output (4 MiB). The envelope unwrapper moves
   `data` out instead of cloning the whole body.
+- The IMAP OTP fetcher no longer trusts the mailbox. The `FROM "arlo.com"`
+  search key is a substring match, so the `From:` address of each
+  candidate is now parsed and required to be under `arlo.com` (display
+  names ignored) — checked from a headers-only `BODY.PEEK` before any body
+  is downloaded. Candidates are selected by UID (stable across EXPUNGE,
+  newest first) and the UID is verified on every FETCH; a message that is
+  not Arlo's, larger than 512 KiB or declaring more than 16 MIME parts
+  (`mailparse` recursion is unbounded) is skipped, not submitted. A failed
+  baseline SEARCH is an error rather than an empty baseline, and both
+  `get_baseline` and `fetch_otp` run under an overall wall-clock budget
+  (45 s / 90 s) instead of a per-poll check that let per-command timeouts
+  add up to minutes. `delete_after_read` uses `UID STORE`.
 - Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
   (RUSTSEC-2026-0285, TLS 1.3 handshake across encryption levels) and
   `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);

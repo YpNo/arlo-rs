@@ -17,17 +17,34 @@ use crate::error::ArloError;
 use imap_client::credentials::Password;
 use imap_client::flags::{Flag, StoreAction};
 use imap_client::search::{SearchKey, SearchQuery};
-use mailparse::ParsedMail;
+use mailparse::{MailAddr, MailHeaderMap, ParsedMail};
 use regex_lite::Regex;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Duration;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 /// Maximum time we wait for the Arlo OTP email to land in the inbox.
 const OTP_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Delay between mailbox searches while waiting for the OTP email.
 const OTP_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Wall-clock budget for one whole [`fetch_otp`] call — connect, login,
+/// polling and fetch. Every IMAP command has its own 30 s timeout in the
+/// client crate, so without this the worst case is minutes, not 30 s.
+const OTP_TOTAL_BUDGET: Duration = Duration::from_secs(90);
+/// Same for [`get_baseline`], which is a connect, a login and one search.
+const BASELINE_BUDGET: Duration = Duration::from_secs(45);
+
+/// Domain Arlo's one-time-code mail is sent from. The IMAP `FROM` search
+/// key is only a substring match on the header, so the address is
+/// re-checked here: the domain must be exactly this or a subdomain.
+const OTP_SENDER_DOMAIN: &str = "arlo.com";
+/// Largest message a candidate may be; Arlo's code mails are tens of KB.
+const MAX_OTP_MAIL_BYTES: usize = 512 * 1024;
+/// Most `multipart/` parts a candidate may declare. `mailparse` recurses
+/// once per part with no depth limit of its own, so a planted message
+/// with thousands of nested parts would overflow the stack.
+const MAX_OTP_MAIL_PARTS: usize = 16;
 
 /// Arlo formats the OTP inside an `<h1>` block. Match exactly 6 digits there.
 static OTP_RE_H1: LazyLock<Regex> = LazyLock::new(|| {
@@ -112,19 +129,105 @@ fn require_credentials(config: &ImapConfig) -> Result<(String, String), ArloErro
 }
 
 /// Build the `UNSEEN FROM "arlo.com"` search predicate used both at baseline
-/// capture and during OTP polling.
+/// capture and during OTP polling. `FROM` is a substring match, so it is
+/// only a coarse filter; [`sender_is_arlo`] is the real check.
 fn arlo_unseen_query() -> SearchQuery {
     SearchQuery::new(SearchKey::And(vec![
         SearchKey::Unseen,
-        SearchKey::From("arlo.com".into()),
+        SearchKey::From(OTP_SENDER_DOMAIN.into()),
     ]))
 }
 
-/// Captures the baseline set of UNSEEN Arlo emails *before* the API dispatch
-/// is triggered. Without this, a race exists where the Arlo email arrives
-/// faster than we can connect, and we'd return an OTP we already had.
-#[instrument(skip(config))]
-pub async fn get_baseline(config: &ImapConfig) -> Result<HashSet<u32>, ArloError> {
+/// True when `addr` (`local@domain`) is under [`OTP_SENDER_DOMAIN`].
+fn sender_domain_ok(addr: &str) -> bool {
+    let Some((_, domain)) = addr.rsplit_once('@') else {
+        return false;
+    };
+    let d = domain.trim_end_matches('.').to_ascii_lowercase();
+    d == OTP_SENDER_DOMAIN || d.ends_with(&format!(".{OTP_SENDER_DOMAIN}"))
+}
+
+/// True when every address in a `From:` header value is Arlo's. The
+/// display name is ignored on purpose: `"arlo.com" <x@evil.example>` is
+/// exactly the spoof the IMAP substring search lets through.
+fn sender_is_arlo(from_header: &str) -> bool {
+    let Ok(list) = mailparse::addrparse(from_header) else {
+        return false;
+    };
+    let mut seen_any = false;
+    for entry in list.iter() {
+        match entry {
+            MailAddr::Single(single) => {
+                seen_any = true;
+                if !sender_domain_ok(&single.addr) {
+                    return false;
+                }
+            }
+            MailAddr::Group(group) => {
+                for single in &group.addrs {
+                    seen_any = true;
+                    if !sender_domain_ok(&single.addr) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    seen_any
+}
+
+/// Sender check on a raw header block (or a whole message).
+fn header_block_is_from_arlo(raw: &[u8]) -> bool {
+    mailparse::parse_mail(raw)
+        .ok()
+        .and_then(|m| m.headers.get_first_value("From"))
+        .is_some_and(|from| sender_is_arlo(&from))
+}
+
+/// Size and nesting bounds a message must satisfy before it is parsed.
+fn mail_within_bounds(raw: &[u8]) -> bool {
+    if raw.len() > MAX_OTP_MAIL_BYTES {
+        return false;
+    }
+    let needle = b"multipart/";
+    let parts = raw
+        .windows(needle.len())
+        .filter(|w| w.eq_ignore_ascii_case(needle))
+        .count();
+    parts <= MAX_OTP_MAIL_PARTS
+}
+
+/// UIDs present now but not at baseline, newest first. UIDs are assigned
+/// in arrival order, so the largest is the most recent mail.
+fn newest_first(current: &HashSet<u32>, baseline: &HashSet<u32>) -> Vec<u32> {
+    let mut fresh: Vec<u32> = current.difference(baseline).copied().collect();
+    fresh.sort_unstable_by(|a, b| b.cmp(a));
+    fresh
+}
+
+/// Maps a UID to its current sequence number from a `SEARCH` and a
+/// `UID SEARCH` of the same query issued back to back: both lists are in
+/// mailbox order, so the i-th entries correspond. `None` when the lists
+/// disagree in length (a renumbering happened in between) or the UID is
+/// gone; the caller then re-searches.
+fn seq_for_uid(seqs: &[u32], uids: &[u32], uid: u32) -> Option<u32> {
+    if seqs.len() != uids.len() {
+        return None;
+    }
+    let mut seqs = seqs.to_vec();
+    seqs.sort_unstable();
+    let mut sorted_uids = uids.to_vec();
+    sorted_uids.sort_unstable();
+    let i = sorted_uids.iter().position(|&u| u == uid)?;
+    seqs.get(i).copied()
+}
+
+async fn open_inbox(
+    config: &ImapConfig,
+) -> Result<
+    imap_client::session::Session<imap_client::session::Selected, imap_client::Tls>,
+    ArloError,
+> {
     let (host, port) = resolve_host_and_port(config)?;
     let (username, password) = require_credentials(config)?;
 
@@ -137,15 +240,33 @@ pub async fn get_baseline(config: &ImapConfig) -> Result<HashSet<u32>, ArloError
         .await
         .map_err(|e| ArloError::AuthError(format!("IMAP login failed: {e}")))?;
 
-    let mut selected = auth
-        .select("INBOX")
+    auth.select("INBOX")
         .await
-        .map_err(|e| ArloError::AuthError(format!("Failed to select INBOX: {e}")))?;
+        .map_err(|e| ArloError::AuthError(format!("Failed to select INBOX: {e}")))
+}
 
-    let baseline: HashSet<u32> = selected
-        .search(arlo_unseen_query())
+/// Captures the baseline set of UNSEEN Arlo emails (by UID) *before* the
+/// API dispatch is triggered. Without this, a race exists where the Arlo
+/// email arrives faster than we can connect, and we'd return an OTP we
+/// already had. A failed search is an error, not an empty baseline: an
+/// empty baseline would make every old code look new.
+#[instrument(skip(config))]
+pub async fn get_baseline(config: &ImapConfig) -> Result<HashSet<u32>, ArloError> {
+    tokio::time::timeout(BASELINE_BUDGET, get_baseline_inner(config))
         .await
-        .unwrap_or_default()
+        .map_err(|_| {
+            ArloError::Timeout(format!(
+                "IMAP baseline capture exceeded {BASELINE_BUDGET:?}"
+            ))
+        })?
+}
+
+async fn get_baseline_inner(config: &ImapConfig) -> Result<HashSet<u32>, ArloError> {
+    let mut selected = open_inbox(config).await?;
+    let baseline: HashSet<u32> = selected
+        .uid_search(arlo_unseen_query())
+        .await
+        .map_err(|e| ArloError::AuthError(format!("IMAP baseline SEARCH failed: {e}")))?
         .into_iter()
         .collect();
 
@@ -157,64 +278,114 @@ pub async fn get_baseline(config: &ImapConfig) -> Result<HashSet<u32>, ArloError
 
 /// Polls the inbox until a new Arlo email lands, then extracts and returns
 /// the 6-digit OTP. Optionally flags-and-expunges the message after read.
+///
+/// Candidates are examined newest first; a message whose `From:` address
+/// is not Arlo's, or that is too large or too deeply nested, is skipped
+/// (and not re-examined), so a third party mailing the inbox during the
+/// window cannot choose the code that gets submitted.
 #[instrument(skip(config, baseline_set))]
 pub async fn fetch_otp(
     config: &ImapConfig,
     baseline_set: HashSet<u32>,
 ) -> Result<String, ArloError> {
-    let (host, port) = resolve_host_and_port(config)?;
-    let (username, password) = require_credentials(config)?;
+    tokio::time::timeout(OTP_TOTAL_BUDGET, fetch_otp_inner(config, baseline_set))
+        .await
+        .map_err(|_| ArloError::Timeout(format!("IMAP OTP fetch exceeded {OTP_TOTAL_BUDGET:?}")))?
+}
+
+async fn fetch_otp_inner(
+    config: &ImapConfig,
+    mut baseline_set: HashSet<u32>,
+) -> Result<String, ArloError> {
     let delete_after_read = config.delete_after_read.unwrap_or(false);
-
-    let unauth = imap_tls::connect_tls(&host, port)
-        .await
-        .map_err(|e| ArloError::AuthError(format!("IMAP TLS connect failed: {e}")))?;
-
-    let auth = unauth
-        .login(&username, Password::new(password))
-        .await
-        .map_err(|e| ArloError::AuthError(format!("IMAP login failed: {e}")))?;
-
-    let mut selected = auth
-        .select("INBOX")
-        .await
-        .map_err(|e| ArloError::AuthError(format!("Failed to select INBOX: {e}")))?;
+    let mut selected = open_inbox(config).await?;
 
     // Wait for a fresh Arlo email — anything not already in the baseline.
     let deadline = tokio::time::Instant::now() + OTP_FETCH_TIMEOUT;
-    let new_seq = loop {
+    let (uid, body_bytes) = loop {
         // Force a session refresh (essential for Gmail to see new mail in an open session).
         let _ = selected.noop().await;
 
         let current: HashSet<u32> = selected
-            .search(arlo_unseen_query())
+            .uid_search(arlo_unseen_query())
             .await
             .map_err(|e| ArloError::AuthError(format!("IMAP SEARCH failed: {e}")))?
             .into_iter()
             .collect();
 
-        let new_seqs: Vec<u32> = current.difference(&baseline_set).copied().collect();
-        if let Some(&max) = new_seqs.iter().max() {
-            break max;
+        let mut accepted = None;
+        for uid in newest_first(&current, &baseline_set) {
+            // UID -> sequence number, resolved immediately before use and
+            // verified on the FETCH reply, so an EXPUNGE elsewhere cannot
+            // make us read a different message.
+            let seqs = selected
+                .search(arlo_unseen_query())
+                .await
+                .map_err(|e| ArloError::AuthError(format!("IMAP SEARCH failed: {e}")))?;
+            let uids = selected
+                .uid_search(arlo_unseen_query())
+                .await
+                .map_err(|e| ArloError::AuthError(format!("IMAP SEARCH failed: {e}")))?;
+            let Some(seq) = seq_for_uid(&seqs, &uids, uid) else {
+                debug!(uid, "mailbox renumbered mid-poll; re-searching");
+                continue;
+            };
+
+            // Headers only (PEEK keeps it unseen): decide on the sender
+            // before downloading a body a stranger controls.
+            let head = selected
+                .fetch(&seq.to_string(), "(UID BODY.PEEK[HEADER])")
+                .await
+                .map_err(|e| ArloError::AuthError(format!("IMAP FETCH failed: {e}")))?;
+            let Some(headers) = head
+                .into_iter()
+                .find(|f| f.uid == Some(uid))
+                .and_then(|f| f.body)
+            else {
+                debug!(uid, "FETCH returned a different message; re-searching");
+                continue;
+            };
+            if !header_block_is_from_arlo(&headers) {
+                warn!(uid, "ignoring unseen mail: From address is not Arlo's");
+                baseline_set.insert(uid);
+                continue;
+            }
+
+            let full = selected
+                .fetch(&seq.to_string(), "(UID RFC822)")
+                .await
+                .map_err(|e| ArloError::AuthError(format!("IMAP FETCH failed: {e}")))?;
+            let Some(body) = full
+                .into_iter()
+                .find(|f| f.uid == Some(uid))
+                .and_then(|f| f.body)
+            else {
+                debug!(uid, "FETCH returned a different message; re-searching");
+                continue;
+            };
+            if !mail_within_bounds(&body) {
+                warn!(
+                    uid,
+                    bytes = body.len(),
+                    "ignoring unseen mail: too large or too deeply nested to be Arlo's"
+                );
+                baseline_set.insert(uid);
+                continue;
+            }
+            accepted = Some((uid, body));
+            break;
+        }
+        if let Some(found) = accepted {
+            break found;
         }
 
         if tokio::time::Instant::now() >= deadline {
-            return Err(ArloError::AuthError(
-                "Timed out waiting for Arlo MFA email (30s)".into(),
-            ));
+            return Err(ArloError::AuthError(format!(
+                "Timed out waiting for Arlo MFA email ({OTP_FETCH_TIMEOUT:?})"
+            )));
         }
         tokio::time::sleep(OTP_POLL_INTERVAL).await;
     };
-
-    let fetched = selected
-        .fetch(&new_seq.to_string(), "RFC822")
-        .await
-        .map_err(|e| ArloError::AuthError(format!("IMAP FETCH failed: {e}")))?;
-
-    let body_bytes = fetched
-        .into_iter()
-        .find_map(|f| f.body)
-        .ok_or_else(|| ArloError::AuthError("Empty IMAP email body".into()))?;
 
     let parsed = mailparse::parse_mail(&body_bytes)
         .map_err(|e| ArloError::AuthError(format!("MIME parsing failed: {e}")))?;
@@ -228,11 +399,11 @@ pub async fn fetch_otp(
     })?;
 
     if delete_after_read {
-        let _ = selected
-            .store(&new_seq.to_string(), StoreAction::Add, &[Flag::Deleted])
+        selected
+            .uid_store(&uid.to_string(), StoreAction::Add, &[Flag::Deleted])
             .await
             .map_err(|e| ArloError::AuthError(format!("Failed to flag for deletion: {e}")))?;
-        let _ = selected
+        selected
             .expunge()
             .await
             .map_err(|e| ArloError::AuthError(format!("Failed to expunge INBOX: {e}")))?;
@@ -386,5 +557,66 @@ mod tests {
             delete_after_read: None,
         };
         assert!(resolve_host_and_port(&cfg).is_err());
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+
+    #[test]
+    fn sender_check_ignores_display_names_and_lookalike_domains() {
+        for ok in [
+            "Arlo <do_not_reply@arlo.com>",
+            "noreply@mail.arlo.com",
+            "\"Arlo Support\" <support@ARLO.COM>",
+        ] {
+            assert!(sender_is_arlo(ok), "{ok}");
+        }
+        for bad in [
+            "\"arlo.com\" <x@evil.example>",
+            "Arlo <x@arlo.com.evil.example>",
+            "Arlo <x@notarlo.com>",
+            "Arlo <do_not_reply@arlo.com>, Eve <e@evil.example>",
+            "",
+            "not an address",
+        ] {
+            assert!(!sender_is_arlo(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn header_block_check_reads_the_from_header() {
+        let ok = b"From: Arlo <do_not_reply@arlo.com>\r\nSubject: code\r\n\r\n";
+        assert!(header_block_is_from_arlo(ok));
+        let spoof = b"From: \"do_not_reply@arlo.com\" <x@evil.example>\r\nSubject: code\r\n\r\n";
+        assert!(!header_block_is_from_arlo(spoof));
+        assert!(!header_block_is_from_arlo(b"Subject: no sender\r\n\r\n"));
+    }
+
+    #[test]
+    fn bounds_reject_oversized_and_over_nested_messages() {
+        assert!(mail_within_bounds(b"From: a@arlo.com\r\n\r\nbody"));
+        assert!(!mail_within_bounds(&vec![b'x'; MAX_OTP_MAIL_BYTES + 1]));
+        let mut nested = b"Content-Type: multipart/mixed; boundary=b\r\n\r\n".to_vec();
+        for _ in 0..MAX_OTP_MAIL_PARTS + 1 {
+            nested.extend_from_slice(b"--b\r\nContent-Type: MULTIPART/mixed; boundary=b\r\n\r\n");
+        }
+        assert!(!mail_within_bounds(&nested));
+    }
+
+    #[test]
+    fn candidates_are_newest_first_and_exclude_baseline() {
+        let baseline: HashSet<u32> = [10, 11].into_iter().collect();
+        let current: HashSet<u32> = [10, 11, 12, 15, 13].into_iter().collect();
+        assert_eq!(newest_first(&current, &baseline), vec![15, 13, 12]);
+    }
+
+    #[test]
+    fn uid_to_sequence_mapping_requires_consistent_lists() {
+        assert_eq!(seq_for_uid(&[3, 7, 9], &[100, 250, 300], 250), Some(7));
+        assert_eq!(seq_for_uid(&[9, 3, 7], &[300, 100, 250], 300), Some(9));
+        assert_eq!(seq_for_uid(&[3, 7], &[100, 250, 300], 250), None);
+        assert_eq!(seq_for_uid(&[3, 7, 9], &[100, 250, 300], 999), None);
     }
 }
