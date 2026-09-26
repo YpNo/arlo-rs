@@ -152,8 +152,8 @@ Handles S3 chunk parsing and media decryption. Arlo video chunks are often encry
 ---
 
 ## 6. Workspace Dependencies
-- **`stealthscraper-rs`** (Local path `../stealthscraper-rs`, branch `chore/p0-lean-dependencies`, v1.0.0): browser profiles, the measured Chrome emulation table and client hints (core, no features); headless Chrome + MITM proxy under its `browser` feature.
-- **`wreq`** (temporary direct dependency, same version/features as `stealthscraper-rs`): the impersonating HTTP client behind `WreqTransport`. Goes away once `stealthscraper-rs` re-exports it.
+- **`stealthscraper-rs` 1.0** (crates.io): browser profiles, the measured Chrome emulation table, client hints and `impersonation_client()` (core, no features); it re-exports `wreq` 6, the impersonating HTTP client behind `WreqTransport` — never depend on `wreq` directly, use `stealthscraper_rs::wreq` so the emulation and the client cannot drift apart. Headless Chrome + MITM proxy under its `browser` feature.
+- **`cookie_store` 0.22** (crates.io): the persistent jar's backing store; `PersistentJar` adapts it to `wreq`'s `CookieStore` trait (`http::Uri` in, `url::Url` inside).
 - **`imap-rs-client` / `imap-rs-tls`** (crates.io): IMAP for MFA automation.
 - **`mqttbytes` 0.6** (crates.io, rumqtt project): MQTT 3.1.1 packet codec for the event bus. Frozen upstream since 2021, `unsafe`-free; kept deliberately — the protocol is frozen too. Vendor the six packet types only if an advisory ever appears.
 

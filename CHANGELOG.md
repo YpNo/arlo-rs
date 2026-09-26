@@ -186,18 +186,20 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   consumers point at `../arlo-rs`.
 
 ### Changed — build reproducibility
-- `stealthscraper-rs` is consumed from the sibling checkout
-  (`../stealthscraper-rs`, v1.0.0) instead of crates.io 0.4.0, which can
-  no longer be resolved from a clean lock: it requires `wreq 5.3.0` and
-  every `wreq 5.x` is yanked. The committed `Cargo.lock` pins the yanked
-  `wreq` on purpose; CI now runs every cargo step with `--locked` so a
-  fresh resolution can never silently break the build. The clippy and doc
-  jobs gained the native BoringSSL build deps (cmake, libclang, nasm, go)
-  they were missing.
-- Against `stealthscraper-rs` 1.0.0 the browser-proxy call sites
-  (`builder.rs`, `transport.rs`) compile unchanged. One silent behavioural
-  change: `BrowserProfile::random()` now presents Chrome 153 instead of
-  124–126.
+- `stealthscraper-rs` is consumed from crates.io at **1.0.0**, which ships
+  on `wreq` 6 and, in its default build, both `impersonation_client()` and
+  a `pub use wreq` re-export. `arlo-rs` therefore has no direct `wreq`
+  dependency any more: the transport is built from
+  `stealthscraper_rs::impersonation_client(&profile)` (emulation,
+  `User-Agent`, `Sec-CH-UA*` and `Accept-Language` from one profile) and
+  `PersistentJar` implements the `wreq` 6 `CookieStore` contract (`Uri`
+  in, one combined `Cookie` field out, on every HTTP version — Chrome does
+  not split cookie pairs). `cookie_store` moved to 0.22.
+- CI runs every cargo step with `--locked` so a fresh resolution can never
+  silently change the build. The clippy and doc jobs gained the native
+  BoringSSL build deps (cmake, libclang, nasm, go) they were missing.
+- One silent behavioural change from the upgrade: `BrowserProfile::random()`
+  now presents Chrome 153 instead of 124–126.
 
 ### Security
 - Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
@@ -205,14 +207,12 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);
   `chacha20` moved off a yanked release; `quinn-proto` 0.11.18
   (RUSTSEC-2026-0185) and `anyhow` 1.0.104 (RUSTSEC-2026-0190) likewise.
-  Two `lru 0.13` unsound advisories (RUSTSEC-2026-0002, -0253) are
-  explicitly ignored in both `deny.toml` and the CI audit flags because
-  `wreq 5.3.0` pins that `lru` line. `deny.toml`'s duplicate-version
-  skip list was rebuilt against the current graph (the old entries named
-  `headless_chrome`, `rquest-util` and `rcgen`, none of which remain).
-  `cargo deny check` passes; the CI audit job denies unmaintained and
-  unsound crates but no longer `--deny warnings`, since the pinned
-  yanked `wreq` would trip it.
+  The two `lru 0.13` unsound advisories (RUSTSEC-2026-0002, -0253) are
+  gone with `wreq` 6 (`lru` 0.18), so `deny.toml` and the CI audit carry
+  no ignores and the audit job is back to `--deny warnings`. `deny.toml`'s
+  duplicate-version skip list was rebuilt against the current graph (the
+  old entries named `headless_chrome`, `rquest-util` and `rcgen`, none of
+  which remain).
 
 ### Fixed
 - `cargo doc` is warning-free again: duplicated one-line outer docs on

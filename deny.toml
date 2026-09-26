@@ -74,11 +74,6 @@ ignore = [
     #{ id = "RUSTSEC-0000-0000", reason = "you can specify a reason the advisory is ignored" },
     #"a-crate-that-is-yanked@0.1.1", # you can also ignore yanked crate versions if you wish
     #{ crate = "a-crate-that-is-yanked@0.1.1", reason = "you can specify why you are ignoring the yanked crate" },
-    # `lru 0.13` is pinned by `wreq 5.3.0` (stealthscraper-rs); the patched
-    # lru needs wreq 6. Mirrored in the CI `cargo audit --ignore` flags —
-    # drop both together when stealthscraper-rs moves to wreq 6.
-    { id = "RUSTSEC-2026-0002", reason = "lru 0.13 IterMut Stacked Borrows — pinned by wreq 5.3.0, fixed lru needs wreq 6" },
-    { id = "RUSTSEC-2026-0253", reason = "lru 0.13 LruCache::pop panic safety — pinned by wreq 5.3.0, fixed lru needs wreq 6" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
@@ -220,13 +215,15 @@ skip = [
     # Duplicate-version allowances, one per older version, each naming the
     # crate that still requires it. Re-derive with
     # `cargo tree --target all -e normal,build,dev -i <crate>@<version>`.
-    { crate = "cpufeatures@0.2.17", reason = "Required by sha1 v0.10 / sha2 v0.10" },
+    { crate = "block-buffer@0.10.4", reason = "Required by digest v0.10 (sha1 v0.10, tungstenite); sha2 v0.11 (stealthscraper-rs) is on digest 0.11" },
+    { crate = "cpufeatures@0.2.17", reason = "Required by sha1 v0.10 (tungstenite); sha2 v0.11 is on cpufeatures 0.3" },
+    { crate = "crypto-common@0.1.7", reason = "Required by digest v0.10 (sha1 v0.10, tungstenite)" },
+    { crate = "digest@0.10.7", reason = "Required by sha1 v0.10 (tungstenite v0.28); sha2 v0.11 (stealthscraper-rs) is on digest 0.11" },
     { crate = "getrandom@0.2.17", reason = "Required by ring v0.17" },
     { crate = "getrandom@0.3.4", reason = "Required by rand_core v0.9 (tungstenite)" },
     { crate = "r-efi@5.3.0", reason = "Required by getrandom v0.3.4" },
     { crate = "rand@0.9.4", reason = "Required by tungstenite v0.28 (stealthscraper-rs is on rand 0.10)" },
     { crate = "rand_core@0.9.5", reason = "Required by rand v0.9.4" },
-    { crate = "socket2@0.5.10", reason = "Required by wreq v5.3.0" },
     { crate = "thiserror@1.0.69", reason = "Required by tokio-socks v0.5" },
     { crate = "thiserror-impl@1.0.69", reason = "Required by tokio-socks v0.5" },
     { crate = "webpki-roots@0.26.11", reason = "Required by tokio-tungstenite (0.28 through 0.30 still pin webpki-roots 0.26); reqwest is on 1.0" },
@@ -237,13 +234,9 @@ skip = [
 # dependencies starting at the specified crate, up to a certain depth, which is
 # by default infinite.
 skip-tree = [
-    # ring v0.17 and socket2 v0.5 (wreq) still sit on the windows-sys 0.52 line,
-    # which drags the whole windows-targets 0.52 arch-crate family along.
-    { crate = "windows-sys@0.52.0", reason = "Required by ring v0.17 and socket2 v0.5 (wreq)" },
-    # reqwest's Windows system-proxy lookup is on the windows-registry 0.5 line
-    # (windows-link 0.1 / windows-result 0.3 / windows-strings 0.4); chrono and
-    # windows-core are on the newer line.
-    { crate = "windows-registry@0.5.3", reason = "Required by reqwest v0.13 (system proxy on Windows)" },
+    # ring v0.17 still sits on the windows-sys 0.52 line, which drags the
+    # whole windows-targets 0.52 arch-crate family along.
+    { crate = "windows-sys@0.52.0", reason = "Required by ring v0.17" },
     # If a crate brings in a whole tree of old dependencies, skip the whole tree
     # { crate = "old-web-framework@0.1.0", reason = "Legacy internal tool" },
 ]

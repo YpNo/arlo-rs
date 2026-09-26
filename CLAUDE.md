@@ -61,7 +61,7 @@
 - **IMAP MFA**: `ImapMfaHandler::prepare()` captures UNSEEN-baseline **before** OTP dispatch. Uses the published `imap-rs-client` / `imap-rs-tls` crates.
 - **Dependencies**: stdlib first — epoch millis come from `client::api::now_millis()` (no `chrono`), patterns from `regex-lite`, cert types from `rustls::pki_types`. `tokio` is on a narrow feature list; do not re-enable `full`. Run `cargo deny check` after any manifest change (the duplicate skip list is curated per crate).
 - **RATLS / Local Hub**: `LocalHubClient` uses a custom rustls `PinnedLeafVerifier` — fails closed on cert mismatch.
-- **Stealth Integrity**: Arlo's Cloudflare gate is TLS/HTTP2-fingerprint only (no JS challenge). `WreqTransport` uses `stealthscraper_rs::emulation::for_kind(profile.browser_kind())` — never build a `wreq` client without that emulation. `BrowserProfile::random()` is selected at bootstrap; the `User-Agent` and `Sec-CH-UA*` hints must always come from the same profile.
+- **Stealth Integrity**: Arlo's Cloudflare gate is TLS/HTTP2-fingerprint only (no JS challenge). `WreqTransport` is built from `stealthscraper_rs::impersonation_client(&profile)` — never build a `wreq` client any other way, and never depend on `wreq` directly (use the `stealthscraper_rs::wreq` re-export so client and emulation cannot drift). `BrowserProfile::random()` is selected at bootstrap; the builder already installs the `User-Agent`, `Sec-CH-UA*` and `Accept-Language` defaults from that same profile, and per-request headers from the orchestration layer win over them.
 
 <!-- rtk-instructions v2 -->
 ## RTK (Rust Token Killer) - Token-Optimized Commands

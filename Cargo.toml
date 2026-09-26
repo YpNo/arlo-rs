@@ -36,22 +36,17 @@ serde_json = "1.0"
 thiserror = "2.0"
 uuid = { version = "1.23", features = ["v4", "fast-rng"] }
 toml = "1.1"
-# Sibling checkout (branch `chore/p0-lean-dependencies`, v1.0.0). The crates.io
-# 0.4.0 release cannot be resolved from a clean lock: it requires `wreq 5.3.0`,
-# and every wreq 5.x is yanked. Cargo.lock pins the yanked wreq on purpose —
-# build with `--locked`. Switch back to a version req once stealthscraper-rs
-# publishes against wreq 6.
-stealthscraper-rs = { path = "../stealthscraper-rs", default-features = false }
-# TEMPORARY direct dependency. The default transport (`WreqTransport`) drives
-# `wreq` itself with the Chrome emulation stealthscraper-rs measured, but
-# stealthscraper-rs does not yet re-export `wreq` nor expose its impersonation
-# client builder outside the `browser` feature. Same version + feature set as
-# stealthscraper-rs so cargo unifies both onto one build. Drop this entry when
-# stealthscraper-rs publishes `pub use wreq` / an `impersonation_client(profile)`.
-wreq = { version = "5.3.0", default-features = false, features = ["cookies", "socks", "gzip", "deflate", "brotli", "zstd"] }
+# Browser profiles, the measured Chrome TLS/HTTP2 emulation table, client
+# hints and `impersonation_client()`; it also re-exports `wreq`, which the
+# default transport builds on (`stealthscraper_rs::wreq`). Headless Chrome +
+# the MITM proxy only come in through its `browser` feature.
+stealthscraper-rs = { version = "1.0.0", default-features = false }
 # Backing store for the persistent cookie jar (Arlo's "trust this browser"
-# state lives in cookies). Same crate + version wreq's own jar uses.
-cookie_store = "0.21"
+# state lives in cookies), plugged into `wreq` through its `CookieStore` trait.
+cookie_store = "0.22"
+# `wreq` 6 addresses requests by `http::Uri`, `cookie_store` scopes by
+# `url::Url`; the jar converts between them. Already in the graph via both.
+url = "2.5"
 mailparse = "0.16.1"
 # Three small OTP patterns; regex-lite covers them without the
 # regex-automata / aho-corasick / regex-syntax tree.

@@ -57,8 +57,8 @@ impl From<reqwest::Error> for ArloError {
     }
 }
 
-impl From<wreq::Error> for ArloError {
-    fn from(e: wreq::Error) -> Self {
+impl From<stealthscraper_rs::wreq::Error> for ArloError {
+    fn from(e: stealthscraper_rs::wreq::Error) -> Self {
         ArloError::NetworkError(Box::new(e))
     }
 }

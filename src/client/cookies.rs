@@ -11,8 +11,13 @@
 //! nothing about Arlo.
 
 use crate::error::ArloError;
+use cookie_store::RawCookie;
 use std::sync::RwLock;
+use stealthscraper_rs::wreq;
+use url::Url;
+use wreq::cookie::Cookies;
 use wreq::header::HeaderValue;
+use wreq::{Uri, Version};
 
 /// A `wreq` cookie store backed by `cookie_store`, with JSON import /
 /// export. Session cookies (no `Expires` / `Max-Age`) are exported too —
@@ -57,30 +62,45 @@ impl PersistentJar {
     }
 }
 
+/// `wreq` addresses requests by `http::Uri`; `cookie_store` scopes cookies
+/// by `url::Url`. The conversion cannot fail for a URI `wreq` has already
+/// connected to, but a malformed one simply matches no cookie.
+fn to_url(uri: &Uri) -> Option<Url> {
+    Url::parse(&uri.to_string()).ok()
+}
+
 impl wreq::cookie::CookieStore for PersistentJar {
-    fn set_cookies(&self, url: &wreq::Url, cookie_headers: &mut dyn Iterator<Item = &HeaderValue>) {
+    fn set_cookies(&self, cookie_headers: &mut dyn Iterator<Item = &HeaderValue>, uri: &Uri) {
+        let Some(url) = to_url(uri) else {
+            return;
+        };
         let cookies = cookie_headers.filter_map(|value| {
-            wreq::cookie::Cookie::parse(value)
-                .ok()
-                .map(|c| c.into_owned().into_inner())
+            let text = std::str::from_utf8(value.as_bytes()).ok()?;
+            RawCookie::parse(text).ok().map(RawCookie::into_owned)
         });
         self.0
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .store_response_cookies(cookies, url);
+            .store_response_cookies(cookies, &url);
     }
 
-    fn cookies(&self, url: &wreq::Url) -> Option<HeaderValue> {
+    // Chrome sends one combined `Cookie` field on HTTP/2 as well as on
+    // HTTP/1.1 (splitting per pair is a Firefox habit), so the version is
+    // deliberately ignored — the emulated browser must not change shape.
+    fn cookies(&self, uri: &Uri, _version: Version) -> Cookies {
+        let Some(url) = to_url(uri) else {
+            return Cookies::Empty;
+        };
         let store = self.0.read().unwrap_or_else(|e| e.into_inner());
         let header = store
-            .get_request_values(url)
+            .get_request_values(&url)
             .map(|(name, value)| format!("{name}={value}"))
             .collect::<Vec<_>>()
             .join("; ");
         if header.is_empty() {
-            return None;
+            return Cookies::Empty;
         }
-        HeaderValue::from_str(&header).ok()
+        HeaderValue::from_str(&header).map_or(Cookies::Empty, Cookies::Compressed)
     }
 }
 
@@ -89,8 +109,17 @@ mod tests {
     use super::*;
     use wreq::cookie::CookieStore as _;
 
-    fn url(s: &str) -> wreq::Url {
-        wreq::Url::parse(s).unwrap()
+    fn uri(s: &str) -> Uri {
+        s.parse().unwrap()
+    }
+
+    /// The single `Cookie` field value a jar produced for `uri`, if any.
+    fn sent(jar: &PersistentJar, uri: &Uri) -> Option<String> {
+        match jar.cookies(uri, Version::HTTP_2) {
+            Cookies::Compressed(v) => v.to_str().ok().map(str::to_owned),
+            Cookies::Empty => None,
+            other => panic!("unexpected cookie shape: {other:?}"),
+        }
     }
 
     #[test]
@@ -100,29 +129,27 @@ mod tests {
             HeaderValue::from_static("trust=abc; Path=/; Secure; HttpOnly"),
             HeaderValue::from_static("other=1; Domain=elsewhere.example"),
         ];
-        jar.set_cookies(&url("https://ocapi-app.arlo.com/api/auth"), &mut set.iter());
+        jar.set_cookies(&mut set.iter(), &uri("https://ocapi-app.arlo.com/api/auth"));
 
-        let sent = jar.cookies(&url("https://ocapi-app.arlo.com/api/getFactorId"));
         assert_eq!(
-            sent.as_ref().and_then(|v| v.to_str().ok()),
+            sent(&jar, &uri("https://ocapi-app.arlo.com/api/getFactorId")).as_deref(),
             Some("trust=abc")
         );
-        assert!(jar.cookies(&url("https://myapi.arlo.com/hmsweb")).is_none());
+        assert!(sent(&jar, &uri("https://myapi.arlo.com/hmsweb")).is_none());
     }
 
     #[test]
     fn export_import_round_trip_keeps_session_cookies() {
         let jar = PersistentJar::default();
         let set = [HeaderValue::from_static("trust=abc; Path=/")]; // session cookie
-        jar.set_cookies(&url("https://ocapi-app.arlo.com/"), &mut set.iter());
+        jar.set_cookies(&mut set.iter(), &uri("https://ocapi-app.arlo.com/"));
         let blob = jar.export_json().expect("non-empty jar exports");
 
         let restored = PersistentJar::default();
         restored.import_json(&blob).unwrap();
         assert_eq!(restored.len(), 1);
-        let sent = restored.cookies(&url("https://ocapi-app.arlo.com/api/x"));
         assert_eq!(
-            sent.as_ref().and_then(|v| v.to_str().ok()),
+            sent(&restored, &uri("https://ocapi-app.arlo.com/api/x")).as_deref(),
             Some("trust=abc")
         );
     }

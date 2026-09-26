@@ -5,12 +5,13 @@
 //! handling) and the actual byte-shuffling layer. Two production
 //! implementations exist:
 //!
-//! - [`WreqTransport`] (default): a `wreq` client carrying the Chrome TLS
-//!   ClientHello and HTTP/2 fingerprint that `stealthscraper-rs` measured
-//!   from a real browser, plus the matching `User-Agent` and
-//!   `Sec-CH-UA*` client hints. Arlo's Cloudflare front fingerprints the
-//!   TLS/HTTP layer only (no JS challenge), so this is all it takes and no
-//!   browser process is involved.
+//! - [`WreqTransport`] (default): the `wreq` client
+//!   `stealthscraper_rs::impersonation_client` builds — the Chrome TLS
+//!   ClientHello and HTTP/2 fingerprint measured from a real browser, plus
+//!   the matching `User-Agent` and `Sec-CH-UA*` client hints. Arlo's
+//!   Cloudflare front fingerprints the TLS/HTTP layer only (no JS
+//!   challenge), so this is all it takes and no browser process is
+//!   involved.
 //! - `CloudScraperTransport` (`browser` feature): routes a `reqwest`
 //!   client through the `stealthscraper-rs` headless-Chrome MITM proxy.
 //!   Kept as an escalation path should Cloudflare ever start serving an
@@ -32,7 +33,7 @@ use reqwest::{Method, StatusCode};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use stealthscraper_rs::{BrowserProfile, ClientHints};
+use stealthscraper_rs::{BrowserProfile, impersonation_client, wreq};
 
 /// Description of a single HTTP request to dispatch through the transport.
 /// Headers and body are pre-built by the orchestration layer; the
@@ -111,16 +112,16 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// HTTP/2 SETTINGS/priority/pseudo-header order) — the same emulation its
 /// browser proxy egresses through — without any browser process.
 ///
-/// Every request additionally carries the profile's `User-Agent` and the
-/// matching `Sec-CH-UA`, `Sec-CH-UA-Mobile` and `Sec-CH-UA-Platform`
-/// client hints unless the orchestration layer already set them, so the
-/// advertised browser and the fingerprint on the wire never contradict.
-/// Cookies live in a [`PersistentJar`] so Arlo's trusted-browser state
-/// can be exported with the session cache and restored on the next run.
+/// The client's default headers carry the profile's `User-Agent`, the
+/// matching `Sec-CH-UA*` client hints and `Accept-Language`; `wreq` lays
+/// them under each request's own headers, so a value the orchestration
+/// layer sets explicitly wins and the advertised browser and the
+/// fingerprint on the wire never contradict. Cookies live in a
+/// [`PersistentJar`] so Arlo's trusted-browser state can be exported with
+/// the session cache and restored on the next run.
 pub struct WreqTransport {
     client: wreq::Client,
     profile: BrowserProfile,
-    hints: Option<ClientHints>,
     jar: Arc<PersistentJar>,
 }
 
@@ -134,12 +135,11 @@ impl WreqTransport {
     /// client cannot be built.
     pub fn new(profile: BrowserProfile, upstream_proxy: Option<&str>) -> Result<Self, ArloError> {
         let jar = Arc::new(PersistentJar::default());
-        let mut builder = wreq::Client::builder()
-            // Derive the fingerprint from the profile's own User-Agent so
-            // the JA4 signature and the advertised browser agree.
-            .emulation(stealthscraper_rs::emulation::for_kind(
-                profile.browser_kind(),
-            ))
+        // `impersonation_client` derives the TLS/HTTP2 emulation from the
+        // profile's own User-Agent and installs that UA, the `Sec-CH-UA*`
+        // hints and `Accept-Language` as default headers, so the JA4
+        // signature and the advertised browser cannot disagree.
+        let mut builder = impersonation_client(&profile)
             .cookie_provider(Arc::clone(&jar))
             .timeout(REQUEST_TIMEOUT);
         if let Some(url) = upstream_proxy {
@@ -150,11 +150,9 @@ impl WreqTransport {
         let client = builder
             .build()
             .map_err(|e| ArloError::ScraperError(format!("wreq client build failed: {e}")))?;
-        let hints = ClientHints::for_profile(&profile);
         Ok(Self {
             client,
             profile,
-            hints,
             jar,
         })
     }
@@ -162,34 +160,6 @@ impl WreqTransport {
     /// The browser identity this transport presents.
     pub fn profile(&self) -> &BrowserProfile {
         &self.profile
-    }
-
-    /// Adds the identity headers the emulation table cannot supply
-    /// itself (its captured values belong to the machine the table was
-    /// measured on, not to `self.profile`). Orchestration-layer values
-    /// win when present.
-    fn apply_identity(&self, headers: &mut HeaderMap) {
-        use reqwest::header::USER_AGENT;
-        if !headers.contains_key(USER_AGENT)
-            && let Ok(ua) = HeaderValue::from_str(&self.profile.user_agent)
-        {
-            headers.insert(USER_AGENT, ua);
-        }
-        let Some(hints) = &self.hints else {
-            return;
-        };
-        for (name, value) in [
-            ("sec-ch-ua", hints.sec_ch_ua()),
-            ("sec-ch-ua-mobile", hints.sec_ch_ua_mobile().to_string()),
-            ("sec-ch-ua-platform", hints.sec_ch_ua_platform()),
-        ] {
-            let name = HeaderName::from_static(name);
-            if !headers.contains_key(&name)
-                && let Ok(value) = HeaderValue::from_str(&value)
-            {
-                headers.insert(name, value);
-            }
-        }
     }
 }
 
@@ -211,10 +181,10 @@ impl HttpTransport for WreqTransport {
             body,
         } = request;
 
-        let mut header_map = to_header_map(headers)?;
-        self.apply_identity(&mut header_map);
-
-        let mut builder = self.client.request(method, &url).headers(header_map);
+        let mut builder = self
+            .client
+            .request(method, &url)
+            .headers(to_header_map(headers)?);
         if let Some(b) = body {
             builder = builder.body(b);
         }

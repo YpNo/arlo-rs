@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # boring-sys (BoringSSL, via stealthscraper-rs/wreq) needs cmake, a C++
+      # btls-sys (BoringSSL, via stealthscraper-rs/wreq) needs cmake, a C++
       # toolchain, libclang for bindgen, nasm and go.
       - name: Install Dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
@@ -94,16 +94,11 @@ jobs:
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
       - name: Run cargo audit
-        # Blocks the merge on any RUSTSEC advisory, unmaintained or unsound
-        # crate in our dependency tree. Run weekly via the scheduled trigger
-        # above. `yanked` is deliberately NOT denied: the lockfile pins the
-        # yanked `wreq 5.3.0` on purpose (every wreq 5.x is yanked and
-        # stealthscraper-rs has not moved to wreq 6 yet — see Cargo.toml).
-        # Restore `--deny warnings` once that dependency is republished.
-        # The two ignored `lru 0.13` unsound advisories are pinned by that
-        # same `wreq 5.3.0` (`lru = "0.13"`); keep them in sync with
-        # `[advisories].ignore` in deny.toml and drop both with the wreq bump.
-        run: cargo audit --deny unmaintained --deny unsound --ignore RUSTSEC-2026-0002 --ignore RUSTSEC-2026-0253
+        # Blocks the merge on any RUSTSEC advisory, unmaintained, unsound
+        # or yanked crate in our dependency tree. Run weekly via the
+        # scheduled trigger above. Advisory ignores, if one is ever
+        # needed, must be mirrored in `[advisories].ignore` in deny.toml.
+        run: cargo audit --deny warnings
 
   sonarqube:
     name: SonarQube
