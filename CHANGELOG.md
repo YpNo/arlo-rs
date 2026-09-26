@@ -380,8 +380,9 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   crate or action version (vulnerability alerts bypass the wait), enables
   OSV vulnerability alerts, keeps action digests pinned and maintains the
   lockfile weekly; `cargo-deny` rejects wildcard version requirements;
-  the Codecov targets equal tarpaulin's `--fail-under` (65 %) so the two
-  never disagree. The decision to keep the unmaintained `mqttbytes`
+  the Codecov targets equal tarpaulin's `--fail-under` so the two never
+  disagree. The gate is 72 % (measured 78.4 % after the sweep's tests;
+  it was 65 %). The decision to keep the unmaintained `mqttbytes`
   codec (bounds reviewed, frames capped) is recorded in `deny.toml`.
 - The session token is attached only to URLs whose origin (scheme, host,
   port) equals the auth or API host; the old prefix test accepted

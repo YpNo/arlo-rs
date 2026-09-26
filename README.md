@@ -184,9 +184,10 @@ API reference; `CLAUDE.md` carries the module map and design rules.
   network: the orchestration layer is driven through `MockTransport` and
   `MockWsConnector` (or `mockito` for the real HTTP client). Timeout paths
   run under tokio's paused clock, so the suite finishes in seconds.
-- CI enforces a coverage floor with `cargo tarpaulin --fail-under 65`
-  (Codecov mirrors the same number); raising it is tracked work — the IMAP
-  fetcher and the opt-in browser transport are the uncovered paths.
+- CI enforces a coverage floor with `cargo tarpaulin --fail-under 72`
+  (measured 78 % in September 2026; Codecov mirrors the same number). The
+  IMAP fetcher, the local-hub request methods and the opt-in browser
+  transport are the uncovered paths.
 - **Live-account smoke test** (opt-in: it is `#[ignore]` and needs both a
   valid `config.toml` and `ARLO_E2E=1`, because it triggers a real second
   factor):

@@ -195,15 +195,14 @@ jobs:
         # in this job and only worked by accident.
         #
         # `--fail-under` is THE coverage gate; codecov.yml mirrors the same
-        # number for the PR annotation. Keep the two in sync. The gate
-        # sits a few points below the measured value for CI stability —
-        # tarpaulin's line attribution fluctuates a percent or two
-        # run-to-run, and a gate at the exact value is flaky. The MQTT bus
-        # and WebRTC signaling are covered through the scripted
-        # `MockWsConnector`; the remaining uncovered paths are the IMAP
-        # fetcher (needs an IMAP server mock) and the opt-in browser-proxy
-        # transport.
-        run: cargo tarpaulin --locked --all-features --workspace --timeout 120 --out xml --fail-under 65
+        # number for the PR annotation. Keep the two in sync. Measured
+        # 78.4 % on 2026-09-26 (338 tests, llvm engine); the gate sits a
+        # few points below because tarpaulin's line attribution moves a
+        # percent or two between runs and engines, and a gate at the exact
+        # value is flaky. The remaining uncovered paths are the IMAP
+        # fetcher (needs an IMAP server double), the local-hub client's
+        # request methods and the opt-in browser-proxy transport.
+        run: cargo tarpaulin --locked --all-features --workspace --timeout 120 --out xml --fail-under 72
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

@@ -128,7 +128,7 @@ Use descriptive names that explain the scenario:
 
 ## Coverage
 
-- Target 80%+ line coverage; the CI gate is `cargo tarpaulin --fail-under 65`
+- Target 80%+ line coverage; the CI gate is `cargo tarpaulin --fail-under 72` (measured 78 % 2026-09-26)
   (raise it as coverage grows — keep `codecov.yml` on the same number)
 - Use **cargo-tarpaulin** for coverage reporting (what CI runs)
 - Focus on business logic — exclude generated code and FFI bindings
