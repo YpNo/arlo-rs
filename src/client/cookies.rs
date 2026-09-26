@@ -31,7 +31,10 @@ impl PersistentJar {
     /// Returns `None` when the jar is empty, so callers can skip writing
     /// an empty blob.
     pub fn export_json(&self) -> Option<String> {
-        let store = self.0.read().unwrap_or_else(|e| e.into_inner());
+        let store = self
+            .0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         store.iter_unexpired().next()?;
         let mut buf = Vec::new();
         cookie_store::serde::json::save_incl_expired_and_nonpersistent(&store, &mut buf).ok()?;
@@ -43,7 +46,10 @@ impl PersistentJar {
     pub fn import_json(&self, json: &str) -> Result<(), ArloError> {
         let loaded = cookie_store::serde::json::load(json.as_bytes())
             .map_err(|e| ArloError::ParseError(format!("cookie jar blob: {e}")))?;
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = loaded;
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = loaded;
         Ok(())
     }
 
@@ -51,7 +57,7 @@ impl PersistentJar {
     pub fn len(&self) -> usize {
         self.0
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter_unexpired()
             .count()
     }
@@ -80,7 +86,7 @@ impl wreq::cookie::CookieStore for PersistentJar {
         });
         self.0
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .store_response_cookies(cookies, &url);
     }
 
@@ -91,7 +97,10 @@ impl wreq::cookie::CookieStore for PersistentJar {
         let Some(url) = to_url(uri) else {
             return Cookies::Empty;
         };
-        let store = self.0.read().unwrap_or_else(|e| e.into_inner());
+        let store = self
+            .0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let header = store
             .get_request_values(&url)
             .map(|(name, value)| format!("{name}={value}"))

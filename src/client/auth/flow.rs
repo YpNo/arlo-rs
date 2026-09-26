@@ -4,7 +4,7 @@
 
 use crate::client::ArloClient;
 use crate::error::ArloError;
-use crate::models::auth::*;
+use crate::models::auth::AuthResult;
 use crate::models::error_codes::ErrorAction;
 use secrecy::ExposeSecret;
 use tracing::{debug, info, instrument, warn};

@@ -19,7 +19,7 @@ mod sensors;
 mod stream;
 
 use crate::client::ArloClient;
-use crate::endpoints::*;
+use crate::endpoints::{API_DEVICES, API_DEVICES_V2};
 use crate::error::ArloError;
 use crate::models::api::Device;
 use reqwest::Method;

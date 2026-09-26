@@ -58,20 +58,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `-c copy` avoids re-encoding; `-t` bounds the recording. The URL is
     // an argv element, visible in the process table for the duration of
     // the recording; its egress token is single-session and short-lived.
-    let status = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args([
-            "-i",
-            url.as_str(),
-            "-t",
-            &seconds.to_string(),
-            "-c",
-            "copy",
-            &output,
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
+    // `Command::status` blocks until ffmpeg exits: run it on the blocking
+    // pool so the tokio runtime (and the client's event bus) keep turning.
+    let status = tokio::task::spawn_blocking(move || {
+        Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args([
+                "-i",
+                url.as_str(),
+                "-t",
+                &seconds.to_string(),
+                "-c",
+                "copy",
+                &output,
+            ])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+    })
+    .await??;
     println!("ffmpeg exited with {status}");
     Ok(())
 }

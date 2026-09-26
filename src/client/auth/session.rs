@@ -1,9 +1,9 @@
 //! Legacy `login/v2` and the v3 `logout` (with its legacy fallback).
 
 use crate::client::ArloClient;
-use crate::endpoints::*;
+use crate::endpoints::{AUTH_LOGIN_V2, AUTH_LOGOUT};
 use crate::error::ArloError;
-use crate::models::auth::*;
+use crate::models::auth::{AuthRequest, AuthResponseData, BaseResponse};
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use reqwest::Method;

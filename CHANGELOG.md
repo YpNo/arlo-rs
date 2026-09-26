@@ -15,6 +15,10 @@ trusted-browser re-login, the Arlo error-code classifier and the module
 split. Every entry below was `[Unreleased]` since 0.1.0.
 
 ### Changed — module splits and documentation (Phase 5)
+- SonarCloud quality-gate follow-ups: the `record_stream` example runs
+  ffmpeg under `spawn_blocking` instead of blocking the runtime; every
+  crate-level wildcard import is an explicit list; the cookie-jar lock
+  recovery uses `PoisonError::into_inner` by reference.
 - README gained Architecture, Testing, CI/CD, Security and Changelog
   sections, the MFA section describes `ImapMfaHandler` / `MfaHandler` /
   `authenticate_with_push` (the documented `fetch_imap_otp()` never

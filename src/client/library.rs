@@ -1,5 +1,5 @@
 use crate::client::ArloClient;
-use crate::endpoints::*;
+use crate::endpoints::API_LIBRARY;
 use crate::error::ArloError;
 // Endpoints (api host) come from self.endpoints — PR 4 transport refactor.
 use crate::models::library::{LibraryQuery, LibraryResponse, MediaItem};

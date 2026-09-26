@@ -3,7 +3,10 @@
 //! power-save and image flip.
 
 use crate::client::ArloClient;
-use crate::endpoints::*;
+use crate::endpoints::{
+    API_FULL_SNAPSHOT, API_NOTIFY, API_RESTART, API_START_RECORD, API_STOP_RECORD,
+    API_TAKE_SNAPSHOT,
+};
 use crate::error::ArloError;
 use reqwest::Method;
 use serde_json::json;

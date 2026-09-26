@@ -20,7 +20,11 @@
 use crate::client::ArloClient;
 use crate::client::transport::{HttpRequest, HttpResponse};
 use crate::error::ArloError;
-use crate::headers::*;
+use crate::headers::{
+    ACCEPT_LANGUAGE, ARLO_ORIGIN, ARLO_REFERER, HEADER_AUTH_VERSION, HEADER_SERVICE_VERSION,
+    HEADER_SOURCE, HEADER_USER_DEVICE_AUTOMATION_NAME, HEADER_USER_DEVICE_TYPE,
+    PREFLIGHT_REQUEST_HEADERS,
+};
 use crate::models::redact::redact_for_log;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;

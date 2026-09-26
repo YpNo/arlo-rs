@@ -5,7 +5,7 @@
 
 use super::xcloud_header;
 use crate::client::ArloClient;
-use crate::endpoints::*;
+use crate::endpoints::API_START_STREAM;
 use crate::error::ArloError;
 use crate::models::api::{Device, StreamUrl};
 use reqwest::Method;

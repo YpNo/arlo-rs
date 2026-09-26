@@ -14,10 +14,13 @@
 
 use crate::client::ArloClient;
 use crate::client::local_hub::LocalHubClient;
-use crate::endpoints::*;
+use crate::endpoints::{API_RATLS_CERT, API_RATLS_TOKEN};
 use crate::error::ArloError;
+use crate::models::ratls::{
+    CertCreateData, CertCreateRequest, CertCreateResponse, RatlsTokenData, RatlsTokenRequest,
+    RatlsTokenResponse,
+};
 // Endpoints come from self.endpoints (PR 4 transport refactor).
-use crate::models::ratls::*;
 use reqwest::Method;
 use tracing::instrument;
 

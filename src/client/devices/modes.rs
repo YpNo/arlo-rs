@@ -2,7 +2,10 @@
 //! locations, the v3 mode catalogue and mode-by-name resolution.
 
 use crate::client::ArloClient;
-use crate::endpoints::*;
+use crate::endpoints::{
+    API_AUTOMATION_ACTIVE_MODE, API_AUTOMATION_DEFINITIONS, API_AUTOMATION_MODES,
+    API_AUTOMATION_V3, API_EMERGENCY_LOCATIONS, API_LOCATIONS, API_SET_MODE,
+};
 use crate::error::ArloError;
 use crate::models::automation::CUSTOM_MODE_SENTINEL;
 use reqwest::Method;

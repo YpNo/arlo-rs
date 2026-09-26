@@ -21,7 +21,7 @@
 //! mismatched cert is exactly the situation cert pinning is meant to
 //! catch.
 
-use crate::endpoints::*;
+use crate::endpoints::{API_HMSLS_CONNECTIVITY, API_HMSLS_LIST};
 use crate::error::ArloError;
 use crate::models::ratls::HmslsListResponse;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};

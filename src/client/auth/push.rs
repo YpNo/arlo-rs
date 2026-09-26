@@ -3,9 +3,12 @@
 //! approves in the Arlo app.
 
 use crate::client::ArloClient;
-use crate::endpoints::*;
+use crate::endpoints::{AUTH_FINISH_AUTH, AUTH_START_AUTH};
 use crate::error::ArloError;
-use crate::models::auth::*;
+use crate::models::auth::{
+    AuthResponseData, AuthResult, BaseResponse, FinishAuthPushRequest, StartAuthData,
+    StartAuthUserRequest,
+};
 use crate::models::error_codes::{ErrorAction, classify_arlo_error};
 use reqwest::Method;
 use secrecy::{ExposeSecret, SecretString};
