@@ -8,4 +8,5 @@ pub mod error_codes;
 pub mod events;
 pub mod library;
 pub mod ratls;
+pub(crate) mod redact;
 pub mod sip;

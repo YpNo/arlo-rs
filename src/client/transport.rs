@@ -38,7 +38,11 @@ use stealthscraper_rs::{BrowserProfile, impersonation_client, wreq};
 /// Description of a single HTTP request to dispatch through the transport.
 /// Headers and body are pre-built by the orchestration layer; the
 /// transport only translates them into a wire request.
-#[derive(Debug, Clone)]
+///
+/// `Debug` prints header names with credential-bearing values redacted
+/// and the body as a byte count: this type carries the bearer token and,
+/// on `/login`, the account password.
+#[derive(Clone)]
 pub struct HttpRequest {
     /// HTTP method (`GET`, `POST`, `PUT`, …).
     pub method: Method,
@@ -54,13 +58,49 @@ pub struct HttpRequest {
 /// HTTP response surfaced by the transport. The orchestration layer
 /// inspects `status` and converts non-2xx into [`ArloError::HttpError`];
 /// non-error responses propagate the body up to the model layer.
-#[derive(Debug)]
+///
+/// `Debug` shows the status and body length only; `session/v3` and
+/// `finishAuth` bodies carry tokens.
 pub struct HttpResponse {
     /// HTTP status code returned by the server.
     pub status: StatusCode,
     /// Response body as text. Binary bodies (e.g. local-hub media
     /// downloads) bypass this transport entirely.
     pub body: String,
+}
+
+/// Request headers whose values never appear in `Debug` output.
+const REDACTED_HEADERS: &[&str] = &["authorization", "cookie", "x-user-device-id"];
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                if REDACTED_HEADERS.contains(&k.to_ascii_lowercase().as_str()) {
+                    (k.as_str(), "[REDACTED]")
+                } else {
+                    (k.as_str(), v.as_str())
+                }
+            })
+            .collect();
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .field("body_bytes", &self.body.as_ref().map(Vec::len))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
 }
 
 /// Pluggable HTTP transport. Production wires this to [`WreqTransport`];
@@ -557,5 +597,38 @@ mod tests {
         let dbg = format!("{transport:?}");
         assert!(dbg.starts_with("WreqTransport"));
         assert!(dbg.contains("Chrome/"));
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn request_and_response_debug_hide_credentials_and_bodies() {
+        let req = HttpRequest {
+            method: Method::POST,
+            url: "https://ocapi-app.arlo.com/api/auth".into(),
+            headers: vec![
+                ("Authorization".into(), "BEARER-SECRET".into()),
+                ("x-user-device-id".into(), "DEVICE-UUID".into()),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            body: Some(br#"{"password":"hunter2"}"#.to_vec()),
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("application/json"), "{dbg}");
+        for secret in ["BEARER-SECRET", "DEVICE-UUID", "hunter2"] {
+            assert!(!dbg.contains(secret), "{secret} leaked: {dbg}");
+        }
+        let resp = HttpResponse {
+            status: StatusCode::OK,
+            body: r#"{"token":"TOKEN-SECRET"}"#.into(),
+        };
+        let dbg = format!("{resp:?}");
+        assert!(
+            dbg.contains("200") && !dbg.contains("TOKEN-SECRET"),
+            "{dbg}"
+        );
     }
 }

@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+/// A location (home) on the account. `Debug` redacts the coordinates.
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Location {
     pub id: String,
@@ -13,6 +14,18 @@ pub struct Location {
     /// [`Location::hosts_device`] to match.
     #[serde(default)]
     pub gateway_device_ids: Vec<String>,
+}
+
+impl std::fmt::Debug for Location {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Location")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("longitude", &self.longitude.map(|_| "[REDACTED]"))
+            .field("latitude", &self.latitude.map(|_| "[REDACTED]"))
+            .field("gateway_device_ids", &self.gateway_device_ids)
+            .finish()
+    }
 }
 
 impl Location {
@@ -231,5 +244,23 @@ mod tests {
         assert!(!loc.hosts_device("BASE3"));
         let bare: Location = serde_json::from_str(r#"{"id":"L2","name":"x"}"#).unwrap();
         assert!(bare.gateway_device_ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn location_debug_redacts_coordinates() {
+        let loc: Location = serde_json::from_str(
+            r#"{"id":"L1","name":"Home","latitude":48.8566,"longitude":2.3522}"#,
+        )
+        .unwrap();
+        let dbg = format!("{loc:?}");
+        assert!(
+            dbg.contains("Home") && !dbg.contains("48.8") && !dbg.contains("2.35"),
+            "{dbg}"
+        );
     }
 }

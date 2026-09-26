@@ -247,7 +247,8 @@ fn parse_answer(frame: &str) -> Result<SignalingAnswer, ArloError> {
         .map_err(|e| ArloError::ParseError(format!("signaling body not JSON: {e}")))?;
     if v.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
         return Err(ArloError::AuthError(format!(
-            "signaling success!=true: {body}"
+            "signaling success!=true: {}",
+            crate::models::redact::excerpt(body)
         )));
     }
     let data = v.get("data").unwrap_or(&serde_json::Value::Null);

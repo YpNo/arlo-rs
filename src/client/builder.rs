@@ -38,8 +38,9 @@ use std::sync::Arc;
 use stealthscraper_rs::BrowserProfile;
 
 /// Programmatic builder for an [`ArloClient`]. Construct via
-/// [`ArloClient::builder`].
-#[derive(Debug, Default)]
+/// [`ArloClient::builder`]. `Debug` strips any `user:password@` from
+/// `upstream_proxy`.
+#[derive(Default)]
 pub struct ArloClientBuilder {
     user_agent: Option<String>,
     headless: Option<bool>,
@@ -48,6 +49,26 @@ pub struct ArloClientBuilder {
     session_cache_path: Option<String>,
     endpoints: Option<ArloEndpoints>,
     use_browser: bool,
+}
+
+impl std::fmt::Debug for ArloClientBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArloClientBuilder")
+            .field("user_agent", &self.user_agent)
+            .field("headless", &self.headless)
+            .field(
+                "upstream_proxy",
+                &self
+                    .upstream_proxy
+                    .as_deref()
+                    .map(crate::models::redact::redact_userinfo),
+            )
+            .field("debug_mode", &self.debug_mode)
+            .field("session_cache_path", &self.session_cache_path)
+            .field("endpoints", &self.endpoints)
+            .field("use_browser", &self.use_browser)
+            .finish()
+    }
 }
 
 impl ArloClientBuilder {
@@ -498,5 +519,21 @@ mod tests {
         client.auth.save_to_cache().await;
         // The token is still in memory; cache simply didn't persist.
         assert!(client.is_authenticated());
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn builder_debug_strips_proxy_userinfo() {
+        let b =
+            ArloClientBuilder::default().upstream_proxy("socks5://u:hunter2@proxy.example:1080");
+        let dbg = format!("{b:?}");
+        assert!(
+            dbg.contains("proxy.example:1080") && !dbg.contains("hunter2"),
+            "{dbg}"
+        );
     }
 }

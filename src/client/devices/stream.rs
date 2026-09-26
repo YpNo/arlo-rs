@@ -139,7 +139,14 @@ impl ArloClient {
             }
             match tokio::time::timeout(remaining, rx.recv()).await {
                 Ok(Ok(event)) => {
-                    debug!(?event, "SSE event during startStream wait");
+                    // Identifiers only: `properties` carries credential-bearing
+                    // stream and presigned URLs and must not be dumped.
+                    debug!(
+                        action = %event.action,
+                        resource = %event.resource,
+                        trans_id = ?event.trans_id,
+                        "bus event during startStream wait"
+                    );
                     if !event_matches_trans_id(&event, &trans_id) {
                         continue;
                     }

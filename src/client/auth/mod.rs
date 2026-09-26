@@ -52,7 +52,7 @@ pub struct AuthManager {
     pub(crate) cookies: Option<SecretString>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct AuthCacheSchema {
     access_token: Option<String>,
     user_id: Option<String>,
@@ -85,6 +85,20 @@ async fn write_owner_only(path: &str, bytes: &[u8]) {
     #[cfg(not(unix))]
     {
         let _ = fs::write(path, bytes).await;
+    }
+}
+
+impl std::fmt::Debug for AuthCacheSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthCacheSchema")
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("user_id", &self.user_id)
+            .field("device_id", &self.device_id)
+            .field("cookies", &self.cookies.as_ref().map(|_| "[REDACTED]"))
+            .finish()
     }
 }
 

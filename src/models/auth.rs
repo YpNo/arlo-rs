@@ -114,7 +114,7 @@ pub struct StartAuthUserRequest {
 /// `POST /api/finishAuth` body for the **push** flow. Note the absence
 /// of an `otp` field — push approval carries no code; the web client
 /// sends only these two keys and polls.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinishAuthPushRequest {
     pub factor_auth_code: String,
@@ -122,7 +122,7 @@ pub struct FinishAuthPushRequest {
 }
 
 /// `data` payload of a successful `POST /api/startAuth`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartAuthData {
     pub factor_auth_code: String,
@@ -170,7 +170,7 @@ impl std::fmt::Debug for AuthResponseData {
 impl std::fmt::Debug for VerifyFactorRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VerifyFactorRequest")
-            .field("factor_auth_code", &self.factor_auth_code)
+            .field("factor_auth_code", &"[REDACTED]")
             .field("otp", &"[REDACTED]")
             .field("is_browser_trusted", &self.is_browser_trusted)
             .finish()
@@ -178,7 +178,9 @@ impl std::fmt::Debug for VerifyFactorRequest {
 }
 
 /// Represents the asynchronous state of an authentication attempt.
-#[derive(Debug, Clone)]
+/// `Debug` redacts `factor_auth_code`: in the push flow that code alone
+/// yields the session token once the user approves.
+#[derive(Clone)]
 pub enum AuthResult {
     /// The session is fully established and validated. Ready to use.
     Success,
@@ -188,6 +190,42 @@ pub enum AuthResult {
         factor_auth_code: String,
         provider: String,
     },
+}
+
+impl std::fmt::Debug for AuthResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthResult::Success => f.write_str("Success"),
+            AuthResult::MfaRequired {
+                factor_id,
+                provider,
+                ..
+            } => f
+                .debug_struct("MfaRequired")
+                .field("factor_id", factor_id)
+                .field("factor_auth_code", &"[REDACTED]")
+                .field("provider", provider)
+                .finish(),
+        }
+    }
+}
+
+impl std::fmt::Debug for FinishAuthPushRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FinishAuthPushRequest")
+            .field("factor_auth_code", &"[REDACTED]")
+            .field("is_browser_trusted", &self.is_browser_trusted)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for StartAuthData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartAuthData")
+            .field("factor_auth_code", &"[REDACTED]")
+            .field("factors", &self.factors)
+            .finish()
+    }
 }
 
 /// Re-attachment payload for [`crate::ArloClient::reattach`].
@@ -305,6 +343,36 @@ mod redaction_tests {
             otp: "123456".into(),
             is_browser_trusted: true,
         };
-        assert!(!format!("{v:?}").contains("123456"));
+        let dbg = format!("{v:?}");
+        assert!(!dbg.contains("123456") && !dbg.contains("FAC"), "{dbg}");
+    }
+
+    #[test]
+    fn factor_auth_code_is_redacted_everywhere_it_travels() {
+        let result = AuthResult::MfaRequired {
+            factor_id: "F1".into(),
+            factor_auth_code: "FAC-SECRET".into(),
+            provider: "EMAIL".into(),
+        };
+        let dbg = format!("{result:?}");
+        assert!(
+            dbg.contains("F1") && dbg.contains("EMAIL") && !dbg.contains("FAC-SECRET"),
+            "{dbg}"
+        );
+        assert_eq!(format!("{:?}", AuthResult::Success), "Success");
+
+        let data: StartAuthData =
+            serde_json::from_str(r#"{"factorAuthCode":"FAC-SECRET","factors":[]}"#).unwrap();
+        assert!(!format!("{data:?}").contains("FAC-SECRET"));
+
+        let push = FinishAuthPushRequest {
+            factor_auth_code: "FAC-SECRET".into(),
+            is_browser_trusted: true,
+        };
+        let dbg = format!("{push:?}");
+        assert!(
+            dbg.contains("is_browser_trusted: true") && !dbg.contains("FAC-SECRET"),
+            "{dbg}"
+        );
     }
 }

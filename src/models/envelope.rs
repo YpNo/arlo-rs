@@ -45,7 +45,10 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
         return Err(ArloError::ApiError {
             code: 500,
             error: None,
-            message: format!("Envelope reports success=false. Body: {body}"),
+            message: format!(
+                "Envelope reports success=false; body: {}",
+                crate::models::redact::excerpt(body)
+            ),
         });
     }
 
@@ -85,7 +88,10 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
     Err(ArloError::ApiError {
         code: 500,
         error: None,
-        message: format!("Response is not a recognised Arlo envelope. Body: {body}"),
+        message: format!(
+            "Response is not a recognised Arlo envelope; body: {}",
+            crate::models::redact::excerpt(body)
+        ),
     })
 }
 
@@ -220,5 +226,25 @@ mod tests {
         let body = r#"{"success":true,"data":{"other":[1,2]}}"#;
         let arr = unwrap_envelope_array(body, "devices").unwrap();
         assert_eq!(arr.as_array().unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn unrecognised_envelope_error_never_carries_a_secret() {
+        let body = r#"{"token":"TOKEN-SECRET","accessToken":"ALSO-SECRET","weird":true}"#;
+        let err = unwrap_envelope(body).unwrap_err().to_string();
+        assert!(err.contains("not a recognised Arlo envelope"), "{err}");
+        assert!(
+            !err.contains("TOKEN-SECRET") && !err.contains("ALSO-SECRET"),
+            "{err}"
+        );
+
+        let body = r#"{"success":false,"data":{"sipCallInfo":{"password":"SIP-SECRET"}}}"#;
+        let err = unwrap_envelope(body).unwrap_err().to_string();
+        assert!(!err.contains("SIP-SECRET"), "{err}");
     }
 }

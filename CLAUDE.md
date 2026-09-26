@@ -33,7 +33,7 @@
 - `ConnectionState`: `Connecting | Connected | Disconnected` — exhaustive enum, no wildcard arms
 
 ### `src/models/` — Pure data layer (no I/O)
-`auth.rs` (+ `Meta::into_error`), `auth_advanced.rs`, `events.rs` (`ArloEvent::active_mode_change`), `envelope.rs`, `error_codes.rs` (`ErrorAction`, `classify`, official messages — branch on `ArloError::action()`, never on raw codes), `automation.rs` (`AutomationConfig`, `Location::hosts_device`), `library.rs`, `ratls.rs`, `sip.rs`, `api.rs`
+`auth.rs` (+ `Meta::into_error`), `auth_advanced.rs`, `events.rs` (`ArloEvent::active_mode_change`), `envelope.rs`, `redact.rs` (`redact_for_log`, `excerpt`, `redact_userinfo` — the one place the log/error redaction policy lives), `error_codes.rs` (`ErrorAction`, `classify`, official messages — branch on `ArloError::action()`, never on raw codes), `automation.rs` (`AutomationConfig`, `Location::hosts_device`), `library.rs`, `ratls.rs`, `sip.rs`, `api.rs`
 
 ### Other modules
 - `src/error.rs` — `ArloError` (10 `thiserror` variants) + `action()` classifier
@@ -55,7 +55,7 @@
 - **Error Handling**: `thiserror` for library boundaries; `anyhow` only in binaries/integration tests.
 - **Instrumentation**: `log` crate present (legacy migration in progress) — all **new** code must use `tracing` only; never add new `log::` call sites.
 - **Safety**: No `unsafe`. `unwrap()` banned; use `.expect("SAFETY: <reason>")`.
-- **Tokens**: `secrecy::SecretString` wraps all access tokens — zeroized on drop, never formatted via `Debug`. Wire DTOs that must stay plain `String` (`AuthRequest`, `AuthResponseData`, `VerifyFactorRequest`, `SessionV3Response`, `RatlsTokenData`, `SipCallInfo`, the config credential structs) implement `Debug` by hand and print `[REDACTED]` for the secret field — keep it that way when adding fields.
+- **Tokens**: `secrecy::SecretString` wraps all access tokens — zeroized on drop, never formatted via `Debug`. Wire DTOs that must stay plain `String` (`AuthRequest`, `AuthResponseData`, `VerifyFactorRequest`, `StartAuthData`, `FinishAuthPushRequest`, `AuthResult`, `MfaChallenge`, `SessionV3Response`, `RatlsTokenData`, `SipCallInfo`, `IceServer`, `Device`, `Location`, `AuthCacheSchema`, `HttpRequest`/`HttpResponse`, the config structs, `ArloClientBuilder`) implement `Debug` by hand and print `[REDACTED]` for the secret field — keep it that way when adding fields. Never put an upstream body into an error or log line: use `models::redact::excerpt` (redacted, control-stripped, 256-byte cap) or `redact_for_log`.
 - **Shared state**: `api_version` is an `ApiVersionCell` (atomic), never a lock; no `.unwrap()` on lock guards anywhere in `src/`.
 - **Testing**: Use `ArloClient::with_transport(Arc<dyn HttpTransport>, endpoints)` + `MockTransport` from `transport::test_support` (and `with_transports(..)` + `ws::test_support::MockWsConnector` for the event bus / signaling); use `ArloClientBuilder::endpoints()` to point at a `mockito` server. `ArloClientBuilder::build()` is cheap (no browser) and may be pointed at `mockito`; never use `.browser(true)` in unit tests.
 - **IMAP MFA**: `ImapMfaHandler::prepare()` captures UNSEEN-baseline **before** OTP dispatch. Uses the published `imap-rs-client` / `imap-rs-tls` crates.

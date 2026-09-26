@@ -21,59 +21,12 @@ use crate::client::ArloClient;
 use crate::client::transport::{HttpRequest, HttpResponse};
 use crate::error::ArloError;
 use crate::headers::*;
+use crate::models::redact::redact_for_log;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use reqwest::Method;
 use serde::Serialize;
-use serde_json::Value;
 use tracing::{debug, instrument, warn};
-
-/// JSON keys whose values must never reach the debug log when `debug_mode`
-/// is enabled. Matched case-insensitively.
-const REDACTED_JSON_KEYS: &[&str] = &[
-    "password",
-    "token",
-    "access_token",
-    "accesstoken",
-    "authorization",
-    "otp",
-    "factorauthcode",
-    "refreshtoken",
-];
-
-/// Returns a debug-safe rendering of `raw`. If `raw` is valid JSON, sensitive
-/// keys are replaced with `"***"`. Otherwise the raw string is returned
-/// unchanged (the keys we redact only ever appear inside JSON bodies).
-fn redact_for_log(raw: &str) -> String {
-    let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
-        return raw.to_string();
-    };
-    redact_in_place(&mut value);
-    serde_json::to_string(&value).unwrap_or_else(|_| raw.to_string())
-}
-
-fn redact_in_place(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            for (k, v) in map.iter_mut() {
-                if REDACTED_JSON_KEYS
-                    .iter()
-                    .any(|target| k.eq_ignore_ascii_case(target))
-                {
-                    *v = Value::String("***".to_string());
-                } else {
-                    redact_in_place(v);
-                }
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr.iter_mut() {
-                redact_in_place(v);
-            }
-        }
-        _ => {}
-    }
-}
 
 /// Milliseconds since the Unix epoch, as Arlo's `time=` / `timestamp`
 /// telemetry parameters expect. Saturates at 0 should the clock be
@@ -303,6 +256,7 @@ mod tests {
     use crate::client::transport::test_support::MockTransport;
     use mockito::Server;
     use reqwest::StatusCode;
+    use serde_json::Value;
     use std::sync::Arc;
 
     fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {

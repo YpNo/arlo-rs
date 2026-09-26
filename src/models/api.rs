@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 /// Represents a physical Arlo device (Camera, Base Station, Doorbell, Chime).
 /// The fields present in the API response vary drastically depending on the physical
 /// `device_type` (e.g. cameras have MAC addresses, but chimes may not).
-#[derive(Debug, Serialize, Deserialize)]
+///
+/// `Debug` redacts `presigned_last_image_url`: a presigned S3 URL is a
+/// bearer capability for as long as it is valid.
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
     /// Internal Arlo tracking ID (typically the serial number).
@@ -60,6 +63,31 @@ pub struct Device {
     /// Shape varies by device class, so it's surfaced as raw JSON until
     /// a concrete consumer needs typed access.
     pub connectivity: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Device")
+            .field("device_id", &self.device_id)
+            .field("parent_id", &self.parent_id)
+            .field("device_type", &self.device_type)
+            .field("device_name", &self.device_name)
+            .field("unique_id", &self.unique_id)
+            .field("state", &self.state)
+            .field("mac_address", &self.mac_address)
+            .field("firm_version", &self.firm_version)
+            .field("hw_version", &self.hw_version)
+            .field("model_id", &self.model_id)
+            .field(
+                "presigned_last_image_url",
+                &self.presigned_last_image_url.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("x_cloud_id", &self.x_cloud_id)
+            .field("automation_revision", &self.automation_revision)
+            .field("allowed_mqtt_topics", &self.allowed_mqtt_topics)
+            .field("connectivity", &self.connectivity)
+            .finish()
+    }
 }
 
 impl Device {
@@ -226,5 +254,25 @@ mod tests {
     fn is_self_hosted_false_when_behind_base_station() {
         let dev = device_with_parent("CAM-1", "VMB4500-BASE");
         assert!(!dev.is_self_hosted());
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn device_debug_redacts_presigned_url() {
+        let device: Device = serde_json::from_str(
+            r#"{"deviceId":"D1","parentId":"D1","deviceType":"camera","deviceName":"Front",
+                "uniqueId":"U_D1","state":"provisioned",
+                "presignedLastImageUrl":"https://s3.example/x?X-Amz-Signature=SIG"}"#,
+        )
+        .unwrap();
+        let dbg = format!("{device:?}");
+        assert!(
+            dbg.contains("Front") && !dbg.contains("SIG") && !dbg.contains("s3.example"),
+            "{dbg}"
+        );
     }
 }

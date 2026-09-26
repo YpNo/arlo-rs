@@ -65,7 +65,8 @@ pub struct IceServers {
 
 /// One ICE server. `port` is a **string** on the wire (`"19302"`,
 /// `"443"`). STUN entries omit `transport`/`username`/`credential`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// `Debug` redacts the TURN `credential`.
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IceServer {
     /// `"stun"` or `"turn"`.
@@ -79,6 +80,22 @@ pub struct IceServer {
     pub username: Option<String>,
     #[serde(default)]
     pub credential: Option<String>,
+}
+
+impl std::fmt::Debug for IceServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IceServer")
+            .field("kind", &self.kind)
+            .field("domain", &self.domain)
+            .field("port", &self.port)
+            .field("transport", &self.transport)
+            .field("username", &self.username)
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl IceServer {
@@ -164,6 +181,28 @@ mod tests {
         assert_eq!(
             s.sip_call_info.ws_url(),
             "wss://livestream-z1-prod.arlo.com:7443/"
+        );
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn ice_server_debug_redacts_turn_credential() {
+        let ice = IceServer {
+            kind: "turn".into(),
+            domain: "relay.example".into(),
+            port: "443".into(),
+            transport: Some("tcp".into()),
+            username: Some("1:U".into()),
+            credential: Some("TURN-SECRET".into()),
+        };
+        let dbg = format!("{ice:?}");
+        assert!(
+            dbg.contains("relay.example") && !dbg.contains("TURN-SECRET"),
+            "{dbg}"
         );
     }
 }

@@ -33,7 +33,7 @@ use std::io::{self, Write};
 /// Context handed to [`MfaHandler::provide_otp`]. Mirrors the
 /// [`AuthResult::MfaRequired`] payload but as a plain struct so handlers
 /// don't have to pattern-match.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MfaChallenge {
     /// Arlo factor identifier (UUID-ish).
     pub factor_id: String,
@@ -41,6 +41,16 @@ pub struct MfaChallenge {
     pub factor_auth_code: String,
     /// Factor type as Arlo reports it: `"EMAIL"`, `"SMS"`, `"PUSH"`, …
     pub provider: String,
+}
+
+impl std::fmt::Debug for MfaChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MfaChallenge")
+            .field("factor_id", &self.factor_id)
+            .field("factor_auth_code", &"[REDACTED]")
+            .field("provider", &self.provider)
+            .finish()
+    }
 }
 
 impl MfaChallenge {
@@ -268,5 +278,24 @@ mod tests {
     #[test]
     fn challenge_from_auth_result_returns_none_on_success() {
         assert!(MfaChallenge::from_auth_result(&AuthResult::Success).is_none());
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn challenge_debug_redacts_factor_auth_code() {
+        let c = MfaChallenge {
+            factor_id: "F1".into(),
+            factor_auth_code: "FAC-SECRET".into(),
+            provider: "PUSH".into(),
+        };
+        let dbg = format!("{c:?}");
+        assert!(
+            dbg.contains("F1") && dbg.contains("PUSH") && !dbg.contains("FAC-SECRET"),
+            "{dbg}"
+        );
     }
 }

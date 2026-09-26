@@ -202,6 +202,25 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   now presents Chrome 153 instead of 124–126.
 
 ### Security
+- Upstream response bodies no longer reach error messages whole. Every
+  site that embedded a body (`unwrap_envelope`, `ArloError::HttpError`'s
+  `Display`, the device/location parse errors, the signaling reply) now
+  goes through `models::redact::excerpt`: JSON secrets replaced, control
+  characters stripped, capped at 256 bytes. The full body stays in the
+  `HttpError` field for code that inspects it.
+- The `debug_mode` redaction list gained `browserAuthCode`, `credential`,
+  `cookie`, `url`, `streamUrl`, every `presigned*` key and every key
+  ending in `token`, `password` or `credential`.
+- The `startStream` wait logs event identifiers only; it used to
+  Debug-dump every bus event, stream and presigned URLs included.
+- A `config.toml` syntax error no longer echoes the offending line (which
+  for a slip on `password = …` was the password itself).
+- `Debug` now redacts `factor_auth_code` (`AuthResult`, `MfaChallenge`,
+  `VerifyFactorRequest`, `StartAuthData`, `FinishAuthPushRequest`), the
+  TURN `credential` (`IceServer`), `presigned_last_image_url` (`Device`),
+  location coordinates (`Location`), proxy userinfo (`ClientConfig`,
+  `ArloClientBuilder`), the session-cache schema, and the transport DTOs
+  (`HttpRequest` header values, both bodies).
 - Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
   (RUSTSEC-2026-0285, TLS 1.3 handshake across encryption levels) and
   `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);

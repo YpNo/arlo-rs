@@ -45,7 +45,9 @@ pub struct ImapConfig {
     pub delete_after_read: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+/// Client tuning. `Debug` strips any `user:password@` from
+/// `upstream_proxy`.
+#[derive(Deserialize, Serialize, Clone, Default)]
 pub struct ClientConfig {
     pub debug_mode: Option<bool>,
     pub user_agent: Option<String>,
@@ -73,11 +75,41 @@ impl ArloConfig {
             ArloError::ScraperError(format!("Failed to read config file {}: {}", path, e))
         })?;
 
+        // `e.message()` + `e.span()` only: the full `Display` of a toml
+        // error reprints the offending source line, which for a slip on
+        // `password = "…"` would put the password into the error.
         let parsed: ArloConfig = toml::from_str(&contents).map_err(|e| {
-            ArloError::ScraperError(format!("Failed to parse config file {}: {}", path, e))
+            let at = e
+                .span()
+                .map(|r| format!(" (bytes {}..{})", r.start, r.end))
+                .unwrap_or_default();
+            ArloError::ScraperError(format!(
+                "Failed to parse config file {path}{at}: {}",
+                e.message()
+            ))
         })?;
 
         Ok(parsed)
+    }
+}
+
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientConfig")
+            .field("debug_mode", &self.debug_mode)
+            .field("user_agent", &self.user_agent)
+            .field("session_cache_path", &self.session_cache_path)
+            .field("headless", &self.headless)
+            .field(
+                "upstream_proxy",
+                &self
+                    .upstream_proxy
+                    .as_deref()
+                    .map(crate::models::redact::redact_userinfo),
+            )
+            .field("api_version", &self.api_version)
+            .field("use_browser", &self.use_browser)
+            .finish()
     }
 }
 
@@ -151,5 +183,36 @@ mod tests {
             ArloError::ScraperError(msg) => assert!(msg.contains("Failed to read config file")),
             _ => panic!("Expected ScraperError for missing file"),
         }
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn client_config_debug_strips_proxy_userinfo() {
+        let cfg = ClientConfig {
+            upstream_proxy: Some("http://user:hunter2@proxy.example:8080".into()),
+            ..ClientConfig::default()
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(
+            dbg.contains("proxy.example:8080") && !dbg.contains("hunter2"),
+            "{dbg}"
+        );
+    }
+
+    #[test]
+    fn parse_error_never_echoes_the_password_line() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"[credentials]\nemail = \"e@x\"\npassword = \"hun\"ter2\"\n")
+            .unwrap();
+        let err = ArloConfig::load_from_file(file.path().to_str().unwrap()).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("Failed to parse config file"), "{text}");
+        assert!(!text.contains("hun") && !text.contains("ter2"), "{text}");
     }
 }

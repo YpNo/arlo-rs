@@ -17,7 +17,10 @@ pub enum ArloError {
         message: String,
     },
 
-    #[error("HTTP Request Failed: {status} - {body}")]
+    /// `body` is kept whole for callers that inspect it (rate-limit
+    /// markers, Arlo envelopes); `Display` shows only a redacted,
+    /// length-capped excerpt.
+    #[error("HTTP Request Failed: {status} - {}", crate::models::redact::excerpt(.body))]
     HttpError {
         status: reqwest::StatusCode,
         body: String,
@@ -130,5 +133,30 @@ mod tests {
             ArloError::ParseError("p".into()).action(),
             ErrorAction::Unclassified
         );
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn http_error_display_is_capped_and_single_line() {
+        let body = format!("<html>{}\n</html>", "x".repeat(10_000));
+        let err = ArloError::HttpError {
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: body.clone(),
+        };
+        let text = err.to_string();
+        assert!(text.starts_with("HTTP Request Failed: 403"), "{text}");
+        assert!(
+            text.len() < 400 && !text.contains('\n'),
+            "len {}",
+            text.len()
+        );
+        // The full body stays available to code that needs it.
+        if let ArloError::HttpError { body: kept, .. } = err {
+            assert_eq!(kept, body);
+        }
     }
 }

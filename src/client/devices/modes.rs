@@ -260,7 +260,8 @@ impl ArloClient {
         let arr = crate::models::envelope::unwrap_envelope_array(&body_str, "locations")?;
         serde_json::from_value(arr).map_err(|e| {
             ArloError::ParseError(format!(
-                "Failed to parse locations array: {e}. Body: {body_str}"
+                "Failed to parse locations array: {e}; body: {}",
+                crate::models::redact::excerpt(&body_str)
             ))
         })
     }
