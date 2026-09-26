@@ -1,8 +1,9 @@
 [toolchain]
-# Pinned to match the sibling `imap-rs` workspace so a single
-# `rustup toolchain install` covers both crates and Edition-2024 features
-# (let-chains, async fn in trait via `async-trait`) compile identically
-# everywhere — local, CI, and downstream consumers.
-channel = "1.95.0"
+# Pinned to the current stable so local builds, CI and downstream consumers
+# compile with one toolchain (Edition 2024: let-chains, async fn in trait via
+# `async-trait`). Direct dependencies declare MSRVs up to 1.95
+# (`stealthscraper-rs`, `imap-rs-client`), so anything from 1.95 works; the
+# pin is what CI actually runs.
+channel = "1.98.1"
 components = ["rustfmt", "clippy", "rust-src"]
 profile = "minimal"

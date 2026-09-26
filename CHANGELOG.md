@@ -191,6 +191,8 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   consumers point at `../arlo-rs`.
 
 ### Changed — build reproducibility
+- Toolchain pin raised from 1.95.0 to 1.98.1 (current stable); the crate
+  still builds on 1.95.0, the highest MSRV among its dependencies.
 - `Cargo.lock` refreshed to the latest semver-compatible versions (136
   packages; direct: async-trait 0.1.92, bytes 1.12, flate2 1.1.10,
   imap-rs 0.2.4, reqwest 0.13.5, uuid 1.26, toml 1.1.6, serde 1.0.229).
