@@ -35,11 +35,14 @@ enum SetModeV3Outcome {
 ///
 /// Strategy: prefer the exact `data.<location_id>.revision`. If Arlo
 /// has issued a different keying (e.g. an automation UUID that isn't
-/// the location ID), fall back to the **first** child object's
-/// `revision`. Returns `None` if no revision can be found.
+/// the location ID) **and there is exactly one child**, use that child's
+/// `revision`. With several siblings and no exact match there is no way
+/// to tell which counter belongs to our automation, and sending another
+/// object's revision would either be rejected as stale or, worse, bypass
+/// the optimistic-concurrency guard — so `None`.
 fn extract_active_mode_revision(body: &str, location_id: &str) -> Option<u64> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let data = value.get("data")?;
+    let data = value.get("data")?.as_object()?;
 
     if let Some(rev) = data
         .get(location_id)
@@ -48,10 +51,32 @@ fn extract_active_mode_revision(body: &str, location_id: &str) -> Option<u64> {
     {
         return Some(rev);
     }
-    // Fallback: scan any keyed object for a `revision` field.
-    data.as_object()?
-        .values()
-        .find_map(|v| v.get("revision").and_then(|r| r.as_u64()))
+    if data.len() == 1 {
+        return data
+            .values()
+            .next()
+            .and_then(|v| v.get("revision"))
+            .and_then(|r| r.as_u64());
+    }
+    None
+}
+
+/// The location a device belongs to: the one whose gateway list names it,
+/// or — only when Arlo lists no gateways anywhere (single-location
+/// accounts on older payloads) — the first location. When gateway lists
+/// exist and none names the device, there is no answer: arming "the first
+/// location" would arm somebody else's home.
+fn pick_location<'a>(
+    locations: &'a [crate::models::automation::Location],
+    device_id: &str,
+) -> Option<&'a crate::models::automation::Location> {
+    if let Some(hit) = locations.iter().find(|l| l.hosts_device(device_id)) {
+        return Some(hit);
+    }
+    if locations.iter().all(|l| l.gateway_device_ids.is_empty()) {
+        return locations.first();
+    }
+    None
 }
 
 impl ArloClient {
@@ -127,10 +152,26 @@ impl ArloClient {
     ) -> Result<(), SetModeV3Outcome> {
         let locations = match self.get_locations().await {
             Ok(l) => l,
-            Err(_) => return Err(SetModeV3Outcome::Fallback),
+            Err(ArloError::HttpError { status, .. })
+                if status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                warn!("V3 locations endpoint returned 404. Pinning client to Legacy.");
+                self.api_version.set(crate::config::ApiVersion::Legacy);
+                return Err(SetModeV3Outcome::Fallback);
+            }
+            // A 401/403/5xx/network failure is a real error, not "v3 is
+            // unsupported": surface it instead of retrying on the legacy
+            // path with a second, unrelated failure.
+            Err(e) => return Err(SetModeV3Outcome::Error(e)),
         };
-        let Some(loc) = locations.first() else {
+        if locations.is_empty() {
+            warn!("V3 locations list is empty; falling back to the legacy mode API");
             return Err(SetModeV3Outcome::Fallback);
+        }
+        let Some(loc) = pick_location(&locations, base_station_id) else {
+            return Err(SetModeV3Outcome::Error(ArloError::DeviceNotFound(format!(
+                "no location lists {base_station_id} among its gateways"
+            ))));
         };
 
         let get_url = format!(
@@ -319,8 +360,10 @@ impl ArloClient {
     }
 
     /// The location whose gateways include `device_id`
-    /// ([`Location::hosts_device`]), or the account's first location when
-    /// Arlo lists no gateways (single-location accounts).
+    /// ([`Location::hosts_device`]), or the account's first location only
+    /// when Arlo lists no gateways at all (single-location accounts).
+    /// When gateway lists exist and none names the device this is
+    /// [`ArloError::DeviceNotFound`], never "the first one".
     ///
     /// [`Location::hosts_device`]: crate::models::automation::Location::hosts_device
     pub async fn location_for_device(
@@ -328,10 +371,7 @@ impl ArloClient {
         device_id: &str,
     ) -> Result<crate::models::automation::Location, ArloError> {
         let locations = self.get_locations().await?;
-        locations
-            .iter()
-            .find(|l| l.hosts_device(device_id))
-            .or_else(|| locations.first())
+        pick_location(&locations, device_id)
             .cloned()
             .ok_or_else(|| ArloError::DeviceNotFound(format!("no location for {device_id}")))
     }
@@ -705,15 +745,24 @@ mod tests {
     }
 
     #[test]
-    fn extract_active_mode_revision_falls_back_to_any_sibling() {
+    fn extract_active_mode_revision_falls_back_to_a_lone_sibling_only() {
         // Arlo sometimes keys data by an automation UUID that isn't the
-        // location ID we passed. Helper should still find a revision.
+        // location ID we passed. With a single child there is no
+        // ambiguity; with several and no exact match there is no answer.
         let body = r#"{"data":{
             "some-other-uuid":{"revision":777}
         }}"#;
         assert_eq!(
             super::extract_active_mode_revision(body, "loc-missing"),
             Some(777)
+        );
+        let ambiguous = r#"{"data":{
+            "uuid-a":{"revision":1},
+            "uuid-b":{"revision":2}
+        }}"#;
+        assert_eq!(
+            super::extract_active_mode_revision(ambiguous, "loc-missing"),
+            None
         );
     }
 
@@ -745,5 +794,81 @@ mod tests {
         assert!(body["activeAutomations"].is_array());
         assert_eq!(body["activeAutomations"][0]["deviceId"], "base-1");
         assert_eq!(body["activeAutomations"][0]["activeModes"][0], "mode1");
+    }
+}
+
+#[cfg(test)]
+mod targeting_tests {
+    use crate::client::test_helpers::authenticated_mocked_client;
+    use crate::client::transport::HttpResponse;
+    use crate::client::transport::test_support::MockTransport;
+    use crate::error::ArloError;
+    use crate::models::error_codes::ErrorAction;
+    use std::sync::Arc;
+
+    const TWO_LOCATIONS: &str = r#"{"success":true,"data":[
+        {"id":"loc-1","name":"Home","gatewayDeviceIds":["U-test_BASE1"]},
+        {"id":"loc-2","name":"Cabin","gatewayDeviceIds":["U-test_BASE2"]}
+    ]}"#;
+
+    #[tokio::test]
+    async fn set_mode_v3_targets_the_location_hosting_the_base_station() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_get(TWO_LOCATIONS);
+        mock.queue_get(r#"{"meta":{"code":200},"data":{"loc-2":{"properties":{},"revision":7}}}"#);
+        mock.queue_post(r#"{"meta":{"code":200}}"#);
+        let client = authenticated_mocked_client(mock.clone());
+        client.set_mode("BASE2", "armed", None).await.unwrap();
+        let calls = mock.calls();
+        assert!(
+            calls[1].url.contains("locationId=loc-2"),
+            "{}",
+            calls[1].url
+        );
+        assert!(
+            calls[3].url.contains("locationId=loc-2&revision=7"),
+            "{}",
+            calls[3].url
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_in_no_location_is_an_error_not_the_first_location() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_get(TWO_LOCATIONS);
+        let client = authenticated_mocked_client(mock.clone());
+        let err = client.set_mode("BASE9", "armed", None).await.unwrap_err();
+        assert!(matches!(err, ArloError::DeviceNotFound(_)), "{err}");
+        assert_eq!(
+            mock.calls().len(),
+            1,
+            "no activeMode traffic, no legacy fallback"
+        );
+
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_get(TWO_LOCATIONS);
+        let client = authenticated_mocked_client(mock.clone());
+        assert!(matches!(
+            client.location_for_device("BASE9").await,
+            Err(ArloError::DeviceNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_mode_v3_surfaces_a_locations_failure_instead_of_falling_back() {
+        let mock = Arc::new(MockTransport::new());
+        mock.expect(HttpResponse {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            body: "".into(),
+        });
+        let client = authenticated_mocked_client(mock.clone());
+        let err = client.set_mode("BASE1", "armed", None).await.unwrap_err();
+        assert_eq!(err.action(), ErrorAction::Retry);
+        assert_eq!(client.api_version.get(), crate::config::ApiVersion::V3);
+        assert_eq!(
+            mock.calls().len(),
+            1,
+            "no legacy POST after a transport failure"
+        );
     }
 }

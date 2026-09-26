@@ -154,6 +154,12 @@ impl ArloClient {
                     if let Some(found) = extract_stream_url(&event) {
                         return StreamUrl::parse(&found);
                     }
+                    // Arlo answers a failed startStream on the bus with the
+                    // same transId and an error instead of a URL. Surface
+                    // it now rather than as a generic timeout in 30 s.
+                    if let Some(err) = stream_error_from_event(&event) {
+                        return Err(err);
+                    }
                 }
                 Ok(Err(RecvError::Lagged(n))) => {
                     warn!(skipped = n, "Event bus lagged during startStream wait");
@@ -208,6 +214,41 @@ fn event_matches_trans_id(event: &crate::models::events::ArloEvent, trans_id: &s
         return true;
     }
     false
+}
+
+/// The error a device or base station reported for our `startStream`,
+/// when `event` (already matched on `transId`) is an error echo:
+/// `action:"error"`, or `properties.error` / `properties.code` present.
+/// The Arlo code goes into `ApiError::error` so [`ArloError::action`]
+/// classifies it (`2059`/`2222` are the "base station not responding"
+/// family). `None` for anything that is not an error.
+fn stream_error_from_event(event: &crate::models::events::ArloEvent) -> Option<ArloError> {
+    let props = event.properties.as_ref();
+    let error_obj = props.and_then(|p| p.get("error")).filter(|e| e.is_object());
+    let is_error = event.action == "error"
+        || props.is_some_and(|p| p.get("error").is_some() || p.get("code").is_some());
+    if !is_error {
+        return None;
+    }
+    // Field lookup: an `error` object wins, then the properties themselves.
+    let field = |name: &str| -> Option<&serde_json::Value> {
+        error_obj
+            .and_then(|e| e.get(name))
+            .or_else(|| props.and_then(|p| p.get(name)))
+    };
+    let arlo_code = field("code")
+        .or_else(|| field("error"))
+        .and_then(|v| v.as_u64())
+        .and_then(|c| u32::try_from(c).ok());
+    let message = field("message")
+        .and_then(|m| m.as_str())
+        .map(crate::models::redact::excerpt)
+        .unwrap_or_else(|| "startStream rejected by the device".to_string());
+    Some(ArloError::ApiError {
+        code: 500,
+        error: arlo_code,
+        message,
+    })
 }
 
 /// Extracts the playable stream URL from a stream-response SSE event.
@@ -470,5 +511,72 @@ mod tests {
             None
         );
         assert_eq!(super::extract_post_response_stream_url(&json!({})), None);
+    }
+}
+
+#[cfg(test)]
+mod error_echo_tests {
+    use super::*;
+    use crate::models::events::ArloEvent;
+    use serde_json::{Value, json};
+
+    fn event(action: &str, properties: Value) -> ArloEvent {
+        ArloEvent {
+            action: action.into(),
+            resource: "cameras/C1".into(),
+            publish_response: None,
+            properties: Some(properties),
+            source: None,
+            trans_id: Some("t-1".into()),
+            active_mode: None,
+        }
+    }
+
+    #[test]
+    fn error_echoes_become_classified_api_errors() {
+        let e = stream_error_from_event(&event(
+            "error",
+            json!({"code": 2059, "message": "Base station is not responding."}),
+        ))
+        .expect("error echo");
+        assert!(
+            matches!(
+                &e,
+                ArloError::ApiError {
+                    error: Some(2059),
+                    ..
+                }
+            ),
+            "{e}"
+        );
+        assert_eq!(
+            e.to_string(),
+            "API Error [500/2059]: Base station is not responding."
+        );
+
+        let nested = stream_error_from_event(&event(
+            "is",
+            json!({"error": {"code": 2222, "message": "busy\nline"}}),
+        ))
+        .expect("nested error object");
+        assert!(matches!(
+            &nested,
+            ArloError::ApiError {
+                error: Some(2222),
+                ..
+            }
+        ));
+        assert!(
+            !nested.to_string().contains('\n'),
+            "control characters stripped"
+        );
+
+        assert!(stream_error_from_event(&event("error", json!({}))).is_some());
+    }
+
+    #[test]
+    fn url_and_ordinary_events_are_not_errors() {
+        assert!(stream_error_from_event(&event("is", json!({"url": "rtsps://h/p"}))).is_none());
+        assert!(stream_error_from_event(&event("is", json!({"activityState": "idle"}))).is_none());
     }
 }

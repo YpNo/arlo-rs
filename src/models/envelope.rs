@@ -130,19 +130,42 @@ fn take_data(parsed: &mut Value) -> Value {
 /// `get_locations`): unwraps the envelope, then if the payload is a JSON
 /// object, falls through to `<object>.<inner_key>` to find the array.
 /// Bare-array responses pass through directly.
+///
+/// `null` or an empty object mean "nothing here yet" and become `[]`. A
+/// non-empty object without `inner_key` is a schema change and is an
+/// error (naming the keys, never the body): reporting it as "no devices"
+/// would make every camera vanish silently.
 pub(crate) fn unwrap_envelope_array(body: &str, inner_key: &str) -> Result<Value, ArloError> {
-    let payload = unwrap_envelope(body)?;
-    if payload.is_array() {
-        return Ok(payload);
+    match unwrap_envelope(body)? {
+        Value::Array(items) => Ok(Value::Array(items)),
+        Value::Null => Ok(Value::Array(vec![])),
+        Value::Object(mut map) => match map.remove(inner_key) {
+            Some(Value::Array(items)) => Ok(Value::Array(items)),
+            Some(_) => Err(ArloError::ParseError(format!(
+                "`{inner_key}` in the response is not an array"
+            ))),
+            None if map.is_empty() => Ok(Value::Array(vec![])),
+            None => Err(ArloError::ParseError(format!(
+                "expected a `{inner_key}` array in the response, found keys {:?}",
+                map.keys().collect::<Vec<_>>()
+            ))),
+        },
+        other => Err(ArloError::ParseError(format!(
+            "expected a `{inner_key}` array in the response, found a JSON {}",
+            json_kind(&other)
+        ))),
     }
-    if let Some(inner) = payload.get(inner_key).cloned()
-        && inner.is_array()
-    {
-        return Ok(inner);
+}
+
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
-    // No array could be located — return an empty array so callers
-    // observing "no devices yet" get a sensible value, not an error.
-    Ok(Value::Array(vec![]))
 }
 
 #[cfg(test)]
@@ -253,10 +276,23 @@ mod tests {
     }
 
     #[test]
-    fn unwrap_envelope_array_returns_empty_when_inner_key_missing() {
-        let body = r#"{"success":true,"data":{"other":[1,2]}}"#;
-        let arr = unwrap_envelope_array(body, "devices").unwrap();
-        assert_eq!(arr.as_array().unwrap().len(), 0);
+    fn unwrap_envelope_array_errors_on_a_drifted_shape_but_tolerates_emptiness() {
+        let drifted = r#"{"success":true,"data":{"items":[1,2]}}"#;
+        let err = unwrap_envelope_array(drifted, "devices")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`devices`") && err.contains("items"), "{err}");
+        assert!(!err.contains("[1,2]"), "body must not be echoed: {err}");
+
+        for empty in [
+            r#"{"success":true,"data":null}"#,
+            r#"{"success":true,"data":{}}"#,
+            r#"{"success":true}"#,
+        ] {
+            let arr = unwrap_envelope_array(empty, "devices").unwrap();
+            assert_eq!(arr.as_array().unwrap().len(), 0, "{empty}");
+        }
+        assert!(unwrap_envelope_array(r#"{"success":true,"data":"nope"}"#, "devices").is_err());
     }
 }
 

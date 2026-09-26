@@ -21,7 +21,7 @@
 | `cookies.rs` | `PersistentJar`: `wreq` cookie store with JSON export/import — Arlo's "trusted browser" state |
 | `ws.rs` | `WsConnector` port (+ `TungsteniteConnector` adapter, `MockWsConnector` in tests) — the seam the MQTT bus and WebRTC signaling open sockets through |
 | `api.rs` | Generic REST helpers: `execute_request`, OPTIONS preflight, 429/1015 rate-limit retry, JSON envelope unwrap |
-| `devices/` | `mod.rs`: `get_devices`, `xcloud_header`. `stream.rs`: legacy `/startStream` trio + URL helpers. `modes.rs`: v3 `activeMode` (+ legacy fallbacks), locations, `AutomationConfig`, `set_mode_by_name`. `actuation.rs`: `notify`-style commands. `media.rs`: audio playback. `sensors.rs`: ambient history decoder |
+| `devices/` | `mod.rs`: `get_devices`, `xcloud_header`. `stream.rs`: legacy `/startStream` trio + URL helpers. `modes.rs`: v3 `activeMode` (+ legacy fallback on 404 only), locations, `pick_location` (gateway match, first only when no gateways anywhere, else `DeviceNotFound`), `AutomationConfig`, `set_mode_by_name`. `actuation.rs`: `notify`-style commands. `media.rs`: audio playback. `sensors.rs`: ambient history decoder |
 | `local_hub.rs` | `LocalHubClient`: LAN-direct SmartHub client with rustls leaf-cert pinning (RATLS) |
 | `ratls.rs` | Raw RATLS token spoofing for Cloudflare-bypass on local hub connections |
 | `library.rs` | S3 video chunk parsing and media decryption |

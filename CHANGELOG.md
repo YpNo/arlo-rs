@@ -310,6 +310,20 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   logged and a bad batch element no longer drops its siblings; SUBSCRIBE
   carries packet id 1 as MQTT 3.1.1 requires and the SUBACK id is
   checked.
+- Mode targeting. A v3 mode change resolves the location that lists the
+  base station among its gateways (`pick_location`); the first location
+  is used only when Arlo lists no gateways anywhere, and a device that no
+  location claims is `DeviceNotFound` instead of "arm the first home".
+  `set_mode` falls back to the legacy API on a 404 only; a 401/403/5xx or
+  network failure while fetching locations surfaces as such rather than
+  being retried on the legacy path. The `activeMode` revision fallback
+  uses a sibling automation's counter only when it is the sole child.
+  `unwrap_envelope_array` reports a drifted response shape (keys named,
+  body not echoed) instead of returning an empty list that made every
+  device vanish silently; `null` and `{}` still mean "nothing yet".
+  The `startStream` wait returns the device's own error echo (`action:
+  "error"`, code classified through the error table) instead of a
+  generic 30 s timeout.
 - Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
   (RUSTSEC-2026-0285, TLS 1.3 handshake across encryption levels) and
   `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);
