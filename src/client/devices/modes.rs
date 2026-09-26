@@ -60,7 +60,7 @@ impl ArloClient {
     ///
     /// **Default path is V3 (`/hmsweb/automation/v3/activeMode`).**
     /// Falls back to the legacy `/hmsweb/users/devices/automation/active`
-    /// path on 403/404, or unconditionally when:
+    /// path on 404, or unconditionally when:
     /// - `model_id` starts with `"VMB"` (older base stations that
     ///   never supported v3), or
     /// - the per-instance `api_version` is pinned to
@@ -116,7 +116,7 @@ impl ArloClient {
     /// Inner V3 attempt. Returns:
     /// - `Ok(())` if the PUT succeeded.
     /// - `Err(SetModeV3Outcome::Fallback)` if the V3 endpoints returned
-    ///   403/404 or the location couldn't be resolved — caller continues
+    ///   404 or the location couldn't be resolved — caller continues
     ///   on the legacy path with `api_version` already pinned to Legacy.
     /// - `Err(SetModeV3Outcome::Error(_))` to bubble up real transport
     ///   / parse errors.
@@ -157,8 +157,7 @@ impl ArloClient {
                 }
             },
             Err(ArloError::HttpError { status, .. })
-                if status == reqwest::StatusCode::FORBIDDEN
-                    || status == reqwest::StatusCode::NOT_FOUND =>
+                if status == reqwest::StatusCode::NOT_FOUND =>
             {
                 warn!(
                     "V3 activeMode GET returned {}. Pinning client to Legacy.",
@@ -192,8 +191,7 @@ impl ArloClient {
         {
             Ok(_) => Ok(()),
             Err(ArloError::HttpError { status, .. })
-                if status == reqwest::StatusCode::FORBIDDEN
-                    || status == reqwest::StatusCode::NOT_FOUND =>
+                if status == reqwest::StatusCode::NOT_FOUND =>
             {
                 warn!(
                     "V3 activeMode PUT returned {}. Pinning client to Legacy.",
@@ -288,18 +286,12 @@ impl ArloClient {
         );
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
-
-        let response: crate::models::automation::ModesResponse = serde_json::from_str(&body_str)?;
-
-        if !response.success {
-            return Err(ArloError::ApiError {
-                code: 500,
-                error: None,
-                message: "Failed to fetch automation v3 modes".to_string(),
-            });
+        let data = crate::models::envelope::unwrap_envelope(&body_str)?;
+        if data.is_null() {
+            return Ok(Vec::new());
         }
-
-        Ok(response.data)
+        serde_json::from_value(data)
+            .map_err(|e| ArloError::ParseError(format!("Failed to parse automation modes: {e}")))
     }
 
     /// Fetches the v3 mode catalogue of a location —
@@ -407,19 +399,7 @@ impl ArloClient {
         let url = format!("{}{}", self.endpoints.api_host, API_AUTOMATION_DEFINITIONS);
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
-
-        let response: crate::models::automation::AutomationDefinitionsResponse =
-            serde_json::from_str(&body_str)?;
-
-        if !response.success {
-            return Err(ArloError::ApiError {
-                code: 500,
-                error: None,
-                message: "Failed to fetch automation definitions".to_string(),
-            });
-        }
-
-        Ok(response.data)
+        crate::models::envelope::unwrap_envelope(&body_str)
     }
 
     /// Retrieves emergency service locations
@@ -427,19 +407,7 @@ impl ArloClient {
         let url = format!("{}{}", self.endpoints.api_host, API_EMERGENCY_LOCATIONS);
 
         let body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
-
-        let response: crate::models::automation::EmergencyLocationsResponse =
-            serde_json::from_str(&body_str)?;
-
-        if !response.success {
-            return Err(ArloError::ApiError {
-                code: 500,
-                error: None,
-                message: "Failed to fetch emergency locations".to_string(),
-            });
-        }
-
-        Ok(response.data)
+        crate::models::envelope::unwrap_envelope(&body_str)
     }
 }
 

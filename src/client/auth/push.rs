@@ -57,14 +57,19 @@ impl ArloClient {
         poll_interval: Duration,
         timeout: Duration,
     ) -> Result<AuthResult, ArloError> {
-        // 1. Reuse a still-valid cached session.
+        // 1. Reuse a still-valid cached session; only Arlo's own verdict
+        //    discards it (see `authenticate`).
         if self.auth.has_token() {
-            if self.validate_session_v3().await.is_ok() {
-                return Ok(AuthResult::Success);
+            match self.validate_session_v3().await {
+                Ok(_) => return Ok(AuthResult::Success),
+                Err(e) if e.action() == ErrorAction::Reauth => {
+                    warn!(error = %e, "Cached token rejected by Arlo; re-authenticating via push");
+                    self.auth.clear_token();
+                }
+                Err(e) => return Err(e),
             }
-            warn!("Cached token failed v3 validation. Re-authenticating via push.");
-            self.auth.clear_token();
         }
+        let poll_interval = poll_interval.max(Self::MIN_POLL_INTERVAL);
 
         // 2. Credentials → preliminary token + userId.
         let creds = config.credentials.as_ref().ok_or_else(|| {
@@ -78,7 +83,15 @@ impl ArloClient {
             .password
             .as_ref()
             .ok_or_else(|| ArloError::AuthError("Missing 'password' in credentials".into()))?;
-        self.login(email, password).await?;
+        let login_data = self.login(email, password).await?;
+        if login_data.auth_completed == Some(true) {
+            info!("Arlo reports authentication complete without a second factor");
+            self.complete_session(None).await?;
+            return Ok(AuthResult::Success);
+        }
+        if self.try_trusted_browser_login().await? {
+            return Ok(AuthResult::Success);
+        }
         let user_id = self
             .auth
             .user_id
@@ -90,12 +103,14 @@ impl ArloClient {
 
         // 4. Poll finishAuth until the user taps Approve on their phone.
         info!("Awaiting push approval in the Arlo mobile app");
-        let deadline = Instant::now() + timeout;
+        // `checked_add`: `Duration::MAX` is the usual "no deadline" idiom
+        // and plain `+` panics on it.
+        let deadline = Instant::now().checked_add(timeout);
         let approved = loop {
             match self.finish_auth_push(&factor_auth_code).await? {
                 PushOutcome::Approved(data) => break data,
                 PushOutcome::Pending => {
-                    if Instant::now() >= deadline {
+                    if deadline.is_some_and(|d| Instant::now() >= d) {
                         return Err(ArloError::Timeout(format!(
                             "push approval not granted within {timeout:?}"
                         )));
@@ -112,6 +127,9 @@ impl ArloClient {
             .await?;
         Ok(AuthResult::Success)
     }
+
+    /// Floor for `poll_interval`: Arlo rate-limits `finishAuth`.
+    const MIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
     /// `POST /api/startAuth {factorType:"", userId}` → the push
     /// `factorAuthCode`. An empty `factorType` makes Arlo dispatch the
@@ -221,12 +239,13 @@ mod tests {
         "token":"final","userId":"U1","authenticated":1,"authCompleted":true,
         "browserAuthCode":"BAC-1"}}"#;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn authenticate_with_push_polls_finish_auth_until_approved() {
         // login → startAuth(push) → finishAuth(pending) →
         // finishAuth(approved) → continuation chain.
         let mock = Arc::new(MockTransport::new());
         mock.queue_post(auth_response("preliminary", "U1")); // login
+        mock.queue_post(r#"{"meta":{"code":400,"error":9204}}"#); // getFactorId: not trusted
         mock.queue_post(start_auth_push_ok()); // startAuth
         mock.queue_post(FINISH_PENDING); // finishAuth #1: pending
         mock.queue_post(FINISH_PENDING); // finishAuth #2: pending
@@ -268,6 +287,7 @@ mod tests {
     async fn authenticate_with_push_times_out_when_never_approved() {
         let mock = Arc::new(MockTransport::new());
         mock.queue_post(auth_response("preliminary", "U1")); // login
+        mock.queue_post(r#"{"meta":{"code":400,"error":9204}}"#); // getFactorId: not trusted
         mock.queue_post(start_auth_push_ok()); // startAuth
         mock.queue_post(FINISH_PENDING); // finishAuth: still pending
 
@@ -290,6 +310,7 @@ mod tests {
     async fn authenticate_with_push_errors_when_no_push_factor_registered() {
         let mock = Arc::new(MockTransport::new());
         mock.queue_post(auth_response("preliminary", "U1")); // login
+        mock.queue_post(r#"{"meta":{"code":400,"error":9204}}"#); // getFactorId: not trusted
         mock.queue_post(
             r#"{"meta":{"code":200},"data":{"factorAuthCode":"FAC-E",
                "factors":[{"factorType":"EMAIL","factorRole":"PRIMARY"}]}}"#,
@@ -306,5 +327,52 @@ mod tests {
             .expect_err("no PUSH factor → error");
 
         assert!(matches!(err, ArloError::AuthError(m) if m.contains("PUSH")));
+    }
+}
+
+#[cfg(test)]
+mod hazard_tests {
+    use super::*;
+    use crate::client::auth::test_support::*;
+    use crate::client::test_helpers::mocked_client;
+    use crate::client::transport::test_support::MockTransport;
+    use crate::models::auth::AuthResult;
+    use std::sync::Arc;
+
+    fn push_cfg() -> crate::config::ArloConfig {
+        crate::config::ArloConfig {
+            credentials: Some(crate::config::CredentialsConfig {
+                email: Some("u".into()),
+                password: Some("p".into()),
+            }),
+            mfa: None,
+            client: None,
+            streaming: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn push_flow_uses_the_trusted_browser_before_dispatching_a_push() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(auth_response("preliminary", "U1")); // login
+        mock.queue_post(r#"{"meta":{"code":200},"data":{"factorId":"BF-1"}}"#); // getFactorId
+        mock.queue_post(r#"{"meta":{"code":200},"data":{"token":"trusted","userId":"U1"}}"#); // startAuth(BROWSER)
+        mock.queue_get("{}"); // validate_access_token
+        mock.queue_get(r#"{"meta":{"code":200},"data":{"userId":"U1","token":"trusted"}}"#); // session/v3
+        mock.queue_get(r#"{"meta":{"code":200},"data":{}}"#); // device_support
+        let mut client = mocked_client(mock.clone());
+        let res = client
+            .authenticate_with_push(&push_cfg(), Duration::from_secs(1), Duration::MAX)
+            .await
+            .expect("trusted path completes");
+        assert!(matches!(res, AuthResult::Success));
+        assert!(
+            !mock
+                .calls()
+                .iter()
+                .any(|c| c.url.contains("/api/finishAuth")),
+            "no push polled"
+        );
+        assert!(mock.responses_drained());
     }
 }

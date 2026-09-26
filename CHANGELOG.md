@@ -277,6 +277,25 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   timeouts (5 s / 30 s, 600 s for a media download); the browser-path
   client shares the default transport's 10 s connect / 30 s request
   deadlines, and the default transport gained the connect deadline.
+- Auth-flow correctness. A cached token is dropped only when Arlo says so
+  (`ErrorAction::Reauth`); a transient failure while validating it
+  (network, 5xx, 429) now surfaces with the token intact instead of
+  forcing a full login plus OTP — in `authenticate`, the push flow and
+  the builder's cache restore alike. The trusted-browser probe propagates
+  lockouts and transport failures instead of firing more auth requests
+  into them. `validate_access_token` and `start_pairing_factor` read the
+  envelope, so a rejected pairing is logged as such rather than as
+  "Browser paired". `logout` still wipes local state unconditionally but
+  returns the server-side error when revocation failed. Only a 404
+  downgrades the client to the legacy API; a 403 surfaces as `Reauth`
+  (and a 401/403 whose body is not an Arlo envelope — a Cloudflare block
+  page — classifies as `Unclassified`, not `Reauth`). `login_v2` keeps
+  `meta.error`; the automation helpers go through the envelope unwrapper
+  instead of fabricating code 500; 9306 is transient and 9307 fatal;
+  wire codes no longer alias through truncating casts. The push flow
+  honours `authCompleted` and the trusted browser before dispatching a
+  push, floors `poll_interval` at 1 s, and no longer panics on
+  `Duration::MAX`.
 - Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
   (RUSTSEC-2026-0285, TLS 1.3 handshake across encryption levels) and
   `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);

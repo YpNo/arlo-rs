@@ -32,13 +32,8 @@ impl ArloClient {
             .await?;
         let base_response: BaseResponse<AuthResponseData> = serde_json::from_str(&body_str)?;
 
-        if base_response.meta.code != 200 {
-            return Err(ArloError::AuthError(
-                base_response
-                    .meta
-                    .message
-                    .unwrap_or_else(|| "Failed V2 login".to_string()),
-            ));
+        if !base_response.meta.is_success() {
+            return Err(base_response.meta.into_error("Failed V2 login"));
         }
 
         let auth_data = base_response.data.ok_or_else(|| {
@@ -77,7 +72,7 @@ impl ArloClient {
         let use_legacy =
             api_version == crate::config::ApiVersion::Legacy || self.auth.user_id.is_none();
 
-        let logout_attempt = if use_legacy {
+        let mut logout_attempt = if use_legacy {
             let url = format!("{}{}", self.endpoints.api_host, AUTH_LOGOUT);
             self.execute_request::<()>(Method::PUT, &url, None).await
         } else {
@@ -99,19 +94,22 @@ impl ArloClient {
             self.execute_request::<()>(Method::DELETE, &url, None).await
         };
 
-        // V3 → Legacy auto-fallback on 403/404, mirroring get_devices /
-        // device_support. We don't retry inside the fallback branch
-        // because the local state is being wiped anyway.
-        if let Err(ArloError::HttpError { status, .. }) = &logout_attempt
-            && !use_legacy
-            && (*status == reqwest::StatusCode::FORBIDDEN
-                || *status == reqwest::StatusCode::NOT_FOUND)
-        {
+        // A 404 on the v3 endpoint means it does not exist for this account:
+        // pin Legacy and revoke through the legacy endpoint instead, so the
+        // token is still invalidated server-side. (A 403 is not a reason
+        // to downgrade; it surfaces below.)
+        let v3_missing = matches!(
+            &logout_attempt,
+            Err(ArloError::HttpError { status, .. })
+                if !use_legacy && *status == reqwest::StatusCode::NOT_FOUND
+        );
+        if v3_missing {
             warn!(
-                "v3 logout returned {}. Pinning client to Legacy and continuing local wipe.",
-                status
+                "v3 logout returned 404. Pinning client to Legacy and retrying the legacy logout."
             );
             self.api_version.set(crate::config::ApiVersion::Legacy);
+            let url = format!("{}{}", self.endpoints.api_host, AUTH_LOGOUT);
+            logout_attempt = self.execute_request::<()>(Method::PUT, &url, None).await;
         }
 
         // Wipe local session state regardless of HTTP outcome.
@@ -119,7 +117,16 @@ impl ArloClient {
         self.auth.user_id = None;
         self.persist_session().await;
 
-        Ok(())
+        match logout_attempt {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "server-side logout failed; the token may stay valid at Arlo until it expires"
+                );
+                Err(e)
+            }
+        }
     }
 }
 
@@ -128,6 +135,9 @@ mod tests {
     use crate::client::auth::test_support::*;
     use crate::client::test_helpers::{authenticated_mocked_client, mocked_client};
     use crate::client::transport::test_support::MockTransport;
+    use crate::endpoints::AUTH_LOGOUT;
+    use crate::error::ArloError;
+    use reqwest::Method;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -207,8 +217,13 @@ mod tests {
 
         let mut client = authenticated_mocked_client(mock);
         assert!(client.is_authenticated());
-        // logout must succeed at the API surface regardless of HTTP outcome.
-        client.logout().await.unwrap();
+        // Local state is wiped either way, but the caller must learn that
+        // the token may still be valid at Arlo.
+        let err = client
+            .logout()
+            .await
+            .expect_err("server-side failure surfaces");
+        assert!(matches!(err, ArloError::HttpError { status, .. } if status.as_u16() == 500));
         assert!(!client.is_authenticated());
         assert_eq!(client.user_id(), None);
     }
@@ -222,9 +237,17 @@ mod tests {
             body: "".into(),
         });
 
+        mock.expect_ok(""); // legacy retry: OPTIONS preflight
+        mock.expect_ok(r#"{"success":true}"#); // legacy PUT
         let mut client = authenticated_mocked_client(Arc::clone(&mock));
         client.logout().await.unwrap();
-        // V3 → Legacy auto-downgrade fires.
+        // V3 → Legacy auto-downgrade fires and the legacy logout runs.
         assert_eq!(client.api_version.get(), crate::config::ApiVersion::Legacy);
+        assert!(
+            mock.calls()
+                .iter()
+                .any(|c| c.url.ends_with(AUTH_LOGOUT) && c.method == Method::PUT)
+        );
+        assert!(mock.responses_drained());
     }
 }

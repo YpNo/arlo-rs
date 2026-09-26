@@ -65,7 +65,7 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
             .get("meta")
             .and_then(|m| m.get("error"))
             .and_then(|e| e.as_u64())
-            .map(|e| e as u32);
+            .and_then(|e| u32::try_from(e).ok());
         let message = parsed
             .get("meta")
             .and_then(|m| m.get("message"))
@@ -79,7 +79,7 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
             })
             .unwrap_or_else(|| "Envelope reports non-200 meta.code".to_string());
         return Err(ArloError::ApiError {
-            code: code as i32,
+            code: i32::try_from(code).unwrap_or(i32::MAX),
             error,
             message,
         });
@@ -93,6 +93,28 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
             crate::models::redact::excerpt(body)
         ),
     })
+}
+
+/// For endpoints whose success body is empty or shapeless (`{}`): fails
+/// only on an explicit negative verdict — `success: false` or a `meta.code`
+/// other than 200 — and treats everything else as success. Arlo signals
+/// failure as HTTP 200 with a non-200 `meta.code`, so a caller that
+/// ignored the body used to report success on a rejection.
+pub(crate) fn check_envelope_status(body: &str) -> Result<(), ArloError> {
+    let Ok(parsed) = serde_json::from_str::<Value>(body) else {
+        return Ok(());
+    };
+    let failed = parsed.get("success").and_then(Value::as_bool) == Some(false)
+        || parsed
+            .get("meta")
+            .and_then(|m| m.get("code"))
+            .and_then(Value::as_u64)
+            .is_some_and(|c| c != 200);
+    if failed {
+        unwrap_envelope(body).map(|_| ())
+    } else {
+        Ok(())
+    }
 }
 
 /// Moves `data` out of the envelope instead of cloning it, so a large
@@ -255,5 +277,48 @@ mod redaction_tests {
         let body = r#"{"success":false,"data":{"sipCallInfo":{"password":"SIP-SECRET"}}}"#;
         let err = unwrap_envelope(body).unwrap_err().to_string();
         assert!(!err.contains("SIP-SECRET"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod status_check_tests {
+    use super::*;
+
+    #[test]
+    fn shapeless_and_empty_bodies_pass_but_explicit_failures_do_not() {
+        assert!(check_envelope_status("").is_ok());
+        assert!(check_envelope_status("{}").is_ok());
+        assert!(check_envelope_status(r#"{"meta":{"code":200}}"#).is_ok());
+        assert!(check_envelope_status(r#"{"success":true}"#).is_ok());
+        let err = check_envelope_status(r#"{"meta":{"code":400,"error":9204}}"#).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ArloError::ApiError {
+                    code: 400,
+                    error: Some(9204),
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(check_envelope_status(r#"{"success":false}"#).is_err());
+    }
+
+    #[test]
+    fn out_of_range_codes_do_not_alias() {
+        let err =
+            unwrap_envelope(r#"{"meta":{"code":4294976313,"error":4294976313}}"#).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ArloError::ApiError {
+                    code: i32::MAX,
+                    error: None,
+                    ..
+                }
+            ),
+            "{err}"
+        );
     }
 }

@@ -5,6 +5,7 @@
 use crate::client::ArloClient;
 use crate::error::ArloError;
 use crate::models::auth::*;
+use crate::models::error_codes::ErrorAction;
 use tracing::{debug, info, instrument, warn};
 
 impl ArloClient {
@@ -18,15 +19,20 @@ impl ArloClient {
         &mut self,
         config: &crate::config::ArloConfig,
     ) -> Result<AuthResult, ArloError> {
-        // 1. Silent Cached Session Verification
+        // 1. Silent Cached Session Verification. Only Arlo's own verdict
+        //    discards the token; a transient failure (network, 5xx, 429)
+        //    keeps it and surfaces, so an outage does not cost an OTP.
         if self.auth.has_token() {
-            if self.validate_session_v3().await.is_ok() {
-                // The underlying cache token successfully unlocked the active hub session.
-                return Ok(AuthResult::Success);
-            } else {
-                // Token expired or invalidated downstream. Delete it.
-                warn!("Cached token failed v3 session validation. Re-authenticating.");
-                self.auth.clear_token();
+            match self.validate_session_v3().await {
+                Ok(_) => return Ok(AuthResult::Success),
+                Err(e) if e.action() == ErrorAction::Reauth => {
+                    warn!(error = %e, "Cached token rejected by Arlo; re-authenticating");
+                    self.auth.clear_token();
+                }
+                Err(e) => {
+                    warn!(error = %e, "Cached token could not be validated; keeping it for a retry");
+                    return Err(e);
+                }
             }
         }
 
@@ -163,18 +169,29 @@ impl ArloClient {
     /// whose response already carries the final token. Returns
     /// `Ok(false)` — with the reason logged — whenever the browser is not
     /// trusted, so the caller continues with the OTP ceremony.
-    async fn try_trusted_browser_login(&mut self) -> Result<bool, ArloError> {
+    ///
+    /// Only Arlo's "not trusted" family of answers means "run the OTP
+    /// ceremony". A lockout (`Fatal`) or a transport failure (`Retry`)
+    /// is propagated: retrying a locked account extends the lockout, and
+    /// firing more authentication requests into an outage helps nobody.
+    pub(super) async fn try_trusted_browser_login(&mut self) -> Result<bool, ArloError> {
         let Some(user_id) = self.auth.user_id.clone() else {
             return Ok(false);
         };
         let factor_id = match self.get_factor_id().await {
             Ok(id) => id,
+            Err(e) if matches!(e.action(), ErrorAction::Fatal | ErrorAction::Retry) => {
+                return Err(e);
+            }
             Err(e) => {
-                debug!(error = %e, "Browser not trusted by Arlo; running the OTP ceremony");
+                info!(error = %e, "Browser not trusted by Arlo; running the OTP ceremony");
                 return Ok(false);
             }
         };
         if let Err(e) = self.start_auth_trusted(&factor_id, &user_id).await {
+            if matches!(e.action(), ErrorAction::Fatal | ErrorAction::Retry) {
+                return Err(e);
+            }
             warn!(error = %e, "Trusted-browser startAuth rejected; falling back to the OTP ceremony");
             return Ok(false);
         }
@@ -465,5 +482,108 @@ mod tests {
             client.authenticate_with_imap(&cfg).await,
             Err(ArloError::AuthError(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod hazard_tests {
+    use crate::client::auth::test_support::*;
+    use crate::client::test_helpers::{authenticated_mocked_client, mocked_client};
+    use crate::client::transport::HttpResponse;
+    use crate::client::transport::test_support::MockTransport;
+    use crate::error::ArloError;
+    use crate::models::error_codes::ErrorAction;
+    use std::sync::Arc;
+
+    fn cfg_with_creds() -> crate::config::ArloConfig {
+        crate::config::ArloConfig {
+            credentials: Some(crate::config::CredentialsConfig {
+                email: Some("u".into()),
+                password: Some("p".into()),
+            }),
+            mfa: None,
+            client: None,
+            streaming: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_validation_failure_keeps_the_cached_token() {
+        let mock = Arc::new(MockTransport::new());
+        mock.expect(HttpResponse {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            body: "maintenance".into(),
+        });
+        let mut client = authenticated_mocked_client(mock.clone());
+        let err = client
+            .authenticate(&cfg_with_creds())
+            .await
+            .expect_err("surfaces");
+        assert_eq!(err.action(), ErrorAction::Retry);
+        assert!(client.is_authenticated(), "token must survive an outage");
+        assert!(
+            !mock.calls().iter().any(|c| c.url.ends_with("/api/auth")),
+            "no re-login"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_cached_token_is_dropped_before_re_login() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_get(r#"{"meta":{"code":401,"error":9002}}"#); // session/v3: expired
+        let mut client = authenticated_mocked_client(mock.clone());
+        // No credentials → the flow stops right after dropping the token.
+        let cfg = crate::config::ArloConfig {
+            credentials: None,
+            mfa: None,
+            client: None,
+            streaming: None,
+        };
+        let err = client.authenticate(&cfg).await.expect_err("no creds");
+        assert!(matches!(err, ArloError::AuthError(m) if m.contains("credentials")));
+        assert!(!client.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn lockout_on_the_trusted_probe_is_not_swallowed() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_post(auth_response("preliminary", "U1")); // login
+        mock.queue_post(r#"{"meta":{"code":400,"error":9017}}"#); // getFactorId: locked
+        let mut client = mocked_client(mock.clone());
+        let err = client
+            .authenticate(&cfg_with_creds())
+            .await
+            .expect_err("lockout");
+        assert_eq!(err.action(), ErrorAction::Fatal);
+        assert!(
+            !mock
+                .calls()
+                .iter()
+                .any(|c| c.url.contains("/api/getFactors")),
+            "no further auth traffic"
+        );
+    }
+
+    #[tokio::test]
+    async fn pairing_rejection_is_logged_not_fatal_but_token_validation_is() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_get("{}"); // validate_access_token
+        mock.queue_post(r#"{"meta":{"code":400,"error":9204}}"#); // startPairingFactor rejected
+        mock.queue_get(r#"{"meta":{"code":200},"data":{"userId":"U1","token":"tok"}}"#); // session/v3
+        mock.queue_get(r#"{"meta":{"code":200},"data":{}}"#); // device_support
+        let mut client = authenticated_mocked_client(mock.clone());
+        client
+            .complete_session(Some("BAC"))
+            .await
+            .expect("pairing failure is not fatal");
+
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_get(r#"{"meta":{"code":401,"error":9002}}"#); // validate_access_token says no
+        let mut client = authenticated_mocked_client(mock.clone());
+        let err = client
+            .complete_session(None)
+            .await
+            .expect_err("validation failure is fatal");
+        assert_eq!(err.action(), ErrorAction::Reauth);
     }
 }

@@ -48,10 +48,12 @@ impl ArloClient {
 
         let body_str = match res {
             Ok(body) => body,
+            // Only a 404 says the v2 endpoint does not exist for this
+            // account. A 403 is an expired session or a Cloudflare block
+            // and must surface as such (`action() == Reauth`), not pin the
+            // client to the legacy list for its lifetime.
             Err(ArloError::HttpError { status, .. })
-                if is_v3
-                    && (status == reqwest::StatusCode::FORBIDDEN
-                        || status == reqwest::StatusCode::NOT_FOUND) =>
+                if is_v3 && status == reqwest::StatusCode::NOT_FOUND =>
             {
                 warn!(
                     "get_devices v2 returned {}. Pinning client to Legacy and retrying.",
@@ -175,5 +177,28 @@ mod tests {
         let devices = client.get_devices().await.unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].device_type, "basestation");
+    }
+}
+
+#[cfg(test)]
+mod hazard_tests {
+    use crate::client::test_helpers::authenticated_mocked_client;
+    use crate::client::transport::HttpResponse;
+    use crate::client::transport::test_support::MockTransport;
+    use crate::models::error_codes::ErrorAction;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn a_403_on_the_v2_device_list_surfaces_and_does_not_pin_legacy() {
+        let mock = Arc::new(MockTransport::new());
+        mock.expect(HttpResponse {
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: r#"{"meta":{"code":403,"error":9002}}"#.into(),
+        });
+        let client = authenticated_mocked_client(mock.clone());
+        let err = client.get_devices().await.expect_err("403 surfaces");
+        assert_eq!(err.action(), ErrorAction::Reauth);
+        assert_eq!(client.api_version.get(), crate::config::ApiVersion::V3);
+        assert_eq!(mock.calls().len(), 1, "no legacy retry");
     }
 }

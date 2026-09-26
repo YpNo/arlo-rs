@@ -66,6 +66,17 @@ impl From<stealthscraper_rs::wreq::Error> for ArloError {
     }
 }
 
+/// True when `body` is a JSON object with Arlo's `meta` or `success` key.
+fn looks_like_arlo_envelope(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.as_object()
+                .map(|o| o.contains_key("meta") || o.contains_key("success"))
+        })
+        .unwrap_or(false)
+}
+
 /// Renders the Arlo-specific `meta.error` suffix of an `ApiError` display.
 fn fmt_arlo_code(error: &Option<u32>) -> String {
     error.map(|e| format!("/{e}")).unwrap_or_default()
@@ -83,7 +94,18 @@ impl ArloError {
     pub fn action(&self) -> ErrorAction {
         match self {
             ArloError::ApiError { code, error, .. } => classify(*code, *error),
-            ArloError::HttpError { status, .. } => classify(i32::from(status.as_u16()), None),
+            ArloError::HttpError { status, body } => {
+                let code = i32::from(status.as_u16());
+                // A 401/403 means "re-authenticate" only when Arlo said so;
+                // a Cloudflare block page is a 403 too, and discarding a
+                // valid token on it just repeats the ceremony against the
+                // same blocked edge.
+                if (code == 401 || code == 403) && !looks_like_arlo_envelope(body) {
+                    ErrorAction::Unclassified
+                } else {
+                    classify(code, None)
+                }
+            }
             ArloError::NetworkError(_) | ArloError::Timeout(_) => ErrorAction::Retry,
             ArloError::AuthError(_)
             | ArloError::ScraperError(_)
@@ -125,9 +147,14 @@ mod tests {
         assert_eq!(lockout.action(), ErrorAction::Fatal);
         let forbidden = ArloError::HttpError {
             status: reqwest::StatusCode::FORBIDDEN,
-            body: String::new(),
+            body: r#"{"meta":{"code":403,"message":"nope"}}"#.into(),
         };
         assert_eq!(forbidden.action(), ErrorAction::Reauth);
+        let cloudflare = ArloError::HttpError {
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: "<html><title>Attention Required! | Cloudflare</title></html>".into(),
+        };
+        assert_eq!(cloudflare.action(), ErrorAction::Unclassified);
         assert_eq!(ArloError::Timeout("t".into()).action(), ErrorAction::Retry);
         assert_eq!(
             ArloError::ParseError("p".into()).action(),

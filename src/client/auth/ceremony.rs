@@ -144,8 +144,8 @@ impl ArloClient {
             self.endpoints.auth_host, AUTH_VALIDATE_ACCESS_TOKEN, timestamp
         );
 
-        let _body_str = self.execute_request::<()>(Method::GET, &url, None).await?;
-        Ok(())
+        let body = self.execute_request::<()>(Method::GET, &url, None).await?;
+        crate::models::envelope::check_envelope_status(&body)
     }
 
     /// Step 4c: (Optional) Starts the pairing factor flow to remember the device.
@@ -157,10 +157,10 @@ impl ArloClient {
             "factorData": "",
             "factorType": "BROWSER"
         });
-        let _body_str = self
+        let body = self
             .execute_request(Method::POST, &url, Some(&payload))
             .await?;
-        Ok(())
+        crate::models::envelope::check_envelope_status(&body)
     }
 
     /// Step 5: Validate the token against the V3 session endpoint using event tracking.

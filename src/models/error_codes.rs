@@ -49,15 +49,17 @@ pub enum ErrorAction {
 pub const SESSION_EXPIRED: &[u32] = &[9002, 9022, 9025, 9328];
 /// Two-step authentication not finished. 9233 is load-bearing for PUSH:
 /// `finishAuth` returns it while the push notification is unanswered.
-pub const AUTH_PENDING: &[u32] = &[9233, 9276, 9278, 9306, 9307];
+pub const AUTH_PENDING: &[u32] = &[9233, 9276, 9278];
 /// Permanent authentication failures. 9017 is a 5-minute lockout.
-pub const FATAL_AUTH: &[u32] = &[9001, 9004, 9015, 9016, 9017, 9019, 9058, 9340];
+/// 9307 ("MFA is limited for the region") is permanent for the account.
+pub const FATAL_AUTH: &[u32] = &[9001, 9004, 9015, 9016, 9017, 9019, 9058, 9307, 9340];
 /// A new one-time code is required.
 pub const OTP_ERRORS: &[u32] = &[9234, 9236, 9237, 9238, 9243, 9301];
 /// The user said no.
 pub const REJECTED: &[u32] = &[9239];
 /// Transient "something went wrong" family (0 is a server-side timeout).
-pub const TRANSIENT: &[u32] = &[0, 9000, 9029, 9241, 9316, 9334];
+/// 9306 shares the web client's "Something went wrong. Try again." text.
+pub const TRANSIENT: &[u32] = &[0, 9000, 9029, 9241, 9306, 9316, 9334];
 /// Base station unreachable; arrives on `notify` calls, not auth calls.
 pub const DEVICE_OFFLINE: &[u32] = &[2059, 2222];
 /// "This browser is not trusted, complete a login." (The official table

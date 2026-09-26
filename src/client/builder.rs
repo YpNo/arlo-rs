@@ -305,11 +305,21 @@ pub(crate) async fn apply_session_cache(client: &mut ArloClient, path: &str) {
         let device_id = cached.device_id.clone();
         let cookies = cached.cookies.clone();
         client.auth = cached;
-        if client.validate_session_v3().await.is_ok() {
-            info!(%path, "Restored active Arlo session from cache");
-            return;
+        match client.validate_session_v3().await {
+            Ok(_) => {
+                info!(%path, "Restored active Arlo session from cache");
+                return;
+            }
+            Err(e) if e.action() == crate::models::error_codes::ErrorAction::Reauth => {
+                warn!(%path, error = %e, "Cached Arlo session rejected by Arlo; token dropped");
+            }
+            Err(e) => {
+                // Network, 5xx, 429: the token may be perfectly valid.
+                // Keep it; `authenticate()` re-validates before use.
+                warn!(%path, error = %e, "Cached Arlo session could not be validated; keeping it");
+                return;
+            }
         }
-        warn!(%path, "Cached Arlo session expired or invalid; token dropped");
         // Only the token is stale. The identity Arlo paired as a trusted
         // browser — this device_id plus the cookie jar — is what lets the
         // next login skip the OTP, so it is kept.
@@ -419,11 +429,11 @@ mod tests {
 
     #[tokio::test]
     async fn apply_session_cache_resets_when_validation_fails() {
-        // Pre-seed cache, but queue an unrecognised-envelope response so
-        // validate_session_v3 fails. apply_session_cache must wipe the
-        // restored token and prime the path for a fresh login.
+        // Pre-seed cache, but have session/v3 report the session expired.
+        // apply_session_cache must wipe the restored token and prime the
+        // path for a fresh login.
         let mock = Arc::new(MockTransport::new());
-        mock.expect_ok(r#"{"banana":true}"#); // invalid envelope
+        mock.expect_ok(r#"{"meta":{"code":401,"error":9002}}"#); // session expired
 
         let temp = NamedTempFile::new().unwrap();
         let path = temp.path().to_str().unwrap().to_string();
@@ -540,5 +550,40 @@ mod redaction_tests {
             dbg.contains("proxy.example:1080") && !dbg.contains("hunter2"),
             "{dbg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod hazard_tests {
+    use super::*;
+    use crate::client::auth::AuthManager;
+    use crate::client::test_helpers::mocked_client;
+    use crate::client::transport::HttpResponse;
+    use crate::client::transport::test_support::MockTransport;
+    use std::sync::Arc;
+    use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn apply_session_cache_keeps_token_on_transient_failure() {
+        let mock = Arc::new(MockTransport::new());
+        mock.expect(HttpResponse {
+            status: reqwest::StatusCode::BAD_GATEWAY,
+            body: "upstream down".into(),
+        });
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path().to_str().unwrap().to_string();
+        let mut seeder = AuthManager::new();
+        seeder.set_token("maybe-valid".to_string());
+        seeder.user_id = Some("U1".to_string());
+        seeder.cache_path = Some(path.clone());
+        seeder.save_to_cache().await;
+
+        let mut client = mocked_client(Arc::clone(&mock));
+        apply_session_cache(&mut client, &path).await;
+        assert!(
+            client.is_authenticated(),
+            "an outage must not cost the token"
+        );
+        assert_eq!(client.auth.token(), Some("maybe-valid"));
     }
 }

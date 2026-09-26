@@ -46,7 +46,7 @@ impl Meta {
             })
             .unwrap_or_else(|| fallback.to_string());
         ArloError::ApiError {
-            code: self.code as i32,
+            code: i32::try_from(self.code).unwrap_or(i32::MAX),
             error: self.error,
             message,
         }

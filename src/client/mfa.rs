@@ -152,6 +152,10 @@ impl StdinMfaHandler {
 impl MfaHandler for StdinMfaHandler {
     async fn provide_otp(&mut self, challenge: &MfaChallenge) -> Result<String, ArloError> {
         let provider = challenge.provider.clone();
+        // Not cancellable: if the caller drops this future, the blocking
+        // thread stays parked on `read_line` until the next line arrives.
+        // Acceptable for an interactive prompt; use a different handler in
+        // a daemon.
         // stdio is intentionally synchronous — interactive prompts have no
         // benefit from async, and `tokio::io::stdin` introduces subtle
         // line-buffering surprises.
