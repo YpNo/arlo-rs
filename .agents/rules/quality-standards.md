@@ -4,7 +4,7 @@
 ## Quality Gates
 
 - **Zero-Warning Policy**: All code must pass `cargo clippy` and `cargo fmt`.
-- **Documentation Integrity**: Public APIs must have comprehensive docstrings; sync via `cargo-rdme`.
+- **Documentation Integrity**: Public APIs must have comprehensive docstrings; `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings` is the gate. The README is hand-written (no `cargo-rdme`): update it together with `lib.rs` when the public surface changes.
 - **Testing Thresholds**: Mandatory unit tests for Domain logic; integration tests for Infrastructure.
 
 ## Security Gates

@@ -128,8 +128,9 @@ Use descriptive names that explain the scenario:
 
 ## Coverage
 
-- Target 80%+ line coverage
-- Use **cargo-llvm-cov** for coverage reporting
+- Target 80%+ line coverage; the CI gate is `cargo tarpaulin --fail-under 65`
+  (raise it as coverage grows — keep `codecov.yml` on the same number)
+- Use **cargo-tarpaulin** for coverage reporting (what CI runs)
 - Focus on business logic — exclude generated code and FFI bindings
 
 ```bash

@@ -24,7 +24,7 @@
 | `devices/` | `mod.rs`: `get_devices`, `xcloud_header`. `stream.rs`: legacy `/startStream` trio + URL helpers. `modes.rs`: v3 `activeMode` (+ legacy fallback on 404 only), locations, `pick_location` (gateway match, first only when no gateways anywhere, else `DeviceNotFound`), `AutomationConfig`, `set_mode_by_name`. `actuation.rs`: `notify`-style commands. `media.rs`: audio playback. `sensors.rs`: ambient history decoder |
 | `local_hub.rs` | `LocalHubClient`: LAN-direct SmartHub client with rustls leaf-cert pinning (RATLS) |
 | `ratls.rs` | Raw RATLS token spoofing for Cloudflare-bypass on local hub connections |
-| `library.rs` | S3 video chunk parsing and media decryption |
+| `library.rs` | `get_library`: cloud DVR media-library listing between two dates (`LibraryQuery` → `MediaItem`s) |
 | `endpoints.rs` | `ArloEndpoints`: overrideable auth + API hosts (mockito-friendly) |
 
 ### `src/events/` — MQTT-over-WSS telemetry bus

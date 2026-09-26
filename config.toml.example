@@ -5,8 +5,9 @@
 #
 # ⚠️  `config.toml` is in .gitignore — never commit it. It holds your
 #     Arlo password and IMAP app-password in plaintext. Treat it like
-#     a `.env`. Programmatic users can skip TOML entirely and use
-#     `ArloClient::builder()` instead.
+#     a `.env` and keep it `chmod 600` (the library warns at startup
+#     when other users can read it). Programmatic users can skip TOML
+#     entirely and use `ArloClient::builder()` instead.
 # ==========================================
 
 [credentials]
@@ -53,7 +54,7 @@ session_cache_path = ".arlo_session.json"
 
 # Arlo API version. "v3" (default) targets the 2025+ endpoints
 # (/hmsweb/v2/users/devices, /automation/v3/*, v3 logout). The client
-# auto-falls-back to "legacy" on a 403/404 from any v3 endpoint, so you
+# auto-falls-back to "legacy" on a 404 from a v3 endpoint, so you
 # normally never need to set this. Pin "legacy" only if you're on an
 # un-migrated account and want to skip the failed v3 probe round-trips.
 api_version = "v3"

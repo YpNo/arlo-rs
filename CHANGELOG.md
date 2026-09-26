@@ -15,6 +15,11 @@ trusted-browser re-login, the Arlo error-code classifier and the module
 split. Every entry below was `[Unreleased]` since 0.1.0.
 
 ### Changed — module splits and documentation (Phase 5)
+- README gained Architecture, Testing, CI/CD, Security and Changelog
+  sections, the MFA section describes `ImapMfaHandler` / `MfaHandler` /
+  `authenticate_with_push` (the documented `fetch_imap_otp()` never
+  existed), and the config template and `CLAUDE.md` module map were
+  brought in line with the code (404-only legacy fallback, `library.rs`).
 - `src/client/auth.rs` (1825 lines) → `auth/{mod, ceremony, flow, push,
   session}.rs` and `src/client/devices.rs` (2148 lines) →
   `devices/{mod, stream, modes, actuation, media, sensors}.rs`, every

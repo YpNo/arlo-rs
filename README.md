@@ -33,7 +33,9 @@ arlo-rs = "0.2.0"
 
 `arlo-rs` links BoringSSL (through `stealthscraper-rs` → `wreq`), which is
 built from source by `btls-sys` and needs a C/C++ toolchain, CMake and
-`libclang` (for `bindgen`). On Debian / Ubuntu:
+`libclang` (for `bindgen`). The Rust toolchain is pinned in
+`rust-toolchain.toml` (1.95.0; `rustup` picks it up automatically). On
+Debian / Ubuntu:
 
 ```bash
 sudo apt-get install -y build-essential cmake libclang-dev
@@ -82,11 +84,17 @@ session_cache_path = ".arlo_session.json"
 
 Arlo enforces strict MFA on all accounts. `arlo-rs` provides flexible tools to handle these challenges interactively or programmatically:
 
-1. **Push Notifications (Default)**: The easiest method if you have the Arlo app installed on your smartphone. When `start_auth()` is called with a Push factor, Arlo sends a notification to your phone. You simply tap "Approve", and the `finish_auth()` call (which does not require an OTP string for push) will succeed.
-2. **Email OTP**: Arlo sends a One-Time Password to your registered email address. This method is ideal for fully automated headless servers. You can configure a background worker to connect to your mailbox via IMAP, parse the 6-digit OTP from the incoming Arlo email, and automatically supply it to `finish_auth()`. `arlo-rs` includes built-in fast IMAP polling natively (`client.fetch_imap_otp()`) which supports easy provider shortcuts (`"gmail"`, `"outlook"`, `"yahoo"`) so you don't even need to configure hosts manually!
-3. **SMS OTP**: Similar to Email, Arlo sends a text message to your registered phone number. You must retrieve this code and provide it to the client.
+1. **Push Notifications**: The easiest method if you have the Arlo app installed on your smartphone. `ArloClient::authenticate_with_push()` triggers the prompt and polls until you tap "Approve" (no OTP string is involved); the lower-level `start_auth()` / `finish_auth()` pair is available for custom flows.
+2. **Email OTP**: Arlo sends a One-Time Password to your registered email address. This method is ideal for fully automated headless servers: the built-in `ImapMfaHandler` polls your mailbox over IMAP, verifies the sender, parses the 6-digit OTP from the Arlo email and submits it, with provider shortcuts (`"gmail"`, `"outlook"`, `"yahoo"`) so hosts need not be configured by hand. Any other OTP source (a bot, a webhook, a prompt) plugs in through the `MfaHandler` trait.
+3. **SMS OTP**: Similar to Email, Arlo sends a text message to your registered phone number. You must retrieve this code and provide it to the client (`StdinMfaHandler` or your own `MfaHandler`).
+
+Once a login is paired as a trusted browser, later logins on the same `device_id` + cookie jar (both kept in the session cache) complete without a second factor.
 
 To avoid repeated MFA prompts, `arlo-rs` automatically serializes successful session tokens to the file specified in `session_cache_path` (e.g., `.arlo_session.json`). On subsequent startups, `ArloClient::from_config()` will instantly hydrate and validate this cached token without requiring user interaction.
+
+> 🔒 Keep `config.toml` readable by you only (`chmod 600 config.toml`): it
+> holds your Arlo password and IMAP app-password, and the library logs a
+> warning at startup when other users can read it.
 
 ## 🧪 Scenarios & Examples
 
@@ -143,12 +151,84 @@ When contributing or debugging the `arlo-rs` library, you can use these essentia
   ```bash
   cargo doc --no-deps --open
   ```
-- **Run the live-account smoke test** (opt-in: it is `#[ignore]` and needs
-  both a valid `config.toml` and `ARLO_E2E=1`, because it triggers a real
-  second factor):
+- **Audit dependencies (advisories, licenses, bans, duplicates):**
+  ```bash
+  cargo audit --deny warnings && cargo deny check
+  ```
+
+## 🧱 Architecture
+
+`arlo-rs` is laid out hexagonally:
+
+- **Domain** (`src/models/`): pure data — Arlo envelopes, events,
+  automation, the error-code table, cloud-input validation and the
+  log-redaction policy. No I/O.
+- **Application** (`src/client/`): the `ArloClient` orchestration — the
+  6-step auth ceremony, MFA handlers, device/mode/stream use cases, the
+  session cache — written against two ports, `HttpTransport` and
+  `WsConnector`.
+- **Infrastructure**: `WreqTransport` (Chrome-impersonating HTTP via
+  `stealthscraper-rs`), the `tokio-tungstenite` WebSocket connector behind
+  the MQTT event bus and WebRTC signaling, the rustls-pinned local-hub
+  client, and the IMAP OTP fetcher.
+
+Arlo responses are treated as untrusted input: hosts, ids and stream URLs
+are validated before use, bodies are size-capped, every network wait has
+a deadline, and errors carry Arlo's own code so callers branch on
+`ArloError::action()`. The rustdoc (`cargo doc --no-deps --open`) is the
+API reference; `CLAUDE.md` carries the module map and design rules.
+
+## ✅ Testing
+
+- `cargo test --all-features` runs the unit and integration suites with no
+  network: the orchestration layer is driven through `MockTransport` and
+  `MockWsConnector` (or `mockito` for the real HTTP client). Timeout paths
+  run under tokio's paused clock, so the suite finishes in seconds.
+- CI enforces a coverage floor with `cargo tarpaulin --fail-under 65`
+  (Codecov mirrors the same number); raising it is tracked work — the IMAP
+  fetcher and the opt-in browser transport are the uncovered paths.
+- **Live-account smoke test** (opt-in: it is `#[ignore]` and needs both a
+  valid `config.toml` and `ARLO_E2E=1`, because it triggers a real second
+  factor):
   ```bash
   ARLO_E2E=1 RUST_LOG=info cargo test --test e2e_arlo_api -- --ignored --nocapture
   ```
+
+## 🔁 CI/CD
+
+`.github/workflows/ci.yml` runs on every push and pull request: `cargo
+fmt --check`, `clippy -D warnings`, tests, `cargo doc -D warnings`,
+`cargo-deny` (licenses, bans, sources, advisories), `cargo audit`,
+gitleaks secret scanning, coverage, and SonarQube (skipped on forks).
+Every job has a timeout and every action is pinned to a commit SHA;
+tools are installed at exact, checksum-verified versions.
+
+Releases are the last job of the same workflow: on a push to `main` that
+passes every gate, the version is read from `Cargo.toml` with `cargo
+metadata` and a GitHub release with generated notes is created if that
+tag does not exist yet. Renovate keeps dependencies and action digests
+current (three-day release age, weekly lockfile maintenance, OSV alerts).
+
+## 🔒 Security
+
+- Secrets (`config.toml`, `.arlo_session.json`) are gitignored, written
+  `0600`, and never logged: tokens and passwords live in
+  `secrecy::SecretString`, `Debug` prints `[REDACTED]`, and upstream
+  bodies reach error messages only as redacted, capped excerpts.
+- The session token is sent only to the Arlo auth and API origins, no
+  HTTP client follows redirects, TLS verification is never disabled (the
+  local-hub client pins the hub's leaf certificate), and a certificate
+  failure is classified as fatal rather than retried.
+- Dependencies are audited on every push and weekly (`cargo audit`,
+  `cargo deny`).
+- To report a vulnerability, please open a
+  [private security advisory](https://github.com/YpNo/arlo-rs/security/advisories/new)
+  rather than a public issue.
+
+## 📝 Changelog
+
+Versioned with [Semantic Versioning](https://semver.org) and recorded in
+[CHANGELOG.md](CHANGELOG.md) (Keep-a-Changelog format).
 
 ## 🤝 Contributing
 
