@@ -34,7 +34,7 @@ arlo-rs = "0.2.0"
 `arlo-rs` links BoringSSL (through `stealthscraper-rs` → `wreq`), which is
 built from source by `btls-sys` and needs a C/C++ toolchain, CMake and
 `libclang` (for `bindgen`). The Rust toolchain is pinned in
-`rust-toolchain.toml` (1.98.1; `rustup` picks it up automatically). On
+`rust-toolchain.toml` (1.98.1, also the declared `rust-version`; `rustup` picks it up automatically). On
 Debian / Ubuntu:
 
 ```bash
@@ -223,7 +223,7 @@ current (three-day release age, weekly lockfile maintenance, OSV alerts).
   `cargo deny`).
 - To report a vulnerability, please open a
   [private security advisory](https://github.com/YpNo/arlo-rs/security/advisories/new)
-  rather than a public issue.
+  rather than a public issue — see [SECURITY.md](SECURITY.md).
 
 ## 📝 Changelog
 

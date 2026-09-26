@@ -911,3 +911,100 @@ mod liveness_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod robustness_tests {
+    //! `mqttbytes` is the accepted unmaintained crate on the trust boundary
+    //! (see deny.toml). These tests replace a fuzz target: broker bytes of
+    //! any shape must yield a packet or an error, never a panic.
+    use super::*;
+    use mqttbytes::v4::{PingResp, Publish};
+
+    /// xorshift64*: deterministic pseudo-random bytes with no dev-dependency.
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            (0..n).map(|_| (self.next() >> 56) as u8).collect()
+        }
+    }
+
+    /// Drains a buffer the way the pump does: until the decoder needs more
+    /// bytes or reports an error. Returns the number of packets decoded.
+    fn drain(bytes: &[u8]) -> Result<usize, ArloError> {
+        let mut buf = BytesMut::from(bytes);
+        let mut decoded = 0;
+        while next_packet(&mut buf)?.is_some() {
+            decoded += 1;
+        }
+        Ok(decoded)
+    }
+
+    fn real_stream() -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        Publish::new(
+            "d/XC1/out/cameras/state",
+            QoS::AtMostOnce,
+            br#"{"resource":"cameras/A0A0000YA0D00","action":"is","properties":{"batteryLevel":97}}"#
+                .to_vec(),
+        )
+        .write(&mut buf)
+        .expect("publish encodes");
+        subscribe_packet(&["u/U1/in/#".to_string()])
+            .write(&mut buf)
+            .expect("subscribe encodes");
+        PingResp.write(&mut buf).expect("pingresp encodes");
+        buf.to_vec()
+    }
+
+    #[test]
+    fn decoder_never_panics_on_random_bytes() {
+        let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..4000 {
+            let len = (rng.next() % 600) as usize;
+            let _ = drain(&rng.bytes(len));
+        }
+        // Every fixed-header byte, with remaining-length varints at the
+        // edges (0, 1, 127, continuation bit set, all ones).
+        for first in 0u8..=255 {
+            for second in [0x00u8, 0x01, 0x7f, 0x80, 0xff] {
+                let mut bytes = vec![first, second];
+                bytes.extend(rng.bytes(8));
+                let _ = drain(&bytes);
+                // A declared length beyond MAX_PACKET_BYTES must be an
+                // error, not an allocation.
+                let oversized = [first, 0xff, 0xff, 0xff, 0x7f];
+                let _ = drain(&oversized);
+            }
+        }
+    }
+
+    #[test]
+    fn decoder_never_panics_on_truncated_or_corrupted_real_packets() {
+        let whole = real_stream();
+        assert_eq!(drain(&whole).expect("well-formed stream"), 3);
+
+        // Every prefix: "need more bytes" or a clean error, never a panic.
+        for cut in 0..whole.len() {
+            let _ = drain(&whole[..cut]);
+        }
+
+        // Single-byte corruption at every offset, with several patterns.
+        for idx in 0..whole.len() {
+            for mask in [0x01u8, 0x80, 0xff, 0x7f] {
+                let mut corrupted = whole.clone();
+                corrupted[idx] ^= mask;
+                let _ = drain(&corrupted);
+            }
+        }
+    }
+}
