@@ -129,6 +129,12 @@ fn hand_built_topics(devices: &[Device]) -> Vec<String> {
     topics
 }
 
+/// Deadline for each half of the broker handshake: the WebSocket dial and
+/// the wait for CONNACK. A broker that accepts the upgrade and never
+/// answers CONNECT would otherwise park the listener in `Connecting`
+/// forever, with no reconnect.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Backoff between reconnect attempts. Mirrors the old SSE listener.
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 /// MQTT `CONNECT` keep-alive, in seconds (matches the web client).
@@ -191,7 +197,12 @@ async fn run_session(
     info!(%url, "Connecting to MQTT-over-WSS event bus");
 
     // Arlo's non-standard upgrade extras: `Origin` + the `mqtt` subprotocol.
-    let mut ws = connector.connect(&url, WS_ORIGIN, "mqtt").await?;
+    let mut ws = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        connector.connect(&url, WS_ORIGIN, "mqtt"),
+    )
+    .await
+    .map_err(|_| ArloError::Timeout(format!("MQTT WSS dial exceeded {HANDSHAKE_TIMEOUT:?}")))??;
 
     // -- MQTT CONNECT --
     ws.send(Message::Binary(encode(&connect_packet(params))?.into()))
@@ -199,7 +210,13 @@ async fn run_session(
         .map_err(|e| ArloError::ScraperError(format!("CONNECT send failed: {e}")))?;
 
     let mut rx_buf = BytesMut::new();
-    wait_for_connack(&mut ws, &mut rx_buf).await?;
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, wait_for_connack(&mut ws, &mut rx_buf))
+        .await
+        .map_err(|_| {
+            ArloError::Timeout(format!(
+                "MQTT CONNACK not received within {HANDSHAKE_TIMEOUT:?}"
+            ))
+        })??;
     let _ = state_tx.send(ConnectionState::Connected);
     info!("MQTT connected");
 
@@ -597,5 +614,39 @@ mod filter_tests {
                 "u/UXXX-000-00000000/in/#".to_string(),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod handshake_timeout_tests {
+    use super::*;
+    use crate::client::ws::test_support::MockWsConnector;
+    use std::sync::Arc;
+
+    fn params() -> MqttParams {
+        MqttParams {
+            mqtt_url: "wss://mqtt-cluster-z1-1.arloxcld.com:8084".into(),
+            user_id: "UXXX-000-00000000".into(),
+            access_token: "TOK".to_string().into(),
+            topics: vec!["u/UXXX-000-00000000/in/#".into()],
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_broker_times_out_instead_of_parking_the_listener() {
+        // No scripted frames: the socket accepts CONNECT and never answers.
+        let ws = Arc::new(MockWsConnector::new());
+        let (sender, _rx) = broadcast::channel(8);
+        let (state_tx, state_rx) = watch::channel(ConnectionState::Connecting);
+
+        let params = params();
+        let (result, ()) = tokio::join!(
+            run_session(&params, ws.as_ref(), &sender, &state_tx),
+            async { ws.release() }
+        );
+        let err = result.expect_err("must time out");
+        assert!(matches!(err, ArloError::Timeout(_)), "{err}");
+        assert_eq!(ws.connects().len(), 1);
+        assert_eq!(*state_rx.borrow(), ConnectionState::Connecting);
     }
 }

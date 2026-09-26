@@ -33,6 +33,14 @@ use crate::error::ArloError;
 use crate::models::api::Device;
 use crate::models::envelope::unwrap_envelope;
 use crate::models::sip::SipInfo;
+use std::time::Duration;
+
+/// Deadline for the signaling dial, and separately for the offer/answer
+/// exchange. A gateway that accepts the upgrade and never replies would
+/// otherwise hang the caller of [`ArloClient::webrtc_negotiate`].
+const SIGNALING_TIMEOUT: Duration = Duration::from_secs(15);
+/// Pings answered before the exchange is abandoned as unanswered.
+const SIGNALING_MAX_PINGS: usize = 20;
 
 /// `Origin` the Arlo web client sends on the signaling WS upgrade.
 const WS_ORIGIN: &str = "https://my.arlo.com";
@@ -111,34 +119,57 @@ impl ArloClient {
             Some(7443),
         )?;
         // Arlo's upgrade extras: `Origin` + the `sip` subprotocol.
-        let mut ws = self.ws.connect(ws_url.as_str(), WS_ORIGIN, "sip").await?;
+        let mut ws = tokio::time::timeout(
+            SIGNALING_TIMEOUT,
+            self.ws.connect(ws_url.as_str(), WS_ORIGIN, "sip"),
+        )
+        .await
+        .map_err(|_| {
+            ArloError::Timeout(format!("signaling WSS dial exceeded {SIGNALING_TIMEOUT:?}"))
+        })??;
         info!("livestream signaling WS connected");
 
         let frame = build_initiate_offer(sip, &session_id, &camera_id, offer_sdp);
-        ws.send(Message::Text(frame.into()))
-            .await
-            .map_err(|e| ArloError::ScraperError(format!("initiateOffer send: {e}")))?;
-
-        let answer = loop {
-            match ws.next().await {
-                Some(Ok(Message::Text(t))) => break parse_answer(t.as_str())?,
-                Some(Ok(Message::Binary(b))) => {
-                    break parse_answer(&String::from_utf8_lossy(&b))?;
-                }
-                Some(Ok(Message::Ping(p))) => {
-                    let _ = ws.send(Message::Pong(p)).await;
-                }
-                Some(Ok(_)) => {}
-                Some(Err(e)) => {
-                    return Err(ArloError::ScraperError(format!("signaling read: {e}")));
-                }
-                None => {
-                    return Err(ArloError::ScraperError(
-                        "signaling WS closed before answer".into(),
-                    ));
+        let exchange = async {
+            ws.send(Message::Text(frame.into()))
+                .await
+                .map_err(|e| ArloError::ScraperError(format!("initiateOffer send: {e}")))?;
+            let mut pings = 0usize;
+            loop {
+                match ws.next().await {
+                    Some(Ok(Message::Text(t))) => break parse_answer(t.as_str()),
+                    Some(Ok(Message::Binary(b))) => {
+                        break parse_answer(&String::from_utf8_lossy(&b));
+                    }
+                    Some(Ok(Message::Ping(p))) => {
+                        // A gateway that only pings is not going to answer.
+                        pings += 1;
+                        if pings > SIGNALING_MAX_PINGS {
+                            break Err(ArloError::ScraperError(
+                                "signaling gateway sent only pings".into(),
+                            ));
+                        }
+                        let _ = ws.send(Message::Pong(p)).await;
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        break Err(ArloError::ScraperError(format!("signaling read: {e}")));
+                    }
+                    None => {
+                        break Err(ArloError::ScraperError(
+                            "signaling WS closed before answer".into(),
+                        ));
+                    }
                 }
             }
         };
+        let answer = tokio::time::timeout(SIGNALING_TIMEOUT, exchange)
+            .await
+            .map_err(|_| {
+                ArloError::Timeout(format!(
+                    "signaling answer not received within {SIGNALING_TIMEOUT:?}"
+                ))
+            })??;
 
         Ok((
             answer,
@@ -449,5 +480,42 @@ mod tests {
     fn parse_answer_rejects_success_false() {
         let frame = "HTTP/1.1 200 OK\r\n\r\n{\"success\":false,\"data\":{}}";
         assert!(matches!(parse_answer(frame), Err(ArloError::AuthError(_))));
+    }
+}
+
+#[cfg(test)]
+mod signaling_timeout_tests {
+    use super::*;
+    use crate::client::test_helpers::{mocked_client_with_ws, set_test_token};
+    use crate::client::transport::test_support::MockTransport;
+    use crate::client::ws::test_support::MockWsConnector;
+    use crate::models::sip::SipInfo;
+    use std::sync::Arc;
+
+    fn sip() -> SipInfo {
+        serde_json::from_str(
+            r#"{"sipCallInfo":{"id":"c","calleeUri":"sip:x@livestream-z1-prod.arlo.com:443",
+                "domain":"livestream-z1-prod.arlo.com","port":443,"conferenceId":null,
+                "password":"p","deviceId":"D","callId":"c"},
+               "iceServers":{"uSessionId":"u","data":[]}}"#,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_gateway_times_out_instead_of_hanging_the_caller() {
+        // No scripted frames: the offer is accepted and never answered.
+        let ws = Arc::new(MockWsConnector::new());
+        ws.release();
+        let mut client = mocked_client_with_ws(Arc::new(MockTransport::new()), ws.clone());
+        set_test_token(&mut client, "tok", "U1", "dev");
+
+        let err = client
+            .webrtc_negotiate(&sip(), "v=0\r\noffer")
+            .await
+            .err()
+            .expect("must time out");
+        assert!(matches!(err, ArloError::Timeout(_)), "{err}");
+        assert_eq!(ws.sent().len(), 1, "the offer was sent before the wait");
     }
 }

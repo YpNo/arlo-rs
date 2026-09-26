@@ -13,6 +13,7 @@
 use crate::error::ArloError;
 use async_trait::async_trait;
 use futures_util::{Sink, Stream};
+use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{ORIGIN, SEC_WEBSOCKET_PROTOCOL};
 
@@ -51,6 +52,11 @@ pub trait WsConnector: Send + Sync + std::fmt::Debug {
         subprotocol: &str,
     ) -> Result<BoxWsStream, ArloError>;
 }
+
+/// Deadline for the whole dial: TCP connect, TLS handshake and the HTTP
+/// upgrade. `connect_async` has none of its own, so a black-holed route
+/// would otherwise park the caller for the OS TCP timeout (minutes).
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Largest WebSocket message or frame the production connector will
 /// reassemble (see the note in [`TungsteniteConnector::connect`]).
@@ -95,12 +101,15 @@ impl WsConnector for TungsteniteConnector {
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(MAX_WS_MESSAGE_BYTES))
             .max_frame_size(Some(MAX_WS_MESSAGE_BYTES));
-        let (ws, _response) =
-            tokio_tungstenite::connect_async_with_config(request, Some(config), false)
-                .await
-                .map_err(|e| {
-                    ArloError::ScraperError(format!("WSS connect to {url} failed: {e}"))
-                })?;
+        let (ws, _response) = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async_with_config(request, Some(config), false),
+        )
+        .await
+        .map_err(|_| {
+            ArloError::Timeout(format!("WSS connect to {url} exceeded {CONNECT_TIMEOUT:?}"))
+        })?
+        .map_err(|e| ArloError::ScraperError(format!("WSS connect to {url} failed: {e}")))?;
         Ok(Box::new(ws))
     }
 }

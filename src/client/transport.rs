@@ -192,9 +192,12 @@ pub(crate) async fn read_reqwest_body(
     Ok(buf)
 }
 
-/// Per-request timeout for the default transport. Arlo's slowest normal
+/// Per-request timeout for both HTTP transports. Arlo's slowest normal
 /// call (`devicesupport`, a few hundred KB) completes well inside this.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// TCP + TLS deadline; a black-holed route otherwise burns most of
+/// [`REQUEST_TIMEOUT`] before the first byte.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default production transport: a `wreq` client impersonating the
 /// Chrome release that `stealthscraper-rs` measured (TLS ClientHello,
@@ -230,6 +233,7 @@ impl WreqTransport {
         // signature and the advertised browser cannot disagree.
         let mut builder = impersonation_client(&profile)
             .cookie_provider(Arc::clone(&jar))
+            .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT);
         if let Some(url) = upstream_proxy {
             let proxy = wreq::Proxy::all(url)

@@ -251,7 +251,12 @@ async fn browser_transport(
         .await
         .map_err(|e| ArloError::ScraperError(e.to_string()))?;
 
-    let mut req_builder = reqwest::Client::builder().user_agent(profile.user_agent.clone());
+    // Same deadlines as the default transport; a hung proxy or upstream
+    // must not park the orchestration layer.
+    let mut req_builder = reqwest::Client::builder()
+        .user_agent(profile.user_agent.clone())
+        .connect_timeout(crate::client::transport::CONNECT_TIMEOUT)
+        .timeout(crate::client::transport::REQUEST_TIMEOUT);
     if let Some(ref proxy) = cloud_scraper.proxy {
         let proxy_url = format!("http://127.0.0.1:{}", proxy.port());
         req_builder = req_builder.proxy(reqwest::Proxy::all(&proxy_url)?);

@@ -268,6 +268,15 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   logged at WARN (a corrupt cache silently cost the trusted-browser
   pairing before); a missing file is a DEBUG line. Restoring the cookie
   jar skips expired cookies instead of carrying them forever.
+- Every network wait has a deadline. The WebSocket connector bounds the
+  dial (15 s; `connect_async` has none); the MQTT listener bounds the dial
+  and the CONNACK wait separately (15 s each) so a silent broker
+  reconnects instead of parking in `Connecting` forever; WebRTC signaling
+  bounds the dial and the offer/answer exchange (15 s each) and gives up
+  after 20 unanswered pings; the LAN-hub client has connect/request
+  timeouts (5 s / 30 s, 600 s for a media download); the browser-path
+  client shares the default transport's 10 s connect / 30 s request
+  deadlines, and the default transport gained the connect deadline.
 - Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
   (RUSTSEC-2026-0285, TLS 1.3 handshake across encryption levels) and
   `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);

@@ -30,6 +30,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// LAN-direct client for a single Arlo SmartHub. TLS to the hub is pinned
 /// against the certificate retrieved from the cloud.
@@ -80,6 +81,8 @@ impl LocalHubClient {
 
         let http = reqwest::Client::builder()
             .use_preconfigured_tls(tls_config)
+            .connect_timeout(HUB_CONNECT_TIMEOUT)
+            .timeout(HUB_REQUEST_TIMEOUT)
             .build()?;
 
         Ok(Self {
@@ -169,6 +172,9 @@ impl LocalHubClient {
             .http
             .get(&url)
             .header("Authorization", &self.token)
+            // Media is the one call that legitimately outlives the
+            // request timeout; the byte cap below is the other bound.
+            .timeout(HUB_MEDIA_TIMEOUT)
             .send()
             .await?;
         if !response.status().is_success() {
@@ -181,6 +187,13 @@ impl LocalHubClient {
         read_reqwest_body(response, MAX_HUB_MEDIA_BYTES).await
     }
 }
+
+/// TCP + TLS deadline for the LAN hub (a few ms away when it is up).
+const HUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Whole-request deadline for the small hub calls.
+const HUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Whole-request deadline for a media download.
+const HUB_MEDIA_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Largest media artefact [`LocalHubClient::download_media`] will buffer.
 /// Hub recordings are minutes of 1080p at most; this is a hard stop
