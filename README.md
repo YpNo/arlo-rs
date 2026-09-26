@@ -1,8 +1,12 @@
 # arlo-rs
 
 [![Rust CI](https://github.com/YpNo/arlo-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/YpNo/arlo-rs/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/arlo-rs.svg)](https://crates.io/crates/arlo-rs)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![crates.io](https://img.shields.io/crates/v/arlo-rs.svg)](https://crates.io/crates/arlo-rs)
+[![GitHub release](https://img.shields.io/github/v/release/YpNo/arlo-rs?sort=semver)](https://github.com/YpNo/arlo-rs/releases/latest)
+[![docs.rs](https://docs.rs/arlo-rs/badge.svg)](https://docs.rs/arlo-rs)
+[![codecov](https://codecov.io/gh/YpNo/arlo-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/YpNo/arlo-rs)
+[![MSRV](https://img.shields.io/badge/MSRV-1.98.1-blue.svg)](https://github.com/YpNo/arlo-rs)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 `arlo-rs` is a robust, asynchronous Rust client for the Arlo camera ecosystem. It natively fully replaces legacy Python implementations by dynamically adapting strictly to Arlo's constantly updating telemetry metrics and undocumented headers.
 
