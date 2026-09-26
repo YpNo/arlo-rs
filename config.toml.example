@@ -1,55 +1,88 @@
 # ==========================================
-# rs-arlo Client Configuration Template
-# 
-# Rename this file to `config.toml` and 
-# place it in the root of your application.
+# arlo-rs Client Configuration Template
+#
+# Copy this file to `config.toml` in the root of your application.
+#
+# ⚠️  `config.toml` is in .gitignore — never commit it. It holds your
+#     Arlo password and IMAP app-password in plaintext. Treat it like
+#     a `.env` and keep it `chmod 600` (the library warns at startup
+#     when other users can read it). Programmatic users can skip TOML
+#     entirely and use `ArloClient::builder()` instead.
 # ==========================================
 
 [credentials]
-# Your Arlo account login email
+# Your Arlo account login email.
 email = "your_email@example.com"
-# Your Arlo account password
+# Your Arlo account password.
 password = "your-secure-password"
 
 [mfa]
-# Define your preferred Two-Factor Authentication method.
-# Options: "push", "email", "sms"
-preferred_method = "push"
+# Preferred Two-Factor Authentication factor. Matched case-insensitively
+# against Arlo's factor types: "EMAIL", "SMS", "PUSH".
+#
+# NOTE: automated IMAP OTP polling (the [mfa.imap] block below) only
+# works with the EMAIL factor — Push/SMS require interactive handling.
+preferred_method = "EMAIL"
 
-# If using email polling for unattended automated 2FA, 
-# you can define your IMAP credentials here.
+# Automated, unattended 2FA: poll your mailbox over IMAP and scrape the
+# 6-digit Arlo OTP. Leave `enabled = false` for the interactive
+# (stdin / push) flow.
 [mfa.imap]
 enabled = false
-# Optional shortcut: Setprovider to "gmail", "outlook", or "yahoo" to automatically map host and port bindings
+# Optional shortcut: set `provider` to "gmail", "outlook" (or "hotmail"),
+# or "yahoo" to auto-map host + port. If set, `host`/`port` below are ignored.
 provider = "gmail"
-# If not using a shortcut provider, define the custom host and port here:
+# If NOT using a shortcut provider, define the custom host/port here:
 host = "imap.example.com"
 port = 993
 username = "your_email@example.com"
+# Use a provider app-password — regular account passwords are rejected
+# for IMAP by Gmail/Outlook/Yahoo.
 password = "your-app-password"
-# Instantly deletes the Arlo 2FA email from your inbox after scraping it successfully to keep logic clean.
-delete_after_read = true
+# Delete the Arlo OTP email after a successful scrape. Default false —
+# destructive, opt in only if you understand the consequence.
+delete_after_read = false
 
 [client]
-# Enable detailed intercept HTTP logging for every payload sent/received
-debug_mode = true
+# HTTP intercept logging. Bodies are redacted (token/password/otp/…),
+# but endpoint + header metadata still appear. Keep false in production.
+debug_mode = false
 
-# Path to serialize active valid tokens to avoid repetitive MFA prompts across restarts
+# Persist the post-MFA session token so restarts skip the MFA prompt.
+# Written 0600 on Unix. Also in .gitignore — never commit it.
 session_cache_path = ".arlo_session.json"
 
-# Determines if the stealth Chrome browser should launch invisibly or open a visual window for debugging
+# Arlo API version. "v3" (default) targets the 2025+ endpoints
+# (/hmsweb/v2/users/devices, /automation/v3/*, v3 logout). The client
+# auto-falls-back to "legacy" on a 404 from a v3 endpoint, so you
+# normally never need to set this. Pin "legacy" only if you're on an
+# un-migrated account and want to skip the failed v3 probe round-trips.
+api_version = "v3"
+
+# Transport. Default (false): a Chrome-impersonating `wreq` HTTP client —
+# no browser process; Arlo's Cloudflare front only fingerprints TLS/HTTP2.
+# true: headless-Chrome MITM proxy (requires the crate's `browser` feature).
+# use_browser = false
+
+# Only consulted when use_browser = true. Default true; set false to
+# watch the browser automation for debugging.
 # headless = true
 
-# Funnels all stealth traffic through an upstream HTTP/SOCKS proxy (e.g., residential proxies for IP unbanning)
+# Funnel all stealth traffic through an upstream HTTP/SOCKS proxy
+# (e.g. a residential proxy for IP-reputation reasons).
 # upstream_proxy = "http://username:password@my-proxy:8080"
 
-# The User-Agent profile that rs-cloudscraper will spoof to evade Cloudflare
+# Override the User-Agent presented to Arlo. Defaults to a random real
+# Chrome desktop profile whose TLS/HTTP2 emulation and Sec-CH-UA hints
+# match — a custom value will contradict them, so only set this if you
+# know why.
 # user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+# NOTE: the [streaming] section below is parsed but NOT yet wired into
+# stream selection — it's reserved for a future protocol-negotiation
+# feature. Setting it today has no effect.
 [streaming]
-# The protocol you prefer to receive when requesting a live camera feed.
-# Options: "rtsps", "hls", "dash"
+# Preferred live-feed protocol. Options: "rtsps", "hls", "dash".
 preferred_protocol = "hls"
-
-# Download path for local recordings and snapshots
+# Local download path for recordings and snapshots.
 media_path = "./media"

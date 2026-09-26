@@ -1,5 +1,5 @@
 use crate::client::ArloClient;
-use crate::endpoints::*;
+use crate::endpoints::API_LIBRARY;
 use crate::error::ArloError;
 // Endpoints (api host) come from self.endpoints — PR 4 transport refactor.
 use crate::models::library::{LibraryQuery, LibraryResponse, MediaItem};
@@ -29,6 +29,7 @@ impl ArloClient {
         if !response.success {
             return Err(ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: "Failed to fetch media library recordings".to_string(),
             });
         }

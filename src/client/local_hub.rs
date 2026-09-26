@@ -21,23 +21,49 @@
 //! mismatched cert is exactly the situation cert pinning is meant to
 //! catch.
 
-use crate::endpoints::*;
+use crate::endpoints::{API_HMSLS_CONNECTIVITY, API_HMSLS_LIST};
 use crate::error::ArloError;
 use crate::models::ratls::HmslsListResponse;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
-use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
+use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// LAN-direct client for a single Arlo SmartHub. TLS to the hub is pinned
 /// against the certificate retrieved from the cloud.
 pub struct LocalHubClient {
     http: reqwest::Client,
     hub_ip: String,
-    token: String,
+    token: SecretString,
 }
+
+/// The SmartHub presented a leaf certificate other than the pinned one.
+/// `Debug` prints the same text as `Display`: rustls renders
+/// `CertificateError::Other` through `Debug`, and that is what reaches
+/// the operator.
+#[derive(Clone, Copy)]
+struct PinMismatch;
+
+const PIN_MISMATCH_MESSAGE: &str =
+    "SmartHub presented a certificate that does not match the pinned cloud-issued certificate";
+
+impl std::fmt::Display for PinMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(PIN_MISMATCH_MESSAGE)
+    }
+}
+
+impl std::fmt::Debug for PinMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(PIN_MISMATCH_MESSAGE)
+    }
+}
+
+impl std::error::Error for PinMismatch {}
 
 impl std::fmt::Debug for LocalHubClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -56,6 +82,7 @@ impl LocalHubClient {
         let pinned = CertificateDer::from_pem_slice(cert_pem.as_bytes()).map_err(|e| {
             ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: format!("Failed to parse SmartHub cert as PEM: {e}"),
             }
         })?;
@@ -70,6 +97,7 @@ impl LocalHubClient {
             .with_safe_default_protocol_versions()
             .map_err(|e| ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: format!("rustls protocol-version setup failed: {e}"),
             })?
             .dangerous()
@@ -78,12 +106,17 @@ impl LocalHubClient {
 
         let http = reqwest::Client::builder()
             .use_preconfigured_tls(tls_config)
+            .connect_timeout(HUB_CONNECT_TIMEOUT)
+            .timeout(HUB_REQUEST_TIMEOUT)
+            // A hub has no legitimate redirect; following one could resend
+            // the RATLS bearer to another host or over cleartext.
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
         Ok(Self {
             http,
             hub_ip: hub_ip.to_string(),
-            token: token.to_string(),
+            token: SecretString::from(token),
         })
     }
 
@@ -97,19 +130,22 @@ impl LocalHubClient {
     /// SmartHub to confirm the LAN path is healthy.
     pub async fn check_connectivity(&self) -> Result<String, ArloError> {
         let url = format!("https://{}{}", self.hub_ip, API_HMSLS_CONNECTIVITY);
+        use crate::client::transport::{MAX_RESPONSE_BYTES, read_reqwest_body};
         let response = self
             .http
             .get(&url)
-            .header("Authorization", &self.token)
+            .header("Authorization", self.token.expose_secret())
             .send()
             .await?;
         if !response.status().is_success() {
             return Err(ArloError::ApiError {
                 code: response.status().as_u16() as i32,
+                error: None,
                 message: "Local SmartHub connectivity check failed".into(),
             });
         }
-        Ok(response.text().await?)
+        let body = read_reqwest_body(response, MAX_RESPONSE_BYTES).await?;
+        Ok(String::from_utf8_lossy(&body).into_owned())
     }
 
     /// `GET /hmsls/list?dateFrom=…&dateTo=…` — lists media stored locally
@@ -120,51 +156,77 @@ impl LocalHubClient {
         date_from: &str,
         date_to: &str,
     ) -> Result<serde_json::Value, ArloError> {
+        use crate::client::transport::{MAX_RESPONSE_BYTES, read_reqwest_body};
+        use crate::models::validate::date_yyyymmdd;
         let url = format!(
             "https://{}{}?dateFrom={}&dateTo={}",
-            self.hub_ip, API_HMSLS_LIST, date_from, date_to
+            self.hub_ip,
+            API_HMSLS_LIST,
+            date_yyyymmdd("dateFrom", date_from)?,
+            date_yyyymmdd("dateTo", date_to)?
         );
         let response = self
             .http
             .get(&url)
-            .header("Authorization", &self.token)
+            .header("Authorization", self.token.expose_secret())
             .send()
             .await?;
         if !response.status().is_success() {
             return Err(ArloError::ApiError {
                 code: response.status().as_u16() as i32,
+                error: None,
                 message: "Failed to list local SmartHub media".into(),
             });
         }
-        let body = response.text().await?;
-        let parsed: HmslsListResponse = serde_json::from_str(&body)?;
+        let body = read_reqwest_body(response, MAX_RESPONSE_BYTES).await?;
+        let parsed: HmslsListResponse = serde_json::from_slice(&body)?;
         Ok(parsed.data.unwrap_or_else(|| serde_json::json!([])))
     }
 
     /// `GET /<url_path>` — downloads a media artefact from the SmartHub.
     /// `url_path` is typically the `mediaUrl` field returned by
     /// [`Self::list_media`]. Leading slashes are normalized.
+    ///
+    /// The whole artefact is buffered, capped at [`MAX_HUB_MEDIA_BYTES`].
     pub async fn download_media(&self, url_path: &str) -> Result<Vec<u8>, ArloError> {
+        use crate::client::transport::read_reqwest_body;
+        use crate::models::validate::hub_media_path;
         let url = format!(
             "https://{}/{}",
             self.hub_ip,
-            url_path.trim_start_matches('/')
+            hub_media_path(url_path.trim_start_matches('/'))?
         );
         let response = self
             .http
             .get(&url)
-            .header("Authorization", &self.token)
+            .header("Authorization", self.token.expose_secret())
+            // Media is the one call that legitimately outlives the
+            // request timeout; the byte cap below is the other bound.
+            .timeout(HUB_MEDIA_TIMEOUT)
             .send()
             .await?;
         if !response.status().is_success() {
             return Err(ArloError::ApiError {
                 code: response.status().as_u16() as i32,
+                error: None,
                 message: "Failed to download local SmartHub media".into(),
             });
         }
-        Ok(response.bytes().await?.to_vec())
+        read_reqwest_body(response, MAX_HUB_MEDIA_BYTES).await
     }
 }
+
+/// TCP + TLS deadline for the LAN hub (a few ms away when it is up).
+const HUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Whole-request deadline for the small hub calls.
+const HUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Whole-request deadline for a media download.
+const HUB_MEDIA_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Largest media artefact [`LocalHubClient::download_media`] will buffer.
+/// Hub recordings are minutes of 1080p at most; this is a hard stop
+/// against a hub that never ends the response.
+pub const MAX_HUB_MEDIA_BYTES: usize = 512 * 1024 * 1024;
 
 /// rustls verifier that accepts exactly one leaf certificate, byte-for-
 /// byte equal to the one the cloud returned. Hostname/SNI is intentionally
@@ -188,8 +250,11 @@ impl ServerCertVerifier for PinnedLeafVerifier {
         if end_entity.as_ref() == self.pinned.as_ref() {
             Ok(ServerCertVerified::assertion())
         } else {
-            Err(rustls::Error::General(
-                "SmartHub presented a certificate that does not match the pinned cloud-issued certificate".into(),
+            // `InvalidCertificate`, not `General`: `ArloError::action`
+            // classifies a certificate failure as `Fatal`, and a pin
+            // mismatch must never be retried through.
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Other(rustls::OtherError(Arc::new(PinMismatch))),
             ))
         }
     }
@@ -273,5 +338,67 @@ nIYANCqJYEogTQfBuZJ8KB8=\n\
     #[test]
     fn new_rejects_empty_pem() {
         assert!(LocalHubClient::new("", "192.168.1.42", "tok").is_err());
+    }
+
+    // --- PinnedLeafVerifier: the cert-pinning security boundary ---
+    //
+    // These exercise the verifier logic directly (no TLS handshake
+    // needed). It's the single most security-critical piece of code in
+    // the crate, so it gets explicit positive + negative coverage.
+
+    fn pinned_verifier(pem: &str) -> PinnedLeafVerifier {
+        let pinned = CertificateDer::from_pem_slice(pem.as_bytes())
+            .unwrap()
+            .into_owned();
+        PinnedLeafVerifier {
+            pinned,
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+        }
+    }
+
+    #[test]
+    fn verifier_accepts_byte_identical_pinned_cert() {
+        let v = pinned_verifier(SAMPLE_CERT_PEM);
+        let presented = CertificateDer::from_pem_slice(SAMPLE_CERT_PEM.as_bytes())
+            .unwrap()
+            .into_owned();
+        let name = ServerName::try_from("hub.local").unwrap();
+        let res = v.verify_server_cert(&presented, &[], &name, &[], UnixTime::now());
+        assert!(res.is_ok(), "exact pinned cert must be accepted");
+    }
+
+    #[test]
+    fn verifier_rejects_any_other_cert() {
+        let v = pinned_verifier(SAMPLE_CERT_PEM);
+        // Arbitrary non-matching DER bytes — the SmartHub presenting
+        // anything other than the pinned cloud-issued cert must fail
+        // closed (the MITM-resistance guarantee).
+        let other = CertificateDer::from(vec![0x30u8, 0x82, 0x01, 0x00, 0xde, 0xad]);
+        let name = ServerName::try_from("hub.local").unwrap();
+        let res = v.verify_server_cert(&other, &[], &name, &[], UnixTime::now());
+        let err = res.expect_err("mismatched cert must be rejected");
+        assert!(
+            err.to_string().contains("does not match the pinned"),
+            "error should explain the pin mismatch: {err}"
+        );
+        assert!(
+            matches!(err, rustls::Error::InvalidCertificate(_)),
+            "pin mismatch must be a certificate error so it classifies Fatal: {err:?}"
+        );
+        // As reqwest/tokio-rustls surface it: wrapped in an io::Error.
+        let io = std::io::Error::new(std::io::ErrorKind::InvalidData, err);
+        assert_eq!(
+            ArloError::NetworkError(Box::new(io)).action(),
+            crate::models::error_codes::ErrorAction::Fatal
+        );
+    }
+
+    #[test]
+    fn verifier_advertises_supported_schemes() {
+        let v = pinned_verifier(SAMPLE_CERT_PEM);
+        assert!(
+            !v.supported_verify_schemes().is_empty(),
+            "verifier must advertise the provider's signature schemes"
+        );
     }
 }

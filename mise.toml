@@ -1,0 +1,16 @@
+# Pinned (not "latest"): `rust` must equal rust-toolchain.toml / the
+# `rust-version` in Cargo.toml — mise's rust wins over rustup's file — and a
+# floating cmake would change the BoringSSL build under us.
+[tools]
+cmake = "4.4.3"
+rust = "1.98.1"
+
+[env]
+# Container-only path. arlo-rs pulls boring-sys2 (BoringSSL) via
+# stealthscraper-rs -> wreq, whose build.rs runs bindgen and needs a real
+# libclang. Only the `rust-build` distrobox has one (libclang-19-dev); the host
+# has no /usr/lib/llvm-* at all. Always build from inside the container:
+#
+#   distrobox enter rust-build
+#   RUST_LOG=arlo_rs=info mise exec -- cargo run --example list_cameras
+LIBCLANG_PATH = "/usr/lib/llvm-19/lib"

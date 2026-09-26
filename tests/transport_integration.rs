@@ -9,12 +9,12 @@
 //! The downstream streamer app's own test suite will follow exactly
 //! this pattern.
 
-use async_trait::async_trait;
-use reqwest::{Method, StatusCode};
-use rs_arlo::{
+use arlo_rs::{
     ArloClient, ArloEndpoints, ArloError, HttpRequest, HttpResponse, HttpTransport,
     StaticOtpHandler,
 };
+use async_trait::async_trait;
+use reqwest::{Method, StatusCode};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -80,6 +80,9 @@ async fn public_api_full_authenticated_flow_via_static_otp() {
     mock.queue_post(
         r#"{"meta":{"code":200},"data":{"token":"preliminary","userId":"U-1","authenticated":1}}"#,
     );
+    // getFactorId (POST: OPTIONS + body) — this browser is not trusted yet,
+    // so the client falls back to the OTP ceremony.
+    mock.queue_post(r#"{"meta":{"code":400,"error":9204}}"#);
     // get_factors (GET)
     mock.queue_ok(
         r#"{"meta":{"code":200},"data":{"items":[
@@ -88,9 +91,10 @@ async fn public_api_full_authenticated_flow_via_static_otp() {
     );
     // start_auth (POST: OPTIONS + body)
     mock.queue_post(r#"{"meta":{"code":200},"data":{"factorAuthCode":"FAC-1"}}"#);
-    // finish_auth (POST: OPTIONS + body)
+    // finish_auth (POST: OPTIONS + body) — carries the browserAuthCode used
+    // to pair ("trust") this browser for future logins.
     mock.queue_post(
-        r#"{"meta":{"code":200},"data":{"token":"final","userId":"U-1","authenticated":1}}"#,
+        r#"{"meta":{"code":200},"data":{"token":"final","userId":"U-1","authenticated":1,"browserAuthCode":"BAC-1"}}"#,
     );
     // validate_access_token (GET)
     mock.queue_ok("{}");
@@ -144,6 +148,8 @@ async fn public_api_full_authenticated_flow_via_static_otp() {
     let expected_method_sequence = vec![
         Method::OPTIONS, // login
         Method::POST,
+        Method::OPTIONS, // getFactorId (trusted-browser probe, rejected)
+        Method::POST,
         Method::GET,     // get_factors
         Method::OPTIONS, // start_auth
         Method::POST,
@@ -158,8 +164,8 @@ async fn public_api_full_authenticated_flow_via_static_otp() {
         Method::GET,     // get_locations
         Method::OPTIONS, // take_snapshot
         Method::POST,
-        Method::OPTIONS, // logout
-        Method::PUT,
+        Method::OPTIONS, // logout (V3: DELETE /hmsweb/user/{uid}/client/smart/devices/logout)
+        Method::DELETE,
     ];
     assert_eq!(
         calls.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>(),
@@ -167,13 +173,13 @@ async fn public_api_full_authenticated_flow_via_static_otp() {
     );
 }
 
-fn make_test_config() -> rs_arlo::config::ArloConfig {
-    rs_arlo::config::ArloConfig {
-        credentials: Some(rs_arlo::config::CredentialsConfig {
+fn make_test_config() -> arlo_rs::config::ArloConfig {
+    arlo_rs::config::ArloConfig {
+        credentials: Some(arlo_rs::config::CredentialsConfig {
             email: Some("user@example.test".into()),
             password: Some("p".into()),
         }),
-        mfa: Some(rs_arlo::config::MfaConfig {
+        mfa: Some(arlo_rs::config::MfaConfig {
             preferred_method: Some("EMAIL".into()),
             imap: None,
         }),

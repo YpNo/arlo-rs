@@ -15,8 +15,8 @@ Description: Specialized workflow for reverse-engineering and implementing Arlo 
     - Update JSON models in `src/models/` to reflect schema changes.
     - Ensure all fields are properly handled (Optional vs. Required) using `serde`.
     
-4. **SSE Calibration**:
-    - If the update affects push events, verify that the `EventManager` correctly parses the new payload chunks.
+4. **Event-Bus Calibration**:
+    - If the update affects push events, verify that `dispatch_payload` (`src/events`) still parses the new `PUBLISH` payload shape and that `subscription_topics` covers any new topic; extend the scripted `MockWsConnector` test.
     - Run a live test to ensure the actor-based broadcast system doesn't drop the new events.
     
 5. **Integration Regression**:

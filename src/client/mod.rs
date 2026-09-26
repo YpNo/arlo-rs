@@ -1,54 +1,89 @@
-/// Pure REST API calls that don't fit into devices or auth cleanly.
 pub mod api;
-/// All authentication protocols, multi-factor challenges, and session caching.
 pub mod auth;
-/// Automated secure polling of IMAP mailboxes for MFA text extraction.
 pub mod auth_imap;
-/// Programmatic builder for [`ArloClient`].
 pub mod builder;
-/// Camera streaming, topology tracking, mode adjustments, and actuations.
+pub mod cookies;
 pub mod devices;
-/// Runtime-configurable Arlo host endpoints (auth + api hosts).
 pub mod endpoints;
 /// S3 Video chunk parsing and media decryption logic.
 pub mod library;
-/// Direct LAN client for an Arlo SmartHub with pinned-leaf TLS.
+pub mod livestream;
 pub mod local_hub;
-/// Pluggable Multi-Factor-Authentication handler trait + bundled impls.
 pub mod mfa;
-/// Raw token spoofing for connecting natively to local hubs bypassing Cloudflare.
 pub mod ratls;
-/// HTTP transport abstraction (production CloudScraper impl + test doubles).
 pub mod transport;
+pub mod ws;
 
 #[cfg(test)]
 #[allow(dead_code)] // helper utilities; not all are used by every dependent test module
 pub(crate) mod test_helpers;
 
-use crate::config::{ArloConfig, ClientConfig};
+use crate::config::{ApiVersion, ArloConfig, ClientConfig};
 use crate::error::ArloError;
-use crate::events::EventBus;
+use crate::events::{EventBus, MqttParams};
 use crate::models::auth::SessionToken;
 pub use auth::AuthManager;
 pub use builder::ArloClientBuilder;
 pub use endpoints::ArloEndpoints;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::OnceCell;
 use tracing::{info, instrument};
 pub use transport::HttpTransport;
+pub use ws::{TungsteniteConnector, WsConnector};
+
+/// Lock-free holder for the per-client [`ApiVersion`]: read on every
+/// versioned call, written once when a V3 endpoint answers 403/404 (pin
+/// to `Legacy`). An enum with two variants needs no `RwLock`, and this
+/// cannot be poisoned.
+#[derive(Debug)]
+pub(crate) struct ApiVersionCell(AtomicU8);
+
+impl ApiVersionCell {
+    const LEGACY: u8 = 0;
+    const V3: u8 = 1;
+
+    pub(crate) fn new(version: ApiVersion) -> Self {
+        let cell = Self(AtomicU8::new(Self::V3));
+        cell.set(version);
+        cell
+    }
+
+    pub(crate) fn get(&self) -> ApiVersion {
+        match self.0.load(Ordering::Relaxed) {
+            Self::LEGACY => ApiVersion::Legacy,
+            _ => ApiVersion::V3,
+        }
+    }
+
+    pub(crate) fn set(&self, version: ApiVersion) {
+        let raw = match version {
+            ApiVersion::Legacy => Self::LEGACY,
+            ApiVersion::V3 => Self::V3,
+        };
+        self.0.store(raw, Ordering::Relaxed);
+    }
+}
+
+impl Default for ApiVersionCell {
+    fn default() -> Self {
+        Self::new(ApiVersion::default())
+    }
+}
 
 /// Core REST API manager for the Arlo ecosystem.
 ///
 /// `ArloClient` orchestrates auth-header injection, CORS preflight, and
 /// JSON envelope handling, then delegates the actual HTTP byte-shuffling
-/// to a pluggable [`HttpTransport`]. Production transports route through
-/// the `rs-cloudscraper` headless-browser proxy to forge a JA4 TLS
-/// fingerprint indistinguishable from a real Chrome session; tests
-/// substitute lightweight mocks.
+/// to a pluggable [`HttpTransport`]. The default production transport is
+/// a `wreq` client carrying a measured Chrome TLS/HTTP2 fingerprint (see
+/// [`crate::client::transport::WreqTransport`]); tests substitute
+/// lightweight mocks.
 pub struct ArloClient {
     /// The HTTP transport. Production wires this to a
-    /// [`crate::client::transport::CloudScraperTransport`]; tests use a
-    /// `MockTransport` to dispatch requests without booting the proxy.
+    /// [`crate::client::transport::WreqTransport`] (or the browser-proxy
+    /// transport under the `browser` feature); tests use a
+    /// `MockTransport` to dispatch requests without any network.
     pub(crate) transport: Arc<dyn HttpTransport>,
     /// Base hosts the client points at. Defaults to production URLs;
     /// the builder's [`ArloClientBuilder::endpoints`] overrides them.
@@ -59,9 +94,14 @@ pub struct ArloClient {
     pub(crate) auth: AuthManager,
     /// When enabled, dumps all HTTP payloads matching traces to stdout.
     pub(crate) debug_mode: bool,
-    /// Lazy SSE event bus. First [`Self::events`] call boots it; the bus
-    /// is dropped (and its tasks aborted) when the client is dropped.
+    /// Opens the MQTT event-bus and WebRTC-signaling WebSockets.
+    /// Production wires [`TungsteniteConnector`]; tests a scripted double.
+    pub(crate) ws: Arc<dyn WsConnector>,
+    /// Lazy MQTT event bus. First [`Self::events`] call boots it; the bus
+    /// is dropped (and its task aborted) when the client is dropped.
     pub(crate) event_bus: OnceCell<EventBus>,
+    /// Tracks the detected API version for fallback logic.
+    pub(crate) api_version: ApiVersionCell,
 }
 
 impl ArloClient {
@@ -88,7 +128,7 @@ impl ArloClient {
     }
 
     /// Constructs a client backed by a caller-supplied transport, skipping
-    /// the heavyweight `rs-cloudscraper` bootstrap entirely.
+    /// the default transport bootstrap entirely.
     ///
     /// This is the entry point for unit tests that want to drive the
     /// orchestration layer (auth-header injection, OPTIONS preflight,
@@ -96,12 +136,28 @@ impl ArloClient {
     /// useful for callers whose environment already provides a
     /// stealth-routed `reqwest::Client` and doesn't need a second proxy.
     pub fn with_transport(transport: Arc<dyn HttpTransport>, endpoints: ArloEndpoints) -> Self {
+        Self::with_transports(transport, Arc::new(TungsteniteConnector), endpoints)
+    }
+
+    /// Like [`Self::with_transport`], additionally injecting the
+    /// [`WsConnector`] used for the MQTT event bus and WebRTC signaling
+    /// sockets — the second seam a test double can occupy.
+    pub fn with_transports(
+        transport: Arc<dyn HttpTransport>,
+        ws: Arc<dyn WsConnector>,
+        endpoints: ArloEndpoints,
+    ) -> Self {
+        // Every client is built here (the builder included), so an
+        // overridden cleartext host is reported whichever way it came in.
+        endpoints.warn_if_insecure();
         Self {
             transport,
             endpoints,
             auth: AuthManager::new(),
             debug_mode: false,
+            ws,
             event_bus: OnceCell::new(),
+            api_version: ApiVersionCell::default(),
         }
     }
 
@@ -141,31 +197,73 @@ impl ArloClient {
         })
     }
 
-    /// Returns a reference to the SSE event bus, booting it on first call.
+    /// Returns a reference to the event bus, booting it on first call.
     ///
-    /// The bus subscribes to Arlo's `/hmsweb/client/subscribe` SSE stream
-    /// and broadcasts parsed [`crate::models::events::ArloEvent`]s to any
-    /// receiver obtained via [`EventBus::subscribe`]. Returns
-    /// [`ArloError::AuthError`] if no access token is yet held.
+    /// Connects to Arlo's MQTT-over-WebSocket broker (the v3 successor
+    /// to the now-403 SSE channel) and broadcasts parsed
+    /// [`crate::models::events::ArloEvent`]s to any receiver obtained
+    /// via [`EventBus::subscribe`].
+    ///
+    /// First call resolves the broker URL from `session/v3` (`mqttUrl`)
+    /// and the device list to build the subscription topics, so it
+    /// performs two REST round-trips before the listener spawns.
+    ///
+    /// # Errors
+    ///
+    /// [`ArloError::AuthError`] if not authenticated or the account's
+    /// `session/v3` does not advertise an `mqttUrl`; transport/parse
+    /// errors from the `session/v3` and devices calls propagate.
     pub async fn events(&self) -> Result<&EventBus, ArloError> {
         self.event_bus
             .get_or_try_init(|| async {
-                let token = self.auth.token().ok_or_else(|| {
+                if !self.auth.has_token() {
+                    return Err(ArloError::AuthError(
+                        "Cannot start event bus without an active session".into(),
+                    ));
+                }
+                // A watch, not a copy: after a re-authentication the next
+                // CONNECT carries the new token.
+                let token = self.auth.token_rx();
+                let user_id = self.auth.user_id.clone().ok_or_else(|| {
+                    ArloError::AuthError("event bus requires an authenticated userId".into())
+                })?;
+
+                // `mqttUrl` is delivered by session/v3 (also doubles as a
+                // session-freshness check before we open the socket).
+                let session = self.validate_session_v3().await?;
+                let mqtt_url = session.mqtt_url.ok_or_else(|| {
                     ArloError::AuthError(
-                        "Cannot start SSE event bus without an active session".into(),
+                        "session/v3 returned no mqttUrl — account not on the v3 event bus".into(),
                     )
                 })?;
-                let streaming = self.transport.streaming_client().ok_or_else(|| {
-                    ArloError::AuthError(
-                        "The active transport does not support streaming (SSE event bus unavailable)"
-                            .into(),
-                    )
-                })?;
+                // The access token becomes the MQTT password: never dial a
+                // host Arlo did not name, and never over plaintext.
+                let mqtt_url =
+                    crate::models::validate::arlo_wss_url("session/v3 mqttUrl", &mqtt_url, None)?
+                        .to_string();
+
+                // Subscribe to the web client's fine-grained per-resource
+                // topics keyed by each device's xCloudId (the broad
+                // `d/<xCloudId>/out/#` wildcard is owner-only) plus the
+                // user inbox.
+                let devices = self.get_devices().await?;
+                let with_xcloud = devices.iter().filter(|d| d.x_cloud_id.is_some()).count();
+                let topics = crate::events::subscription_topics(&devices, &user_id);
+                info!(
+                    device_count = devices.len(),
+                    with_xcloud,
+                    topic_count = topics.len(),
+                    "resolved MQTT event-bus subscription (no xCloud ⇒ legacy get_devices, no camera events)"
+                );
+
                 EventBus::start(
-                    streaming,
-                    self.endpoints.api_host.clone(),
-                    token.to_string(),
-                    self.auth.device_id.clone(),
+                    MqttParams {
+                        mqtt_url,
+                        user_id,
+                        token,
+                        topics,
+                    },
+                    Arc::clone(&self.ws),
                 )
                 .await
             })
@@ -221,15 +319,12 @@ impl ArloClient {
     #[instrument(skip(path))]
     pub async fn from_config(path: &str) -> Result<Self, ArloError> {
         let config = ArloConfig::load_from_file(path)?;
-        let client_conf = config.client.clone().unwrap_or(ClientConfig {
-            debug_mode: None,
-            user_agent: None,
-            session_cache_path: None,
-            headless: None,
-            upstream_proxy: None,
-        });
+        let client_conf = config.client.clone().unwrap_or_default();
 
         let mut client = Self::with_config(&client_conf).await?;
+        if let Some(ver) = client_conf.api_version {
+            client.api_version.set(ver);
+        }
         if let Some(ref cache_path) = client_conf.session_cache_path {
             builder::apply_session_cache(&mut client, cache_path).await;
         }
@@ -308,10 +403,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn events_errors_when_transport_does_not_support_streaming() {
-        // MockTransport's default streaming_client() returns None.
+    async fn events_errors_without_an_active_session() {
+        // No token cached → the bus can't authenticate the MQTT CONNECT.
         let mock = Arc::new(MockTransport::new());
-        let client = authenticated_mocked_client(mock);
+        let client = mocked_client(mock);
         let err = client.events().await.unwrap_err();
         assert!(matches!(err, ArloError::AuthError(_)));
     }
@@ -346,5 +441,24 @@ mod tests {
     async fn test_base_url_constant_is_used_consistently() {
         // Compile-time guarantee that the const re-exports correctly.
         assert!(TEST_BASE_URL.starts_with("https://"));
+    }
+}
+
+#[cfg(test)]
+mod api_version_cell_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_v3_and_round_trips_both_variants() {
+        let cell = ApiVersionCell::default();
+        assert_eq!(cell.get(), ApiVersion::V3);
+        cell.set(ApiVersion::Legacy);
+        assert_eq!(cell.get(), ApiVersion::Legacy);
+        cell.set(ApiVersion::V3);
+        assert_eq!(cell.get(), ApiVersion::V3);
+        assert_eq!(
+            ApiVersionCell::new(ApiVersion::Legacy).get(),
+            ApiVersion::Legacy
+        );
     }
 }

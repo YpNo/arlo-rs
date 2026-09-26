@@ -2,9 +2,9 @@
 //!
 //! Demonstrates the new `start_stream` correlation flow from PR 2 — the
 //! call returns a `StreamUrl` directly instead of `()`, removing the need
-//! for the consumer to wire its own SSE plumbing.
+//! for the consumer to wire its own event-bus plumbing.
 
-use rs_arlo::ArloClient;
+use arlo_rs::ArloClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,12 +38,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!("Found camera: {} (ID: {})", cam.device_name, cam.device_id);
 
-    println!("\nRequesting stream URL (this may take a few seconds — the URL");
-    println!("arrives over SSE; the library handles the correlation for you)...");
-    match client.start_stream(&cam.device_id).await {
+    println!("\nRequesting stream URL (reuses an app-triggered stream if one");
+    println!("is already live; otherwise starts a fresh one and waits for the event-bus reply)...");
+    match client.start_stream(cam).await {
         Ok(stream_url) => {
-            println!(">>> Stream URL: {stream_url}");
-            println!("    Hand this to ffmpeg, a player, or a transcoder.");
+            // The full URL carries the stream's egress token; keep it out
+            // of the terminal and hand `stream_url.as_str()` to the player.
+            println!(">>> Stream ready at {}", stream_url.redacted());
+            println!("    Pass `stream_url.as_str()` to ffmpeg, a player, or a transcoder.");
         }
         Err(e) => println!("Failed to obtain stream URL: {e}"),
     }
@@ -65,6 +67,6 @@ fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
 
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,rs_arlo=info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,arlo_rs=info"));
     fmt().with_env_filter(filter).init();
 }

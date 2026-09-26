@@ -1,39 +1,126 @@
 [package]
-name = "rs-arlo"
-version = "0.1.0"
+name = "arlo-rs"
+version = "0.2.0"
 edition = "2024"
+# Minimum supported Rust: the pinned toolchain. Cargo refuses dependency
+# versions that need a newer compiler, and CI builds with exactly this one.
+rust-version = "1.98.1"
 license = "MIT"
+description = "A high-level, asynchronous Rust client for Arlo security cameras, supporting MFA, MQTT event streaming, and WebRTC signaling."
+repository = "https://github.com/YpNo/arlo-rs"
+readme = "README.md"
+keywords = ["arlo", "camera", "iot", "security", "webrtc"]
+categories = ["api-bindings", "asynchronous"]
+exclude = [
+    "target/",
+    ".agents/",
+    ".claude/",
+    ".github/",
+    ".gitignore",
+    "CONTEXT.md",
+    "GEMINI.md",
+    "CLAUDE.md",
+    ".vscode/",
+    # Repository tooling, meaningless inside a crate tarball.
+    "mise.toml",
+    "codecov.yml",
+    "sonar-project.properties",
+    ".gitleaks.toml",
+    "release-plz.toml",
+    "examples/",
+    "manual_examples/",
+    "tests/",
+    "*.json",
+    # Never let a local artefact into the crate tarball, even with --allow-dirty.
+    "config.toml",
+    "*.har",
+    "*.log",
+    "*.mp4",
+    "*.mkv",
+    "media/",
+    ".security/",
+]
 
 [dependencies]
-tokio = { version = "1.52", features = ["full", "rt-multi-thread"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "socks"] }
+# Narrow feature set for a library: runtime + macros for the examples/tests,
+# sync/time/fs/io-util for the client. Deps declare their own tokio features.
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+# reqwest only serves the LAN local-hub client and the opt-in browser proxy
+# (a plain http://127.0.0.1 proxy), so no SOCKS support is needed here.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 uuid = { version = "1.23", features = ["v4", "fast-rng"] }
-urlencoding = "2.1"
 toml = "1.1"
-# Once `rs-cloudscraper` v0.2.0 is verified against this crate's call sites, swap to:
-# rs-cloudscraper = { git = "https://github.com/YpNo/rs-cloudscraper", tag = "v0.2.0", features = ["browser"] }
-# (Tracked in CHANGELOG.md under [Unreleased].)
-rs-cloudscraper = { path = "../rs-cloudscraper", features = ["browser"] }
+# Browser profiles, the measured Chrome TLS/HTTP2 emulation table, client
+# hints and `impersonation_client()`; it also re-exports `wreq`, which the
+# default transport builds on (`stealthscraper_rs::wreq`). Headless Chrome +
+# the MITM proxy only come in through its `browser` feature.
+stealthscraper-rs = { version = "1.0.0", default-features = false }
+# Backing store for the persistent cookie jar (Arlo's "trust this browser"
+# state lives in cookies), plugged into `wreq` through its `CookieStore` trait.
+cookie_store = "0.22"
+# `wreq` 6 addresses requests by `http::Uri`, `cookie_store` scopes by
+# `url::Url`; the jar converts between them. Already in the graph via both.
+url = "2.5"
 mailparse = "0.16.1"
-regex = "1.12.3"
-imap-client = { path = "../imap-rs/imap-client" }
-imap-core = { path = "../imap-rs/imap-core" }
-imap-tls = { path = "../imap-rs/imap-tls" }
+# Three small OTP patterns; regex-lite covers them without the
+# regex-automata / aho-corasick / regex-syntax tree.
+regex-lite = "0.1"
+imap-rs-client = "0.2.1"
+imap-rs-tls = "0.2.1"
 rustls = { version = "0.23", features = ["ring"] }
-rustls-pki-types = { version = "1", features = ["std"] }
-chrono = "0.4.44"
 flate2 = "1.1.9"
 base64 = "0.22.1"
 tracing = "0.1"
-tracing-futures = "0.2"
-secrecy = "0.10"
+secrecy = { version = "0.10", features = ["serde"] }
 async-trait = "0.1"
+# MQTT-over-WebSocket event bus (v3 replacement for the dead SSE
+# `/hmsweb/client/subscribe`). tokio-tungstenite gives full control of
+# Arlo's non-standard WS handshake (custom Origin + `mqtt` subprotocol);
+# mqttbytes is rumqttc's MQTT 3.1.1 packet codec (no broker runtime).
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+mqttbytes = "0.6"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# NOTE: arlo-rs is **signaling-only** for v3 live. The WebRTC media
+# plane lives in the consumer (the streamer's GStreamer `webrtcbin`) —
+# Arlo's gateway is non-bundled FreeSWITCH, which the pure-Rust `webrtc`
+# crate cannot negotiate. No WebRTC dependency here by design.
 
+
+[features]
+default = []
+# Opt-in escalation path: the headless-Chrome + MITM-proxy transport
+# (`CloudScraperTransport`, selected with `ArloClientBuilder::browser(true)`).
+# Off by default because Arlo's Cloudflare front only fingerprints TLS/HTTP2 —
+# it serves no JS challenge — so the plain `wreq` transport is sufficient.
+browser = ["stealthscraper-rs/browser"]
+
+# The crate has no `unsafe`; forbid it at the lints level so tests, examples
+# and benches are covered too (CLAUDE.md: no `unsafe`).
+[lints.rust]
+unsafe_code = "forbid"
 
 [dev-dependencies]
+# `test-util` enables the paused clock (`#[tokio::test(start_paused = true)]`)
+# so the rate-limit backoff tests do not actually sleep.
+tokio = { version = "1.52", features = ["test-util"] }
 tempfile = "3.26.0"
 mockito = "1.6.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Manual, live-account smoke tests (not autodiscovered — they live in
+# `manual_examples/`, not `examples/`). Run with `cargo run --example <name>`.
+[[example]]
+name = "list_cameras"
+path = "manual_examples/list_cameras.rs"
+
+[[example]]
+name = "push_login"
+path = "manual_examples/push_login.rs"
+
+[[example]]
+name = "record_stream"
+path = "manual_examples/record_stream.rs"

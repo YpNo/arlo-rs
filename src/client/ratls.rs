@@ -14,10 +14,13 @@
 
 use crate::client::ArloClient;
 use crate::client::local_hub::LocalHubClient;
-use crate::endpoints::*;
+use crate::endpoints::{API_RATLS_CERT, API_RATLS_TOKEN};
 use crate::error::ArloError;
+use crate::models::ratls::{
+    CertCreateData, CertCreateRequest, CertCreateResponse, RatlsTokenData, RatlsTokenRequest,
+    RatlsTokenResponse,
+};
 // Endpoints come from self.endpoints (PR 4 transport refactor).
-use crate::models::ratls::*;
 use reqwest::Method;
 use tracing::instrument;
 
@@ -44,11 +47,13 @@ impl ArloClient {
         if !response.success {
             return Err(ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: "Failed to create RATLS certificate".to_string(),
             });
         }
         response.data.ok_or_else(|| ArloError::ApiError {
             code: 500,
+            error: None,
             message: "No cert data returned".to_string(),
         })
     }
@@ -68,11 +73,13 @@ impl ArloClient {
         if !response.success {
             return Err(ArloError::ApiError {
                 code: 500,
+                error: None,
                 message: "Failed to retrieve RATLS token".to_string(),
             });
         }
         response.data.ok_or_else(|| ArloError::ApiError {
             code: 500,
+            error: None,
             message: "No token data returned".to_string(),
         })
     }

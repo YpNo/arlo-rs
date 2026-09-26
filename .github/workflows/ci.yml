@@ -11,14 +11,26 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Read-only token for every job; the release job widens its own scope.
+permissions:
+  contents: read
+
+# A new push to the same PR supersedes the running workflow. Pushes to
+# main queue instead: cancelling a main run could abort a release that
+# is already creating its tag.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   format:
     name: Check Formatting
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt
       - name: Run cargo fmt
@@ -27,126 +39,258 @@ jobs:
   clippy:
     name: Lint with Clippy
     runs-on: ubuntu-latest
+    # A cold BoringSSL build is the long pole (~15 min); cached runs take
+    # a few minutes.
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # btls-sys (BoringSSL, via stealthscraper-rs/wreq) needs cmake, a C++
+      # toolchain, libclang for bindgen, nasm and go.
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
       - name: Rust Cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Run cargo clippy
         # `-D warnings` treats every clippy lint as an error. The previous
         # blanket `-A dead_code` allowance was dropped in PR 5 — any
         # genuinely-needed dead code now requires a localised
         # `#[allow(dead_code)]` with a one-line rationale.
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   test:
     name: Run Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # We need cmake, nasm, and go for boring-sys (BoringSSL build)
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go chromium-browser
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Rust Cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Run cargo test
-        run: cargo test --all-features
+        # The live-account test in tests/e2e_arlo_api.rs is `#[ignore]`
+        # and additionally requires ARLO_E2E=1; CI never runs it.
+        run: cargo test --locked --all-features
 
   security:
     name: Security & License Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v2.0.17
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # On pull_request events the action lists the PR's commits through the
+    # API, which needs pull-requests: read. Comments are off so write access
+    # is never required; findings fail the job and show in the log.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the action diffs the pushed / PR commit range
+      - name: Run gitleaks
+        # Rules and allow-list live in .gitleaks.toml. No license key is
+        # needed for a personal-account repository. Findings fail the job.
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_COMMENTS: "false"
 
   audit:
     name: cargo audit (RUSTSEC advisories)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
+        # Prebuilt binary, exact version, checksum verified by the action's
+        # signed manifest — no `cargo install` of whatever is newest.
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-audit@0.22.2
       - name: Run cargo audit
-        # Blocks the merge on any RUSTSEC advisory affecting our
-        # dependency tree. Run weekly via the scheduled trigger above.
+        # Blocks the merge on any RUSTSEC advisory, unmaintained, unsound
+        # or yanked crate in our dependency tree. Run weekly via the
+        # scheduled trigger above. Advisory ignores, if one is ever
+        # needed, must be mirrored in `[advisories].ignore` in deny.toml.
         run: cargo audit --deny warnings
 
   sonarqube:
     name: SonarQube
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # SONAR_TOKEN is withheld from fork and Dependabot pull requests, so
+    # the scan would always fail there; skip it instead of going red.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
       - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@59db25f34e16620e48ab4bb9e4a5dce155cb5432 # v8
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   doc:
     name: Documentation Check
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential nasm golang-go
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
       - name: Rust Cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Check Documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --locked --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
 
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Dependencies for building boring-sys
       - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go chromium-browser
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Rust Cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Install cargo-tarpaulin (binary)
-        run: |
-          curl -s https://api.github.com/repos/xd009642/tarpaulin/releases/latest | grep browser_download_url | grep x86_64-unknown-linux-musl | cut -d '"' -f 4 | xargs curl -L | tar xz -C /usr/local/bin
+      - name: Install cargo-tarpaulin
+        # Exact version, checksum verified. The previous step downloaded
+        # the newest GitHub release unverified and ran it against the
+        # full test suite in the job that also holds CODECOV_TOKEN.
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-tarpaulin@0.37.4
 
       - name: Run cargo-tarpaulin
         # Stable toolchain is sufficient for current tarpaulin releases —
         # the previous `cargo +nightly` invocation never installed nightly
         # in this job and only worked by accident.
         #
-        # The gate is set to 65% in PR 6 — the realistic ceiling without
-        # the three infrastructure investments still pending: a
-        # streaming-HTTP mock for the SSE EventBus, an IMAP server mock
-        # for the OTP fetcher, and a CloudScraper-boot harness for the
-        # production transport path. CHANGELOG.md `[Unreleased]` tracks
-        # those three as the path to 85%+.
-        run: cargo tarpaulin --all-features --workspace --timeout 120 --out xml --fail-under 70
+        # `--fail-under` is THE coverage gate; codecov.yml mirrors the same
+        # number for the PR annotation. Keep the two in sync. Measured
+        # 78.4 % on 2026-09-26 (338 tests, llvm engine); the gate sits a
+        # few points below because tarpaulin's line attribution moves a
+        # percent or two between runs and engines, and a gate at the exact
+        # value is flaky. The remaining uncovered paths are the IMAP
+        # fetcher (needs an IMAP server double), the local-hub client's
+        # request methods and the opt-in browser-proxy transport.
+        run: cargo tarpaulin --locked --all-features --workspace --timeout 120 --out xml --fail-under 72
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
+          # Reporting only: tarpaulin's `--fail-under` above is the gate,
+          # so a Codecov outage must not fail the pipeline.
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  # release-plz: two jobs, both only after every gate is green on a push to
+  # the default branch (SonarQube is an external service and does not hold a
+  # release back). `release-pr` maintains the "chore: release" PR (version
+  # bump + CHANGELOG section from Conventional Commits); `release` publishes
+  # to crates.io, tags `v<version>` and creates the GitHub release whenever
+  # main carries a version that is not on crates.io yet. RELEASE_PLZ_TOKEN is
+  # a fine-grained PAT (contents + pull-requests: write) so that CI runs on
+  # the release PR — workflows never trigger on PRs opened with GITHUB_TOKEN.
+  release-plz-release:
+    name: release-plz (publish + tag)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [format, clippy, test, security, secrets, audit, doc, coverage]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags decide what the last release was
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      # `cargo publish` verifies the package with a clean build: BoringSSL
+      # needs the same toolchain as the other jobs.
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Run release-plz release
+        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-plz-pr:
+    name: release-plz (release PR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [format, clippy, test, security, secrets, audit, doc, coverage]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      # cargo-semver-checks builds rustdoc JSON for both versions.
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Run release-plz release-pr
+        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

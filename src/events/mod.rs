@@ -1,109 +1,90 @@
-//! Server-Sent Events (SSE) telemetry bus.
+//! Telemetry event bus.
 //!
-//! [`EventBus`] owns two background tokio tasks — an SSE listener that
-//! reconnects on disconnect, and a 10-minute keep-alive pinger — and
-//! broadcasts parsed [`ArloEvent`]s on a `tokio::sync::broadcast` channel.
-//! Consumers obtain receivers via [`EventBus::subscribe`]; each call yields
-//! an independent receiver.
+//! [`EventBus`] owns a single background task: a reconnecting
+//! **MQTT-over-WebSocket** listener that broadcasts parsed
+//! [`ArloEvent`]s on a `tokio::sync::broadcast` channel. Consumers
+//! obtain receivers via [`EventBus::subscribe`]; each call yields an
+//! independent receiver.
+//!
+//! Under the v3 Arlo API the legacy SSE channel
+//! (`/hmsweb/client/subscribe`) returns **403**; the modern client
+//! receives all device events over MQTT (`wss://mqtt-cluster-*`). The
+//! wire details live in the crate-internal `mqtt` submodule; this module only owns lifecycle and
+//! the JSON→[`ArloEvent`] routing (shared, since MQTT `PUBLISH`
+//! payloads have the same shape the SSE frames did).
 //!
 //! Lifecycle:
-//! - [`EventBus::start`] (crate-internal) is invoked lazily by
+//! - `EventBus::start` (crate-internal) is invoked lazily by
 //!   [`crate::ArloClient::events`] on first use.
-//! - [`Drop`] aborts both background tasks, so dropping the owning
+//! - [`Drop`] aborts the background task, so dropping the owning
 //!   [`crate::ArloClient`] cleans up the listener.
-//!
-//! SSE parsing follows the WHATWG spec strictly: frames are terminated by
-//! `\n\n` (or `\r\n\r\n`); within a frame, `data:` lines are concatenated
-//! with `\n`. The previous implementation split per chunk on `\n` and lost
-//! events that straddled a chunk boundary.
 
-use crate::endpoints::*;
+mod mqtt;
+
+pub(crate) use mqtt::{MqttParams, subscription_topics};
+
 use crate::error::ArloError;
 use crate::models::events::ArloEvent;
-use reqwest::Client;
-use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
-use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
+use tracing::warn;
 
-/// Default capacity of the broadcast channel. Slow consumers exceeding this
-/// backlog observe `RecvError::Lagged` and skip ahead.
+/// Default capacity of the broadcast channel. Slow consumers exceeding
+/// this backlog observe `RecvError::Lagged` and skip ahead.
 const BROADCAST_CAPACITY: usize = 256;
-/// How often to ping the session-v3 endpoint to keep the token live.
-const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(600);
-/// Backoff between SSE reconnect attempts.
-const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 
-/// Lifecycle of the SSE listener as observed by callers.
+/// Lifecycle of the event listener as observed by callers.
 ///
-/// Modelled exhaustively so consumers can `match` on it without a wildcard
-/// arm — adding a new variant is a deliberate breaking change.
+/// Modelled exhaustively so consumers can `match` on it without a
+/// wildcard arm — adding a new variant is a deliberate breaking change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionState {
-    /// Initial state after [`EventBus::start`] returns and during every
-    /// reconnect attempt.
+    /// Initial state after the bus starts (crate-internal `EventBus::start`) and during every
+    /// reconnect attempt (WSS dial + MQTT `CONNECT`).
     Connecting,
-    /// The HTTP request to `/subscribe` returned 2xx and we are reading
-    /// the chunked SSE body.
+    /// `CONNACK` accepted; we are subscribed and pumping events.
     Connected,
-    /// The chunk loop ended (server hung up, network blip, …) or the
-    /// initial connection errored. The listener will sleep
-    /// [`RECONNECT_BACKOFF`] and transition back to `Connecting`.
+    /// The socket dropped / errored. The listener sleeps the reconnect
+    /// backoff and transitions back to `Connecting`.
     Disconnected,
 }
 
-/// SSE telemetry bus. See module docs.
+/// Telemetry event bus. See module docs.
 #[derive(Debug)]
 pub struct EventBus {
     sender: broadcast::Sender<ArloEvent>,
     state_rx: watch::Receiver<ConnectionState>,
-    sse_handle: JoinHandle<()>,
-    ping_handle: JoinHandle<()>,
+    listener_handle: JoinHandle<()>,
 }
 
 impl EventBus {
-    /// Connects to Arlo's SSE stream and spawns the listener + keep-alive
-    /// background tasks. Crate-internal — applications obtain a bus via
-    /// [`crate::ArloClient::events`].
-    #[instrument(skip(client, access_token, device_id))]
+    /// Spawns the reconnecting MQTT-over-WSS listener. Crate-internal —
+    /// applications obtain a bus via [`crate::ArloClient::events`].
     pub(crate) async fn start(
-        client: Client,
-        api_host: String,
-        access_token: String,
-        device_id: String,
+        params: MqttParams,
+        ws: std::sync::Arc<dyn crate::client::ws::WsConnector>,
     ) -> Result<Self, ArloError> {
         let (sender, _initial_rx) = broadcast::channel(BROADCAST_CAPACITY);
         let (state_tx, state_rx) = watch::channel(ConnectionState::Connecting);
-
-        let sse_handle = spawn_sse_listener(
-            client.clone(),
-            api_host.clone(),
-            access_token.clone(),
-            device_id.clone(),
-            sender.clone(),
-            state_tx,
-        );
-        let ping_handle = spawn_keep_alive(client, api_host, access_token, device_id);
-
+        let listener_handle = mqtt::spawn_mqtt_listener(params, ws, sender.clone(), state_tx);
         Ok(Self {
             sender,
             state_rx,
-            sse_handle,
-            ping_handle,
+            listener_handle,
         })
     }
 
     /// Returns a fresh receiver. Each call yields an independent
-    /// `broadcast::Receiver`; the first event delivered to it is the next
-    /// one published *after* the call.
+    /// `broadcast::Receiver`; the first event delivered to it is the
+    /// next one published *after* the call.
     pub fn subscribe(&self) -> broadcast::Receiver<ArloEvent> {
         self.sender.subscribe()
     }
 
-    /// Returns a clone of the connection-state watch receiver. Callers can
-    /// `await receiver.changed()` to wake on every transition or read
-    /// `*receiver.borrow()` for the current value. Streamer applications
-    /// use this to pause publishing while the bus is `Disconnected`.
+    /// Returns a clone of the connection-state watch receiver. Callers
+    /// can `await receiver.changed()` to wake on every transition or
+    /// read `*receiver.borrow()` for the current value. Streamer
+    /// applications use this to pause publishing while `Disconnected`.
     pub fn connection_state(&self) -> watch::Receiver<ConnectionState> {
         self.state_rx.clone()
     }
@@ -111,172 +92,40 @@ impl EventBus {
 
 impl Drop for EventBus {
     fn drop(&mut self) {
-        self.sse_handle.abort();
-        self.ping_handle.abort();
+        self.listener_handle.abort();
     }
 }
 
-fn spawn_sse_listener(
-    client: Client,
-    api_host: String,
-    token: String,
-    device_id: String,
-    sender: broadcast::Sender<ArloEvent>,
-    state_tx: watch::Sender<ConnectionState>,
-) -> JoinHandle<()> {
-    tokio::spawn(
-        async move {
-            let url = format!(
-                "{}{}?token={}",
-                api_host,
-                API_SUBSCRIBE,
-                urlencoding::encode(&token)
-            );
-            info!(%url, "Connecting to SSE stream");
-
-            loop {
-                let _ = state_tx.send(ConnectionState::Connecting);
-                match client
-                    .get(&url)
-                    .header("Accept", "text/event-stream")
-                    .header("Authorization", &token)
-                    .header("x-user-device-id", &device_id)
-                    .header("x-service-version", "v3")
-                    .send()
-                    .await
-                {
-                    Ok(mut response) => {
-                        info!(status = %response.status(), "SSE connected");
-                        let _ = state_tx.send(ConnectionState::Connected);
-                        let mut framer = SseFramer::default();
-                        while let Ok(Some(chunk)) = response.chunk().await {
-                            let text = String::from_utf8_lossy(&chunk);
-                            for payload in framer.push(&text) {
-                                dispatch_payload(&payload, &sender);
-                            }
-                        }
-                        warn!("SSE stream ended; reconnecting");
-                    }
-                    Err(e) => {
-                        error!(error = %e, "SSE connection error");
-                    }
-                }
-
-                let _ = state_tx.send(ConnectionState::Disconnected);
-                tokio::time::sleep(RECONNECT_BACKOFF).await;
-            }
-        }
-        .instrument(info_span!("sse_listener")),
-    )
-}
-
-fn spawn_keep_alive(
-    client: Client,
-    api_host: String,
-    token: String,
-    device_id: String,
-) -> JoinHandle<()> {
-    tokio::spawn(
-        async move {
-            let url = format!("{}{}", api_host, AUTH_SESSION_V3);
-            loop {
-                tokio::time::sleep(KEEP_ALIVE_INTERVAL).await;
-                debug!(%url, "Sending keep-alive ping");
-                match client
-                    .get(&url)
-                    .header("Authorization", &token)
-                    .header("x-user-device-id", &device_id)
-                    .header("x-service-version", "v3")
-                    .send()
-                    .await
-                {
-                    Err(e) => warn!(error = %e, "Keep-alive ping failed"),
-                    Ok(resp) if !resp.status().is_success() => {
-                        warn!(status = %resp.status(), "Keep-alive ping non-success")
-                    }
-                    Ok(_) => {}
-                }
-            }
-        }
-        .instrument(info_span!("keep_alive_ping")),
-    )
-}
-
-/// Routes a single decoded SSE `data:` payload through the broadcast
-/// channel. Accepts both single-event objects and arrays (Arlo batches
-/// occasionally).
+/// Routes one decoded JSON payload (an MQTT `PUBLISH` body) through the
+/// broadcast channel. Accepts both single-event objects and arrays
+/// (Arlo batches occasionally). Shared with the listener in [`mqtt`].
 fn dispatch_payload(payload: &str, sender: &broadcast::Sender<ArloEvent>) {
-    if let Ok(event) = serde_json::from_str::<ArloEvent>(payload) {
-        let _ = sender.send(event);
-        return;
-    }
-    if let Ok(events) = serde_json::from_str::<Vec<ArloEvent>>(payload) {
-        for event in events {
-            let _ = sender.send(event);
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, bytes = payload.len(), "unparseable MQTT event payload; dropped");
+            return;
         }
-    }
-}
-
-/// Stateful SSE frame parser. Accumulates partial chunks across reads and
-/// emits the joined `data:` payload of each complete event.
-#[derive(Default)]
-struct SseFramer {
-    buf: String,
-}
-
-impl SseFramer {
-    /// Append `chunk` to the internal buffer and drain every complete
-    /// frame. A frame is terminated by `\n\n` or `\r\n\r\n`. Within a frame,
-    /// every line starting with `data:` (with an optional leading space)
-    /// contributes one line of the returned payload, joined with `\n`.
-    /// Frames with no `data:` line are skipped.
-    fn push(&mut self, chunk: &str) -> Vec<String> {
-        self.buf.push_str(chunk);
-        let mut payloads = Vec::new();
-
-        loop {
-            let separator = locate_frame_terminator(&self.buf);
-            let Some((idx, term_len)) = separator else {
-                break;
-            };
-            let raw_frame = self.buf[..idx].to_string();
-            self.buf.drain(..idx + term_len);
-
-            let mut data_lines: Vec<&str> = Vec::new();
-            for line in raw_frame.split('\n') {
-                let line = line.trim_end_matches('\r');
-                let Some(rest) = line.strip_prefix("data:") else {
-                    continue;
-                };
-                data_lines.push(rest.strip_prefix(' ').unwrap_or(rest));
+    };
+    let items = match value {
+        serde_json::Value::Array(items) => items,
+        single => vec![single],
+    };
+    // Element by element: one malformed event in a batch must not cost
+    // its siblings, and schema drift must be visible in the log.
+    for item in items {
+        match serde_json::from_value::<ArloEvent>(item) {
+            Ok(event) => {
+                let _ = sender.send(event);
             }
-            if !data_lines.is_empty() {
-                payloads.push(data_lines.join("\n"));
-            }
+            Err(e) => warn!(error = %e, "MQTT event did not match ArloEvent; dropped"),
         }
-
-        payloads
-    }
-}
-
-/// Returns `(index, terminator_len)` for the first frame separator in
-/// `buf`, preferring `\r\n\r\n` over `\n\n` if both are present at the
-/// same position. Bytes are ASCII so the index is always a UTF-8 boundary.
-fn locate_frame_terminator(buf: &str) -> Option<(usize, usize)> {
-    let crlf = buf.find("\r\n\r\n").map(|i| (i, 4));
-    let lf = buf.find("\n\n").map(|i| (i, 2));
-    match (crlf, lf) {
-        (Some(c), Some(l)) if c.0 <= l.0 => Some(c),
-        (_, Some(l)) => Some(l),
-        (Some(c), None) => Some(c),
-        (None, None) => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::events::ArloEvent;
 
     #[test]
     fn parses_single_event() {
@@ -301,66 +150,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_batch() {
-        let json = "[{\"action\":\"is\",\"resource\":\"cameras/C1\"},{\"action\":\"is\",\"resource\":\"cameras/C2\"}]";
-        let events: Vec<ArloEvent> = serde_json::from_str(json).unwrap();
-        assert_eq!(events.len(), 2);
-    }
-
-    #[test]
-    fn framer_emits_complete_frame() {
-        let mut f = SseFramer::default();
-        let out = f.push("data: hello\n\n");
-        assert_eq!(out, vec!["hello".to_string()]);
-    }
-
-    #[test]
-    fn framer_handles_chunk_boundaries() {
-        let mut f = SseFramer::default();
-        // The frame terminator straddles two chunks — the previous \n-only
-        // splitter would have lost the event. Each push must wait for the
-        // full \n\n before emitting.
-        assert!(f.push("data: hel").is_empty());
-        assert!(f.push("lo\n").is_empty());
-        let out = f.push("\nleftover");
-        assert_eq!(out, vec!["hello".to_string()]);
-        // The leftover "leftover" stays buffered for the next frame.
-        assert!(f.push("\n\n").is_empty()); // not prefixed with "data:" — skipped.
-        let out = f.push("data: world\n\n");
-        assert_eq!(out, vec!["world".to_string()]);
-    }
-
-    #[test]
-    fn framer_handles_crlf_terminator() {
-        let mut f = SseFramer::default();
-        let out = f.push("data: hi\r\n\r\n");
-        assert_eq!(out, vec!["hi".to_string()]);
-    }
-
-    #[test]
-    fn framer_concatenates_multiline_data() {
-        let mut f = SseFramer::default();
-        let out = f.push("data: line1\ndata: line2\n\n");
-        assert_eq!(out, vec!["line1\nline2".to_string()]);
-    }
-
-    #[test]
-    fn framer_drains_multiple_frames_in_one_chunk() {
-        let mut f = SseFramer::default();
-        let out = f.push("data: a\n\ndata: b\n\ndata: c\n\n");
-        assert_eq!(out, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn framer_skips_frames_without_data_line() {
-        let mut f = SseFramer::default();
-        let out = f.push(": comment\n\nevent: ping\n\n");
-        assert!(out.is_empty());
+    fn dispatch_routes_single_and_batch() {
+        let (tx, mut rx) = broadcast::channel::<ArloEvent>(8);
+        dispatch_payload(r#"{"action":"is","resource":"cameras/C1"}"#, &tx);
+        dispatch_payload(
+            r#"[{"action":"is","resource":"cameras/C2"},{"action":"is","resource":"cameras/C3"}]"#,
+            &tx,
+        );
+        assert_eq!(rx.try_recv().unwrap().resource, "cameras/C1");
+        assert_eq!(rx.try_recv().unwrap().resource, "cameras/C2");
+        assert_eq!(rx.try_recv().unwrap().resource, "cameras/C3");
     }
 
     #[tokio::test]
     async fn connection_state_watch_observes_full_lifecycle() {
-        // Mirror what the SSE listener publishes, without touching the network.
         let (tx, mut rx) = watch::channel(ConnectionState::Connecting);
         assert_eq!(*rx.borrow(), ConnectionState::Connecting);
 
@@ -375,5 +178,24 @@ mod tests {
         tx.send(ConnectionState::Connecting).unwrap();
         rx.changed().await.unwrap();
         assert_eq!(*rx.borrow(), ConnectionState::Connecting);
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn a_bad_batch_element_does_not_drop_its_siblings() {
+        let (tx, mut rx) = broadcast::channel::<ArloEvent>(8);
+        dispatch_payload(
+            r#"[{"action":"is","resource":"cameras/C1"},{"nonsense":true},{"action":"is","resource":"cameras/C3"}]"#,
+            &tx,
+        );
+        assert_eq!(rx.try_recv().unwrap().resource, "cameras/C1");
+        assert_eq!(rx.try_recv().unwrap().resource, "cameras/C3");
+        assert!(rx.try_recv().is_err());
+        dispatch_payload("not json", &tx);
+        assert!(rx.try_recv().is_err());
     }
 }
