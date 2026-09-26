@@ -26,7 +26,7 @@ use crate::client::ArloClient;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
-use tracing::instrument;
+use tracing::{debug, instrument, warn};
 
 /// Internal credentials caching layer.
 ///
@@ -62,30 +62,45 @@ struct AuthCacheSchema {
     cookies: Option<String>,
 }
 
-/// Writes `bytes` to `path` with owner-only permissions (`0600`) on Unix.
-/// On non-Unix the file is written with the platform default permissions.
-/// Failures are intentionally swallowed — caching is best-effort.
-async fn write_owner_only(path: &str, bytes: &[u8]) {
+/// Writes `bytes` to `path` through a sibling temp file created owner-only
+/// and renamed into place. The cache is therefore never observable
+/// half-written, and a pre-existing file with wider permissions is
+/// *replaced* by a `0600` one rather than rewritten in place (`mode` on
+/// open applies only when the file is created). Refuses to write through
+/// a symlink: the caller configured a file, not a redirection.
+async fn write_owner_only(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    if let Ok(meta) = fs::symlink_metadata(path).await
+        && meta.file_type().is_symlink()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "session cache path is a symlink; refusing to write through it",
+        ));
+    }
+
+    let tmp = format!("{path}.tmp");
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut file = opts.open(&tmp).await?;
     #[cfg(unix)]
     {
-        use tokio::io::AsyncWriteExt;
-
-        let open_res = tokio::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .await;
-        if let Ok(mut file) = open_res {
-            let _ = file.write_all(bytes).await;
-            let _ = file.flush().await;
-        }
+        // A temp file left by a crash keeps its old bits; tighten explicitly.
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .await?;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = fs::write(path, bytes).await;
+    file.write_all(bytes).await?;
+    file.sync_all().await?;
+    drop(file);
+    if let Err(e) = fs::rename(&tmp, path).await {
+        let _ = fs::remove_file(&tmp).await;
+        return Err(e);
     }
+    Ok(())
 }
 
 impl std::fmt::Debug for AuthCacheSchema {
@@ -140,18 +155,34 @@ impl AuthManager {
     /// Loads the authentication state from a JSON file path if it exists
     #[instrument(skip(path))]
     pub async fn load_from_cache(path: &str) -> Option<Self> {
-        if let Ok(contents) = fs::read_to_string(path).await
-            && let Ok(schema) = serde_json::from_str::<AuthCacheSchema>(&contents)
-        {
-            return Some(Self {
+        let contents = match fs::read_to_string(path).await {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                debug!(%path, "no session cache; starting fresh");
+                return None;
+            }
+            Err(e) => {
+                warn!(%path, error = %e, "session cache unreadable; starting fresh");
+                return None;
+            }
+        };
+        match serde_json::from_str::<AuthCacheSchema>(&contents) {
+            Ok(schema) => Some(Self {
                 access_token: schema.access_token.map(SecretString::from),
                 user_id: schema.user_id,
                 device_id: schema.device_id,
                 cache_path: Some(path.to_string()),
                 cookies: schema.cookies.map(SecretString::from),
-            });
+            }),
+            Err(e) => {
+                warn!(
+                    %path,
+                    error = %e,
+                    "session cache is corrupt and will be replaced; the trusted-browser pairing is lost"
+                );
+                None
+            }
         }
-        None
     }
 
     /// Flushes the active session tokens to the configured disk path.
@@ -172,10 +203,20 @@ impl AuthManager {
             device_id: self.device_id.clone(),
             cookies: self.cookies.as_ref().map(|c| c.expose_secret().to_string()),
         };
-        let Ok(json) = serde_json::to_string_pretty(&schema) else {
-            return;
+        let json = match serde_json::to_string_pretty(&schema) {
+            Ok(json) => json,
+            Err(e) => {
+                warn!(error = %e, "session cache not written: serialization failed");
+                return;
+            }
         };
-        write_owner_only(path, json.as_bytes()).await;
+        if let Err(e) = write_owner_only(path, json.as_bytes()).await {
+            warn!(
+                %path,
+                error = %e,
+                "session cache not written; the trusted-browser pairing will not survive a restart"
+            );
+        }
     }
 }
 
@@ -279,4 +320,70 @@ mod tests {
     // `impl ArloClient` method, and asserts on both the parsed result
     // and the recorded HTTP call (URL path, headers, body shape).
     // ---------------------------------------------------------------
+}
+
+#[cfg(all(test, unix))]
+mod cache_hygiene_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn manager_for(path: &str) -> AuthManager {
+        let mut m = AuthManager::new();
+        m.set_token("sensitive_token".into());
+        m.cache_path = Some(path.to_string());
+        m
+    }
+
+    #[tokio::test]
+    async fn a_pre_existing_permissive_cache_ends_up_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        manager_for(path.to_str().unwrap()).save_to_cache().await;
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(
+            !dir.path().join("cache.json.tmp").exists(),
+            "temp file left behind"
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("sensitive_token")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_symlinked_cache_path_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere.json");
+        std::fs::write(&target, b"untouched").unwrap();
+        let link = dir.path().join("cache.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        manager_for(link.to_str().unwrap()).save_to_cache().await;
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_cache_loads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        std::fs::write(&path, b"{\"access_token\": \"tok").unwrap();
+        assert!(
+            AuthManager::load_from_cache(path.to_str().unwrap())
+                .await
+                .is_none()
+        );
+    }
 }

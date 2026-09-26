@@ -5,7 +5,7 @@
 1. **Hexagonal Integrity**: Strictly separate Arlo protocol logic (Domain) from transport/MFA solving (Infrastructure). See `.agents/rules/architecture.md`.
 2. **Protocol Fidelity**: We must mimic the Arlo Web Dashboard exactly. This includes undocumented headers, the 6-step OAuth ceremony (login → get_factors → start_auth → finish_auth → validate_access_token → validate_session_v3), and JA4 TLS signatures (Chrome emulation from `stealthscraper-rs`, driven through `wreq`).
 3. **Quality & Security Gates**: Every contribution must pass the Zero-Warning and Dependency Audit gates. See `.agents/rules/quality-standards.md`.
-4. **Resilient Session Management**: Use `secrecy::SecretString` for all tokens (zeroized on drop). Session state is snapshotted via `SessionToken` / `ArloClient::reattach()`. Cache files are `0600` on Unix. Cache files also carry the cookie jar; on a stale token keep `device_id` + cookies (that is the trusted-browser identity) and drop only the token.
+4. **Resilient Session Management**: Use `secrecy::SecretString` for all tokens (zeroized on drop). Session state is snapshotted via `SessionToken` / `ArloClient::reattach()`. Cache files are `0600` on Unix, written temp-file-then-rename (`auth::write_owner_only`), never through a symlink; every cache failure is logged at WARN. Cache files also carry the cookie jar; on a stale token keep `device_id` + cookies (that is the trusted-browser identity) and drop only the token.
 
 ## Module Map
 

@@ -259,6 +259,15 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   `get_baseline` and `fetch_otp` run under an overall wall-clock budget
   (45 s / 90 s) instead of a per-poll check that let per-command timeouts
   add up to minutes. `delete_after_read` uses `UID STORE`.
+- The session cache is written through a sibling temp file (created
+  `0600`, permissions tightened explicitly, fsynced) and renamed into
+  place: never observable half-written, and a pre-existing cache with
+  wider permissions is replaced by an owner-only file instead of being
+  rewritten in place. A symlinked cache path is refused. Every cache
+  failure — unreadable, corrupt, unserialisable, unwritable — is now
+  logged at WARN (a corrupt cache silently cost the trusted-browser
+  pairing before); a missing file is a DEBUG line. Restoring the cookie
+  jar skips expired cookies instead of carrying them forever.
 - Lockfile bumped past two RUSTSEC advisories: `rustls` 0.23.45
   (RUSTSEC-2026-0285, TLS 1.3 handshake across encryption levels) and
   `h2` 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames);

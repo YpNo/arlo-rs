@@ -41,7 +41,7 @@ impl PersistentJar {
     /// Replaces the jar's contents with cookies previously produced by
     /// [`Self::export_json`]. Expired cookies in the blob are dropped.
     pub fn import_json(&self, json: &str) -> Result<(), ArloError> {
-        let loaded = cookie_store::serde::json::load_all(json.as_bytes())
+        let loaded = cookie_store::serde::json::load(json.as_bytes())
             .map_err(|e| ArloError::ParseError(format!("cookie jar blob: {e}")))?;
         *self.0.write().unwrap_or_else(|e| e.into_inner()) = loaded;
         Ok(())
@@ -163,5 +163,31 @@ mod tests {
             jar.import_json("not json").unwrap_err(),
             ArloError::ParseError(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+    use wreq::cookie::CookieStore as _;
+
+    #[test]
+    fn import_drops_expired_cookies_but_keeps_session_cookies() {
+        let jar = PersistentJar::default();
+        let set = [
+            HeaderValue::from_static("short=1; Path=/; Max-Age=1"),
+            HeaderValue::from_static("session=2; Path=/"),
+        ];
+        jar.set_cookies(
+            &mut set.iter(),
+            &"https://ocapi-app.arlo.com/".parse().unwrap(),
+        );
+        let blob = jar.export_json().expect("two cookies exported");
+        assert_eq!(jar.len(), 2);
+
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let restored = PersistentJar::default();
+        restored.import_json(&blob).unwrap();
+        assert_eq!(restored.len(), 1, "the Max-Age=1 cookie must not come back");
     }
 }
