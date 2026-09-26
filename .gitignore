@@ -32,3 +32,6 @@ coverage.out
 config.toml
 .arlo_session*.json
 *.har
+
+# Security sweep reports (never commit — a report is a map for an attacker)
+.security/
