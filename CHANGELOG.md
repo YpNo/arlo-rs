@@ -191,6 +191,11 @@ split. Every entry below was `[Unreleased]` since 0.1.0.
   consumers point at `../arlo-rs`.
 
 ### Changed — build reproducibility
+- Releases go through release-plz (`release-plz.toml`, two gated jobs at
+  the end of `ci.yml`): version bump and changelog section from the
+  Conventional Commits, crates.io publish, `v<version>` tag and GitHub
+  release. The hand-rolled release job that only created a GitHub release
+  from `Cargo.toml` is gone.
 - Toolchain pin raised from 1.95.0 to 1.98.1 (current stable) and declared
   as `rust-version`, so Cargo refuses dependency versions that need a
   newer compiler.

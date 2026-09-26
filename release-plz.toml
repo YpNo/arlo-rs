@@ -1,0 +1,23 @@
+# release-plz (https://release-plz.dev) — runs from .github/workflows/ci.yml
+# after every gate passes on a push to main:
+#   release-pr : opens/updates a "chore: release" PR bumping the version
+#                (from the Conventional Commits since the last tag) and
+#                prepending the generated section to CHANGELOG.md.
+#   release    : when main carries an unpublished version (the merged
+#                release PR, or a version set by hand), publishes to
+#                crates.io, tags `v<version>` and creates the GitHub release.
+[workspace]
+changelog_update = true
+# CHANGELOG.md is Keep-a-Changelog; release-plz prepends only versions that
+# have no `## [x.y.z]` header yet, so hand-written sections stay untouched.
+git_release_enable = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_name = "Release v{{ version }}"
+publish = true
+# cargo-semver-checks against the last published version (skipped while
+# nothing is published yet); a breaking change forces a MINOR bump pre-1.0.
+semver_check = true
+# Renovate owns dependency updates; the release PR must not touch Cargo.lock.
+dependencies_update = false
+allow_dirty = false

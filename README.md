@@ -204,11 +204,16 @@ gitleaks secret scanning, coverage, and SonarQube (skipped on forks).
 Every job has a timeout and every action is pinned to a commit SHA;
 tools are installed at exact, checksum-verified versions.
 
-Releases are the last job of the same workflow: on a push to `main` that
-passes every gate, the version is read from `Cargo.toml` with `cargo
-metadata` and a GitHub release with generated notes is created if that
-tag does not exist yet. Renovate keeps dependencies and action digests
-current (three-day release age, weekly lockfile maintenance, OSV alerts).
+Releases are driven by [release-plz](https://release-plz.dev) from the
+last two jobs of the same workflow, so they run only after every gate is
+green on `main`: `release-pr` keeps a "chore: release" pull request up to
+date (version bump derived from the Conventional Commits since the last
+tag, `CHANGELOG.md` section generated), and once `main` carries a version
+that is not on crates.io yet, `release` publishes the crate, tags
+`v<version>` and creates the GitHub release with the changelog as its
+body. Configuration lives in `release-plz.toml`. Renovate keeps
+dependencies and action digests current (three-day release age, weekly
+lockfile maintenance, OSV alerts).
 
 ## 🔒 Security
 

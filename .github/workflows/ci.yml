@@ -96,6 +96,12 @@ jobs:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # On pull_request events the action lists the PR's commits through the
+    # API, which needs pull-requests: read. Comments are off so write access
+    # is never required; findings fail the job and show in the log.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -107,6 +113,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_COMMENTS: "false"
 
   audit:
     name: cargo audit (RUSTSEC advisories)
@@ -212,63 +219,78 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
-  release:
-    name: Create GitHub Release
+  # release-plz: two jobs, both only after every gate is green on a push to
+  # the default branch (SonarQube is an external service and does not hold a
+  # release back). `release-pr` maintains the "chore: release" PR (version
+  # bump + CHANGELOG section from Conventional Commits); `release` publishes
+  # to crates.io, tags `v<version>` and creates the GitHub release whenever
+  # main carries a version that is not on crates.io yet. RELEASE_PLZ_TOKEN is
+  # a fine-grained PAT (contents + pull-requests: write) so that CI runs on
+  # the release PR — workflows never trigger on PRs opened with GITHUB_TOKEN.
+  release-plz-release:
+    name: release-plz (publish + tag)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # Only after every gate is green on a push to the default branch;
-    # SonarQube is an external service and does not hold a release back.
+    timeout-minutes: 45
     needs: [format, clippy, test, security, secrets, audit, doc, coverage]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     permissions:
       contents: write
-    # Two quick pushes must not race on the same tag.
     concurrency:
-      group: release-${{ github.ref }}
+      group: release-plz-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags decide what the last release was
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      # `cargo publish` verifies the package with a clean build: BoringSSL
+      # needs the same toolchain as the other jobs.
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Extract version from Cargo.toml
-        id: version
-        # `cargo metadata` reads the package table only (a `version =`
-        # line inside a dependency table can never leak in), and the
-        # value is validated before it goes anywhere near a shell.
-        run: |
-          set -euo pipefail
-          version="$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[0].version')"
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Cargo.toml version '$version' is not a semver string"
-            exit 1
-          fi
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "Detected version: v$version"
-
-      - name: Check if tag already exists
-        id: check_tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $TAG already exists. Skipping."
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create Release
-        if: steps.check_tag.outputs.exists == 'false'
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Run release-plz release
+        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: Release ${{ steps.version.outputs.tag }}
-          generate_release_notes: true
-          target_commitish: ${{ github.sha }}
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-plz-pr:
+    name: release-plz (release PR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [format, clippy, test, security, secrets, audit, doc, coverage]
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      # cargo-semver-checks builds rustdoc JSON for both versions.
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential libssl-dev libclang-dev nasm golang-go
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Run release-plz release-pr
+        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
