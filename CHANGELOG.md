@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `manual_examples/peek_stream_url`: probe that polls `get_stream_url` for
+  every camera while printing redacted bus events, to see what Arlo
+  publishes and returns while a live view runs in the mobile app.
+
+### Changed
+- The MQTT decode-failure log (`MQTT event did not match ArloEvent`) now
+  carries the event's sorted top-level keys and its `resource`, never the
+  values, so schema drift can be diagnosed from a production log.
+
 ## [0.2.0] - 2026-09-25
 
 First release under the `arlo-rs` name. Breaking throughout (pre-1.0:

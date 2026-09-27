@@ -114,17 +114,59 @@ fn dispatch_payload(payload: &str, sender: &broadcast::Sender<ArloEvent>) {
     // Element by element: one malformed event in a batch must not cost
     // its siblings, and schema drift must be visible in the log.
     for item in items {
+        // Keys and resource only: the values may carry presigned URLs
+        // or credentials, and the point is to see the schema drift.
+        let shape = event_shape(&item);
         match serde_json::from_value::<ArloEvent>(item) {
             Ok(event) => {
                 let _ = sender.send(event);
             }
-            Err(e) => warn!(error = %e, "MQTT event did not match ArloEvent; dropped"),
+            Err(e) => warn!(
+                error = %e,
+                keys = ?shape.keys,
+                resource = ?shape.resource,
+                "MQTT event did not match ArloEvent; dropped"
+            ),
         }
     }
 }
 
+/// Redacted description of a raw event for the decode-failure log.
+struct EventShape {
+    keys: Vec<String>,
+    resource: Option<String>,
+}
+
+fn event_shape(item: &serde_json::Value) -> EventShape {
+    let mut keys: Vec<String> = item
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort_unstable();
+    let resource = item
+        .get("resource")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    EventShape { keys, resource }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn event_shape_lists_sorted_keys_and_resource_only() {
+        let v = serde_json::json!({
+            "resource": "cameras/C1",
+            "properties": {"url": "rtsps://secret"},
+            "activeMode": "x"
+        });
+        let shape = super::event_shape(&v);
+        assert_eq!(shape.keys, vec!["activeMode", "properties", "resource"]);
+        assert_eq!(shape.resource.as_deref(), Some("cameras/C1"));
+        let shape = super::event_shape(&serde_json::json!("scalar"));
+        assert!(shape.keys.is_empty());
+        assert_eq!(shape.resource, None);
+    }
+
     use super::*;
 
     #[test]
