@@ -212,6 +212,23 @@ mod tests {
     }
 
     #[test]
+    fn success_false_ignores_a_code_that_is_neither_string_nor_number() {
+        let body = r#"{"data":{"error":true,"message":"odd shape"},"success":false}"#;
+        match super::unwrap_envelope(body) {
+            Err(crate::error::ArloError::ApiError { error, message, .. }) => {
+                assert_eq!(error, None);
+                assert_eq!(message, "odd shape");
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+        let body = r#"{"data":{"error":"not-a-number"},"success":false}"#;
+        assert!(matches!(
+            super::unwrap_envelope(body),
+            Err(crate::error::ArloError::ApiError { error: None, .. })
+        ));
+    }
+
+    #[test]
     fn success_false_accepts_numeric_code_and_falls_back_to_excerpt() {
         let body = r#"{"data":{"error":2059},"success":false}"#;
         match super::unwrap_envelope(body) {
