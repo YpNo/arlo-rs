@@ -11,9 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `manual_examples/peek_stream_url`: event-driven probe. It prints every
   bus event redacted and queries `get_stream_url` for a camera once, and
   only after the bus reported `userStreamActive` for it, reporting whether
-  the URL is a `watchalong` join of the user's view.
+  the URL is a `watchalong` join of the user's view, then fetches the DASH
+  manifest three ways (plain, browser headers, browser TLS emulation) on
+  fresh tokens and summarises it without printing any URL.
 
 ### Fixed
+- `ArloEvent.action` defaults to empty: `mediaUploadNotification` events
+  (published without an `action`, carrying a fresh
+  `presignedLastImageUrl`) were dropped as undecodable.
 - `get_stream_url` was documented as a passive peek. A live capture showed
   the `get` query hands out a fresh web session on an idle camera and
   reaches the camera; the docs now say so and forbid polling it.
