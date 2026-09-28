@@ -124,3 +124,7 @@ path = "manual_examples/push_login.rs"
 [[example]]
 name = "record_stream"
 path = "manual_examples/record_stream.rs"
+
+[[example]]
+name = "peek_stream_url"
+path = "manual_examples/peek_stream_url.rs"

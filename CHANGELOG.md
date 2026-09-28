@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `manual_examples/peek_stream_url`: event-driven probe. It prints every
+  bus event redacted and queries `get_stream_url` for a camera once, and
+  only after the bus reported `userStreamActive` for it, reporting whether
+  the URL is a `watchalong` join of the user's view, then fetches the DASH
+  manifest three ways (plain, browser headers, browser TLS emulation) on
+  fresh tokens and summarises it without printing any URL.
+
+### Fixed
+- `success: false` envelopes now keep Arlo's own code and message from
+  `data` (`{"data":{"error":"14001","message":…},"success":false}`) in
+  `ArloError::ApiError { error, message }`. They used to become
+  `error: None` with a body excerpt, so `ArloError::action` classified
+  every such failure as a generic HTTP 500 retry and callers could not
+  branch on the code (for example 14001, "RTSP streaming in progress",
+  returned by `sip_info` while the mobile app is viewing the camera).
+  Behaviour change: codes in the error table now classify by their
+  table entry instead of `Retry`.
+- `ArloEvent.action` defaults to empty: `mediaUploadNotification` events
+  (published without an `action`, carrying a fresh
+  `presignedLastImageUrl`) were dropped as undecodable.
+- `get_stream_url` was documented as a passive peek. A live capture showed
+  the `get` query hands out a fresh web session on an idle camera and
+  reaches the camera; the docs now say so and forbid polling it.
+
+### Changed
+- The MQTT decode-failure log (`MQTT event did not match ArloEvent`) now
+  carries the event's sorted top-level keys and its `resource`, never the
+  values, so schema drift can be diagnosed from a production log.
+
 ## [0.2.0] - 2026-09-25
 
 First release under the `arlo-rs` name. Breaking throughout (pre-1.0:

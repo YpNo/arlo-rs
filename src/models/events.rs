@@ -7,7 +7,11 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArloEvent {
-    /// e.g. `"is"`, `"set"`, `"notify"`, `"redirect"`.
+    /// e.g. `"is"`, `"set"`, `"notify"`, `"redirect"`. Empty when the
+    /// payload has none: `mediaUploadNotification` (a new recording or
+    /// snapshot, carrying a fresh `presignedLastImageUrl`) is published
+    /// without an `action` and used to be dropped as undecodable.
+    #[serde(default)]
     pub action: String,
     /// e.g. `"cameras/<deviceId>"`, `"modes"`, `"subscriptions/<userId>"`.
     pub resource: String,
@@ -61,6 +65,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ev.active_mode_change(), Some("Night"));
+    }
+
+    #[test]
+    fn media_upload_notification_without_action_decodes() {
+        // Shape captured live on 2026-09-28 (values synthetic).
+        let ev: ArloEvent = serde_json::from_str(
+            r#"{"resource":"mediaUploadNotification","deviceId":"C1","uniqueId":"U_C1",
+                "ownerId":"U","createdDate":"20260928","mediaObjectCount":1,
+                "presignedLastImageUrl":"https://example.invalid/x.jpg"}"#,
+        )
+        .unwrap();
+        assert_eq!(ev.action, "");
+        assert_eq!(ev.resource, "mediaUploadNotification");
     }
 
     #[test]
