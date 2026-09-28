@@ -42,14 +42,7 @@ pub(crate) fn unwrap_envelope(body: &str) -> Result<Value, ArloError> {
         if success {
             return Ok(take_data(&mut parsed));
         }
-        return Err(ArloError::ApiError {
-            code: 500,
-            error: None,
-            message: format!(
-                "Envelope reports success=false; body: {}",
-                crate::models::redact::excerpt(body)
-            ),
-        });
+        return Err(success_false_error(&parsed, body));
     }
 
     // `meta.code: u64`
@@ -157,6 +150,36 @@ pub(crate) fn unwrap_envelope_array(body: &str, inner_key: &str) -> Result<Value
     }
 }
 
+/// `success: false` envelopes carry Arlo's own code and text under `data`
+/// (`{"data":{"error":"14001","message":"…","reason":"…"},"success":false}`,
+/// the code as a string). Keeping the code structured lets
+/// [`ArloError::action`] classify it and callers branch on it; the message
+/// falls back to a redacted body excerpt when `data.message` is absent.
+fn success_false_error(parsed: &Value, body: &str) -> ArloError {
+    let data = parsed.get("data");
+    let error = data.and_then(|d| d.get("error")).and_then(|e| match e {
+        Value::String(s) => s.trim().parse::<u32>().ok(),
+        Value::Number(n) => n.as_u64().and_then(|n| u32::try_from(n).ok()),
+        _ => None,
+    });
+    let message = data
+        .and_then(|d| d.get("message"))
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty())
+        .map(crate::models::redact::excerpt)
+        .unwrap_or_else(|| {
+            format!(
+                "Envelope reports success=false; body: {}",
+                crate::models::redact::excerpt(body)
+            )
+        });
+    ArloError::ApiError {
+        code: 500,
+        error,
+        message,
+    }
+}
+
 fn json_kind(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -170,6 +193,41 @@ fn json_kind(v: &Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn success_false_keeps_arlo_code_and_message_from_data() {
+        // Shape captured live on 2026-09-27 (sipInfo while the app streams).
+        let body = r#"{"data":{"error":"14001","message":"RTSP Streaming in progress, SIP Streaming is not allowed, try after some time !!!","reason":"x"},"success":false}"#;
+        match super::unwrap_envelope(body) {
+            Err(crate::error::ArloError::ApiError {
+                code,
+                error,
+                message,
+            }) => {
+                assert_eq!(code, 500);
+                assert_eq!(error, Some(14001));
+                assert!(message.starts_with("RTSP Streaming in progress"));
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn success_false_accepts_numeric_code_and_falls_back_to_excerpt() {
+        let body = r#"{"data":{"error":2059},"success":false}"#;
+        match super::unwrap_envelope(body) {
+            Err(crate::error::ArloError::ApiError { error, message, .. }) => {
+                assert_eq!(error, Some(2059));
+                assert!(message.starts_with("Envelope reports success=false"));
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+        let body = r#"{"success":false}"#;
+        assert!(matches!(
+            super::unwrap_envelope(body),
+            Err(crate::error::ArloError::ApiError { error: None, .. })
+        ));
+    }
+
     use super::*;
     use serde_json::json;
 

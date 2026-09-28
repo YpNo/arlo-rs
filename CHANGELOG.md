@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fresh tokens and summarises it without printing any URL.
 
 ### Fixed
+- `success: false` envelopes now keep Arlo's own code and message from
+  `data` (`{"data":{"error":"14001","message":…},"success":false}`) in
+  `ArloError::ApiError { error, message }`. They used to become
+  `error: None` with a body excerpt, so `ArloError::action` classified
+  every such failure as a generic HTTP 500 retry and callers could not
+  branch on the code (for example 14001, "RTSP streaming in progress",
+  returned by `sip_info` while the mobile app is viewing the camera).
+  Behaviour change: codes in the error table now classify by their
+  table entry instead of `Retry`.
 - `ArloEvent.action` defaults to empty: `mediaUploadNotification` events
   (published without an `action`, carrying a fresh
   `presignedLastImageUrl`) were dropped as undecodable.
