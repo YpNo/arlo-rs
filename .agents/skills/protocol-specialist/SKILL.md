@@ -50,6 +50,10 @@ Do not re-derive them; extend this list when a capture adds one.
 - **Snapshots are announced on the bus**: `cameras/<id>` property events carry a fresh
   `presignedLastImageUrl`; `mediaUploadNotification` also carries one at top level and
   may arrive **without an `action`** (hence `#[serde(default)] action`).
+- **Motion is a pulse train, not a state.** While motion lasts a camera repeats
+  `activityState: fullFrameSnapshot` → `motionDetected: true` → `motionDetected: false`
+  ~5 s later, about every 10 s (longest gap seen: 13 s). `false` ends a pulse, not the
+  motion; consumers time their cooldown from the last `true`.
 - Presigned URLs are capability URLs: redact them (`models/redact.rs`), never log them,
   accept https only, and treat them as short-lived.
 
