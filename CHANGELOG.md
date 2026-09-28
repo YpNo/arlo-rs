@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/YpNo/arlo-rs/compare/v0.2.0...v0.2.1) - 2026-09-28
+
+### Fixed
+
+- keep Arlo error codes, decode action-less events, correct get_stream_url docs ([#25](https://github.com/YpNo/arlo-rs/pull/25))
+
+### Other
+
+- Update banner of the README
+- Update banner of the README
+
 ### Added
 - `manual_examples/peek_stream_url`: event-driven probe. It prints every
   bus event redacted and queries `get_stream_url` for a camera once, and
