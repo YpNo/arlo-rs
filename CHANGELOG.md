@@ -8,9 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `manual_examples/peek_stream_url`: probe that polls `get_stream_url` for
-  every camera while printing redacted bus events, to see what Arlo
-  publishes and returns while a live view runs in the mobile app.
+- `manual_examples/peek_stream_url`: event-driven probe. It prints every
+  bus event redacted and queries `get_stream_url` for a camera once, and
+  only after the bus reported `userStreamActive` for it, reporting whether
+  the URL is a `watchalong` join of the user's view.
+
+### Fixed
+- `get_stream_url` was documented as a passive peek. A live capture showed
+  the `get` query hands out a fresh web session on an idle camera and
+  reaches the camera; the docs now say so and forbid polling it.
 
 ### Changed
 - The MQTT decode-failure log (`MQTT event did not match ArloEvent`) now

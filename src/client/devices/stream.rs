@@ -1,6 +1,6 @@
-//! Legacy live-stream entry points (`/startStream`): synchronous peek,
-//! forced start with event-bus correlation by `transId`, and the URL
-//! helpers. v3 cameras use the WebRTC signaling in
+//! Legacy live-stream entry points (`/startStream`): the `get` query
+//! (not side-effect free, see [`ArloClient::get_stream_url`]), forced
+//! start with event-bus correlation by `transId`, and the URL helpers. v3 cameras use the WebRTC signaling in
 //! `crate::client::livestream` instead.
 
 use super::xcloud_header;
@@ -19,13 +19,23 @@ use tracing::{debug, instrument, warn};
 const STREAM_URL_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl ArloClient {
-    /// Returns the URL of an **already-active** live stream for `device`,
-    /// or `Ok(None)` if nothing is currently streaming.
+    /// Asks `/startStream` (`action: "get"`) for the URL of the stream
+    /// `device` is serving, or `Ok(None)` when none is returned. The URL
+    /// comes back in the POST response itself, not over the event bus.
     ///
-    /// This is a synchronous peek (`action: "get"` on `/startStream`):
-    /// it does **not** trigger a new stream and the URL — if any —
-    /// comes back in the POST response itself, not over SSE. Use it to
-    /// pick up a stream a user started from the Arlo mobile app.
+    /// **Not a passive read.** Observed live on 2026-09-28: on an idle
+    /// camera the call hands out a fresh web session and the camera then
+    /// publishes its full state on the event bus, i.e. the request
+    /// reaches the camera; repeated calls on an idle camera alternate
+    /// between a fresh session and `None` as those sessions lapse. While
+    /// a user watches the camera in the Arlo app, the call returns a URL
+    /// carrying `watchalong=true` that joins that view. Call it only once
+    /// the bus has reported `activityState == "userStreamActive"` for the
+    /// camera, never on a timer: polling it wakes battery cameras.
+    ///
+    /// The request identifies as the web client (`from: <user>_web`), so
+    /// the URL is the web client's `https://…/*.mpd` MPEG-DASH egress,
+    /// not RTSP.
     ///
     /// Mirrors pyaarlo's `_get_stream_url`: `to` is the device's
     /// `parent_id` (the base station — equals `device_id` for
@@ -68,10 +78,12 @@ impl ArloClient {
     /// **reusing an already-active stream when one exists** (e.g. opened
     /// from the Arlo mobile app).
     ///
-    /// Cheap peek first via [`Self::get_stream_url`]; on a miss, defers
-    /// to [`Self::force_start_stream`] (fresh `startUserStream` +
-    /// SSE-correlated URL). Use `force_start_stream` directly to skip
-    /// the reuse check.
+    /// Queries [`Self::get_stream_url`] first; on a miss, defers to
+    /// [`Self::force_start_stream`] (fresh `startUserStream` +
+    /// SSE-correlated URL). Because the `get` query can itself hand out
+    /// a fresh web session on an idle camera, the returned URL may be
+    /// that session rather than one from `startUserStream`. Use
+    /// `force_start_stream` directly to skip the query.
     #[instrument(skip(self), fields(device = %device.device_id))]
     pub async fn start_stream(&self, device: &Device) -> Result<StreamUrl, ArloError> {
         if let Some(existing) = self.get_stream_url(device).await? {

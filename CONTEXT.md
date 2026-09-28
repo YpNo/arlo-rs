@@ -118,9 +118,12 @@ streamer's GStreamer `webrtcbin`.
 `device.parent_id` and attaches an `xcloudId` header derived from
 `device.x_cloud_id`; `Device::is_self_hosted()` reports
 `parent_id == device_id`):
-- **`get_stream_url`**: synchronous peek (`action:"get"` on
-  `/startStream`) — returns an already-active stream (e.g. one opened
-  from the Arlo mobile app) or `None`. URL in the POST body, no event.
+- **`get_stream_url`**: the `action:"get"` query on `/startStream`. **Not
+  side-effect free** (live capture 2026-09-28): on an idle camera it hands
+  out a fresh web DASH session and reaches the camera; during a user view
+  in the Arlo app it returns a `watchalong=true` URL joining that view.
+  Call only after `activityState == "userStreamActive"`, never on a timer.
+  URL in the POST body, no event.
 - **`force_start_stream`**: always issues a fresh `startUserStream`
   (`action:"set"`); the real URL arrives on the event bus and is
   correlated by `transId`.
