@@ -30,6 +30,29 @@ Arlo v3 replaces the RTSP live source with a WebRTC call brokered by a **non-bun
 5. **Answer shape**: two m-lines (audio + video), **separate ICE ufrag/pwd/candidate per m-line, no `a=group:BUNDLE`, same DTLS fingerprint + `a=setup:active`**. Apply the answer verbatim through `webrtcbin`; do not munge it into BUNDLE — ICE will fail.
 6. **`webrtc-rs` is incompatible.** It is BUNDLE-only / single ICE transport (upstream `sdp/mod.rs:996`). Live v3 must go through GStreamer `webrtcbin`; don't reintroduce a `webrtc-rs` dependency for signaling *or* media here.
 
+## Facts proven on a live account (2026-09-28)
+
+Captured with `manual_examples/peek_stream_url.rs` and the streamer's event logging.
+Do not re-derive them; extend this list when a capture adds one.
+
+- **One live transport per camera.** While the mobile app views a camera (RTSP),
+  `sipInfo` / the WebRTC offer is refused with `success:false` and
+  `data.error = 14001` ("RTSP Streaming in progress, SIP Streaming is not allowed").
+  `data.error` arrives as a **string or a number**; `success_false_error` accepts both
+  and keeps `data.message`. Consumers match the numeric code, never the text.
+- **The app's stream cannot be joined.** The watch-along DASH URL answers 502 from
+  awselb for every variant tried.
+- **`get_stream_url` (`action:"get"` on `/startStream`) is not passive**: it wakes an
+  idle camera. Call it only after the bus reported `activityState == "userStreamActive"`,
+  never on a timer or as a probe loop.
+- **User views are visible on the bus**: `cameras/<id>` property events carry
+  `activityState` (`userStreamActive` while the app streams, `idle` after).
+- **Snapshots are announced on the bus**: `cameras/<id>` property events carry a fresh
+  `presignedLastImageUrl`; `mediaUploadNotification` also carries one at top level and
+  may arrive **without an `action`** (hence `#[serde(default)] action`).
+- Presigned URLs are capability URLs: redact them (`models/redact.rs`), never log them,
+  accept https only, and treat them as short-lived.
+
 ## Design invariants (this crate is signaling-only)
 
 - No `webrtc` or `webrtc-rs` dependency. Ever.
