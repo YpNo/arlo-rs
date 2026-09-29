@@ -96,12 +96,13 @@ impl ArloClient {
     /// Always issues a fresh `startUserStream` regardless of any
     /// already-active stream, and awaits the SSE-correlated URL.
     ///
-    /// Arlo's `/startStream` (`action: "set"`) is asynchronous: the
-    /// POST only confirms acceptance; the real RTSPS / HLS / DASH URL
-    /// arrives later as an SSE event correlated by `transId`. This
+    /// Current Arlo returns the URL in the POST reply (`data.url`); older
+    /// backends only confirm acceptance and announce the RTSPS / HLS /
+    /// DASH URL later as an event correlated by `transId`. This
     /// subscribes to the event bus *before* the POST (closing the race
-    /// where the SSE response could beat the subscription) and waits up
-    /// to `STREAM_URL_TIMEOUT` (30 s). Returns [`ArloError::Timeout`] if no
+    /// where the event could beat the subscription), returns the reply's
+    /// URL when there is one, and otherwise waits up to
+    /// `STREAM_URL_TIMEOUT` (30 s) for the event. Returns [`ArloError::Timeout`] if no
     /// URL arrives in time, or [`ArloError::AuthError`] if not yet
     /// authenticated.
     #[instrument(skip(self), fields(device = %device.device_id))]
@@ -132,13 +133,27 @@ impl ArloClient {
                 "cameraId": camera_id
             }
         });
-        self.execute_request_with_headers(
-            Method::POST,
-            &url,
-            Some(&payload),
-            &xcloud_header(device),
-        )
-        .await?;
+        let reply = self
+            .execute_request_with_headers(
+                Method::POST,
+                &url,
+                Some(&payload),
+                &xcloud_header(device),
+            )
+            .await?;
+        // Shape only (keys, URL schemes): the reply may carry a
+        // token-bearing stream URL.
+        debug!(%trans_id, reply = %json_shape(&reply), "startStream (set) accepted");
+        // Current Arlo answers in the reply itself (`data.url`, next to
+        // the call's `sipCallInfo` / `iceServers`; live capture
+        // 2026-09-29); older backends announce it on the bus instead.
+        if let Some(raw) = serde_json::from_str::<serde_json::Value>(&reply)
+            .ok()
+            .as_ref()
+            .and_then(extract_post_response_stream_url)
+        {
+            return StreamUrl::parse(&raw);
+        }
 
         // Drain the broadcast channel until we see our own transId carrying
         // a stream URL, or the per-call timeout expires.
@@ -158,6 +173,10 @@ impl ArloClient {
                         action = %event.action,
                         resource = %event.resource,
                         trans_id = ?event.trans_id,
+                        properties = %event
+                            .properties
+                            .as_ref()
+                            .map_or_else(|| "-".to_string(), value_shape),
                         "bus event during startStream wait"
                     );
                     if !event_matches_trans_id(&event, &trans_id) {
@@ -191,6 +210,40 @@ impl ArloClient {
                 }
             }
         }
+    }
+}
+
+/// A diagnostic outline of a JSON document: object keys and value types,
+/// with every string that parses as a URL reduced to `<url:scheme>` and
+/// every other string to `<str>`. Never carries a value, so it is safe to
+/// log a reply that may hold a stream URL or a token.
+fn json_shape(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body).map_or_else(
+        |_| format!("<non-json, {} bytes>", body.len()),
+        |v| value_shape(&v),
+    )
+}
+
+fn value_shape(value: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<_> = map.iter().collect();
+            keys.sort_by(|a, b| a.0.cmp(b.0));
+            let inner: Vec<String> = keys
+                .into_iter()
+                .map(|(k, v)| format!("{k}:{}", value_shape(v)))
+                .collect();
+            format!("{{{}}}", inner.join(","))
+        }
+        Value::Array(items) => format!("[{} items]", items.len()),
+        Value::String(s) => match url::Url::parse(s) {
+            Ok(u) if u.has_host() => format!("<url:{}>", u.scheme()),
+            _ => "<str>".to_string(),
+        },
+        Value::Bool(_) => "<bool>".to_string(),
+        Value::Number(_) => "<num>".to_string(),
+        Value::Null => "null".to_string(),
     }
 }
 
@@ -479,6 +532,76 @@ mod tests {
             "force fallback must progress past the 2-call peek (event-bus boot), got {} calls",
             mock.calls().len()
         );
+    }
+
+    #[tokio::test]
+    async fn force_start_stream_returns_the_url_of_the_post_reply() {
+        // Current Arlo (capture 2026-09-29): the URL is in the reply and
+        // never announced on the bus.
+        let mock = arc_mock();
+        mock.queue_post(
+            r#"{"success":true,"data":{"url":"https://weblivestream-z1-prod.arlo.com:80/s.mpd?t=1"}}"#,
+        );
+        let (client, _bus) =
+            crate::client::test_helpers::authenticated_client_with_bus(Arc::clone(&mock));
+        let dev = make_device("CAM-1", None, None);
+
+        let url = client
+            .force_start_stream(&dev)
+            .await
+            .expect("url from the reply");
+        assert!(
+            url.as_str()
+                .starts_with("https://weblivestream-z1-prod.arlo.com:80/")
+        );
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 2, "OPTIONS preflight + POST, no wait");
+        assert_eq!(parse_body_json(calls[1].body.as_ref())["action"], "set");
+    }
+
+    #[tokio::test]
+    async fn force_start_stream_waits_for_the_bus_when_the_reply_has_no_url() {
+        // Older backends only acknowledge, then publish the URL with our
+        // transId.
+        let mock = arc_mock();
+        mock.queue_post(r#"{"success":true}"#);
+        let (client, bus) =
+            crate::client::test_helpers::authenticated_client_with_bus(Arc::clone(&mock));
+        let dev = make_device("CAM-1", None, None);
+
+        let publish = async {
+            let trans_id = loop {
+                if let Some(post) = mock.calls().get(1) {
+                    break parse_body_json(post.body.as_ref())["transId"]
+                        .as_str()
+                        .expect("transId")
+                        .to_string();
+                }
+                tokio::task::yield_now().await;
+            };
+            let other = make_event(Some("someone-else"), json!({"url": "rtsps://wrong/x"}));
+            let ours = make_event(Some(&trans_id), json!({"url": "rtsp://live.arlo.com/cam"}));
+            bus.send(other).expect("send");
+            bus.send(ours).expect("send");
+        };
+        let (url, ()) = tokio::join!(client.force_start_stream(&dev), publish);
+        assert_eq!(
+            url.expect("url from the bus").as_str(),
+            "rtsps://live.arlo.com/cam"
+        );
+    }
+
+    #[test]
+    fn json_shape_masks_urls_and_strings_and_keeps_structure() {
+        let shape = json_shape(
+            r#"{"success":true,"data":{"url":"rtsps://h.example/s?egressToken=SECRET","transId":"t-1","n":3,"x":null,"list":[1,2]}}"#,
+        );
+        assert_eq!(
+            shape,
+            "{data:{list:[2 items],n:<num>,transId:<str>,url:<url:rtsps>,x:null},success:<bool>}"
+        );
+        assert!(!shape.contains("SECRET") && !shape.contains("h.example"));
+        assert_eq!(json_shape("not json"), "<non-json, 8 bytes>");
     }
 
     #[test]

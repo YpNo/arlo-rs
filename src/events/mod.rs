@@ -90,6 +90,22 @@ impl EventBus {
     }
 }
 
+#[cfg(test)]
+impl EventBus {
+    /// A bus with no MQTT listener: tests publish into it through the
+    /// returned sender, as the listener would.
+    pub(crate) fn detached() -> (Self, broadcast::Sender<ArloEvent>) {
+        let (sender, _initial_rx) = broadcast::channel(BROADCAST_CAPACITY);
+        let (_state_tx, state_rx) = watch::channel(ConnectionState::Connected);
+        let bus = Self {
+            sender: sender.clone(),
+            state_rx,
+            listener_handle: tokio::spawn(async {}),
+        };
+        (bus, sender)
+    }
+}
+
 impl Drop for EventBus {
     fn drop(&mut self) {
         self.listener_handle.abort();
