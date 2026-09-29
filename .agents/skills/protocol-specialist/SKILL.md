@@ -50,6 +50,14 @@ Do not re-derive them; extend this list when a capture adds one.
 - **Snapshots are announced on the bus**: `cameras/<id>` property events carry a fresh
   `presignedLastImageUrl`; `mediaUploadNotification` also carries one at top level and
   may arrive **without an `action`** (hence `#[serde(default)] action`).
+- **`startUserStream` answers in the POST reply** (`data.url`), not on the bus (capture
+  2026-09-29). During an app view the reply holds a watch-along DASH URL (502, like
+  `get_stream_url`'s) plus `sipCallInfo` + `iceServers` with `callId` / `conferenceId`
+  null; a WebRTC leg with those coordinates connects to the gateway and is refused with
+  `code 3, NO_ROUTE_DESTINATION`. The app's live view cannot be joined by any route we
+  can act as; the app is never disturbed by these requests.
+- **An app view is announced twice**: `activityState: startUserStream`, then
+  `userStreamActive` about 200 ms later; `idle` when it closes.
 - **Motion is a pulse train, not a state.** While motion lasts a camera repeats
   `activityState: fullFrameSnapshot` → `motionDetected: true` → `motionDetected: false`
   ~5 s later, about every 10 s (longest gap seen: 13 s). `false` ends a pulse, not the
