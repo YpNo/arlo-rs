@@ -14,6 +14,24 @@ use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, instrument, warn};
 
+/// The `User-Agent` of the Arlo iOS app for `app_version`, in the shape
+/// pyaarlo sends (`(iPhone15,2 18_1_1) iOS Arlo 5.4.3`, its `arlo` agent):
+/// the identity Arlo answers stream queries to with an `rtsps://` URL,
+/// where a browser identity gets MPEG-DASH.
+#[must_use]
+pub fn ios_app_user_agent(app_version: &str) -> String {
+    format!("(iPhone15,2 18_1_1) iOS Arlo {app_version}")
+}
+
+/// The app version pyaarlo's `arlo` agent carries (proven to yield RTSPS
+/// in 2025; 6.46.0 did too on 2026-09-30).
+pub const PYAARLO_IOS_APP_VERSION: &str = "5.4.3";
+
+/// pyaarlo's older `arlo001` agent (the Vuezone-era app), kept for the
+/// same purpose in case the current shape stops answering RTSPS.
+pub const IOS_APP_USER_AGENT_LEGACY: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 11_1_2 like Mac OS X) \
+AppleWebKit/604.3.5 (KHTML, like Gecko) Mobile/15B202 NETGEAR/v1 (iOS Vuezone)";
+
 /// Maximum time we wait for Arlo's event-bus stream-URL response after the
 /// `/startStream` POST returns 200. Empirically the URL lands within 1–3 s.
 const STREAM_URL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -44,6 +62,26 @@ impl ArloClient {
     /// `rtsp://` → `rtsps://`.
     #[instrument(skip(self), fields(device = %device.device_id))]
     pub async fn get_stream_url(&self, device: &Device) -> Result<Option<StreamUrl>, ArloError> {
+        self.get_stream_url_as(device, None).await
+    }
+
+    /// [`Self::get_stream_url`] with the request's `User-Agent` replaced
+    /// by `user_agent`. Arlo answers the same query with a different
+    /// stream format per client identity (pyaarlo's `user_agent` option):
+    /// a browser gets MPEG-DASH, the iOS app ([`ios_app_user_agent`])
+    /// gets `rtsps://` — during a user view in the app, the view's own
+    /// watch-along RTSPS stream (live capture 2026-09-30). Same side
+    /// effects as `get_stream_url`: never poll.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_stream_url`].
+    #[instrument(skip(self, user_agent), fields(device = %device.device_id))]
+    pub async fn get_stream_url_as(
+        &self,
+        device: &Device,
+        user_agent: Option<&str>,
+    ) -> Result<Option<StreamUrl>, ArloError> {
         let user_id = self.require_user_id()?;
         let trans_id = uuid::Uuid::new_v4().to_string();
         let url = format!("{}{}", self.endpoints.api_host, API_START_STREAM);
@@ -59,13 +97,12 @@ impl ArloClient {
             "properties": { "cameraId": device.device_id },
         });
 
+        let mut headers = xcloud_header(device);
+        if let Some(ua) = user_agent {
+            headers.push(("User-Agent".to_string(), ua.to_string()));
+        }
         let body = self
-            .execute_request_with_headers(
-                Method::POST,
-                &url,
-                Some(&payload),
-                &xcloud_header(device),
-            )
+            .execute_request_with_headers(Method::POST, &url, Some(&payload), &headers)
             .await?;
 
         let parsed: serde_json::Value = serde_json::from_str(&body)?;
@@ -455,6 +492,41 @@ mod tests {
             .find(|(k, _)| k.eq_ignore_ascii_case("xcloudId"))
             .map(|(_, v)| v.as_str());
         assert_eq!(xc, Some("z1-cloud"));
+    }
+
+    #[tokio::test]
+    async fn get_stream_url_as_sends_the_given_user_agent() {
+        let mock = arc_mock();
+        mock.queue_post(r#"{"url":"rtsps://stream.example/cam.sdp"}"#);
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let dev = make_device("CAM-9", Some("BASE-9"), Some("z1-cloud"));
+        let ua = ios_app_user_agent("6.46.0");
+        assert_eq!(ua, "(iPhone15,2 18_1_1) iOS Arlo 6.46.0");
+        client.get_stream_url_as(&dev, Some(&ua)).await.unwrap();
+        let post = &mock.calls()[1];
+        let sent = post
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("User-Agent"))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(sent, Some(ua.as_str()));
+    }
+
+    #[tokio::test]
+    async fn get_stream_url_keeps_the_browser_identity_by_default() {
+        let mock = arc_mock();
+        mock.queue_post(r#"{"url":"https://h.example/s.mpd"}"#);
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let dev = make_device("CAM-9", None, None);
+        client.get_stream_url(&dev).await.unwrap();
+        let post = &mock.calls()[1];
+        assert!(
+            !post
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("User-Agent")),
+            "no per-request agent: the transport's browser identity applies"
+        );
     }
 
     #[tokio::test]
