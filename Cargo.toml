@@ -80,7 +80,7 @@ async-trait = "0.1"
 # `/hmsweb/client/subscribe`). tokio-tungstenite gives full control of
 # Arlo's non-standard WS handshake (custom Origin + `mqtt` subprotocol);
 # mqttbytes is rumqttc's MQTT 3.1.1 packet codec (no broker runtime).
-tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 mqttbytes = "0.6"
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
