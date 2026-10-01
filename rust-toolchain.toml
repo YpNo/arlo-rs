@@ -3,6 +3,6 @@
 # compile with one toolchain (Edition 2024: let-chains, async fn in trait via
 # `async-trait`). Keep in step with `rust-version` in Cargo.toml — that is
 # the declared MSRV, this is what CI runs.
-channel = "1.98.1"
+channel = "1.99.0"
 components = ["rustfmt", "clippy", "rust-src"]
 profile = "minimal"
