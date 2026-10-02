@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/YpNo/arlo-rs/compare/v0.2.1...v0.2.2) - 2026-10-02
+
+### Fixed
+
+- *(stream)* return startUserStream's reply URL; query the stream URL under a chosen client identity ([#29](https://github.com/YpNo/arlo-rs/pull/29))
+
 ### Added
 - `ArloClient::get_stream_url_as(device, user_agent)`: the `get` stream
   query under a chosen client identity. Arlo answers it with a stream
