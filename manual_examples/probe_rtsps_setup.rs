@@ -32,13 +32,11 @@
 use arlo_rs::client::devices::{
     IOS_APP_USER_AGENT_LEGACY, PYAARLO_IOS_APP_VERSION, ios_app_user_agent,
 };
-use arlo_rs::config::ArloConfig;
 use arlo_rs::models::api::{Device, StreamUrl};
 use arlo_rs::models::events::ArloEvent;
-use arlo_rs::{ArloClient, ArloError, ImapMfaHandler};
+use arlo_rs::{ArloClient, ArloError};
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -48,10 +46,13 @@ use tokio::time::Instant;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
-const CONFIG_PATH: &str = "config.toml";
-const CACHE_PATH: &str = ".arlo_session.json";
+mod common;
+use common::{
+    USER_STREAM_ACTIVE, activity_state, authenticate, is_watchalong, load_and_validate_config,
+    property_keys, streamable_cameras,
+};
+
 const DEFAULT_WINDOW_SECS: u64 = 120;
-const USER_STREAM_ACTIVE: &str = "userStreamActive";
 /// The owner's app version on 2026-09-30; `ARLO_PROBE_APP_VERSION` overrides.
 const DEFAULT_APP_VERSION: &str = "6.46.0";
 
@@ -64,12 +65,7 @@ type Pending<'a> =
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("arlo_rs=warn")),
-        )
-        .init();
+    common::init_tracing();
     println!("=== arlo-rs manual probe: stream URL as the iOS app, during an app view ===\n");
 
     let config = match load_and_validate_config() {
@@ -80,17 +76,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let play = std::env::var("ARLO_PROBE_PLAY").is_ok_and(|v| v == "1");
-    let window_secs = std::env::var("ARLO_PROBE_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_WINDOW_SECS);
+    let window_secs = common::window_secs(DEFAULT_WINDOW_SECS);
 
     let mut client = authenticate(&config).await?;
     let devices = client.get_devices().await?;
-    let cameras: Vec<&Device> = devices
-        .iter()
-        .filter(|d| matches!(d.device_type.as_str(), "camera" | "arloq" | "doorbell"))
-        .collect();
+    let cameras = streamable_cameras(&devices);
     println!(
         "✓ {} camera(s). Listening for {window_secs} s — open a live view in the app now.\n",
         cameras.len()
@@ -156,28 +146,6 @@ async fn poll_pending<'a>(
         Some(fut) => Some(fut.await),
         None => std::future::pending().await,
     }
-}
-
-async fn authenticate(config: &ArloConfig) -> Result<ArloClient, Box<dyn std::error::Error>> {
-    let mut client = ArloClient::builder()
-        .session_cache(CACHE_PATH)
-        .build()
-        .await?;
-    if client.is_authenticated() {
-        println!("✓ Restored a valid session from `{CACHE_PATH}`.");
-        return Ok(client);
-    }
-    println!("→ No valid cached session; running IMAP-automated MFA...");
-    let imap_cfg = config
-        .mfa
-        .as_ref()
-        .and_then(|m| m.imap.clone())
-        .ok_or("validated config lost its [mfa.imap] block")?;
-    client
-        .authenticate_with_handler(config, ImapMfaHandler::new(imap_cfg))
-        .await?;
-    println!("✓ Authenticated.");
-    Ok(client)
 }
 
 /// Report a camera event (keys, `activityState`, whether it carries a
@@ -607,17 +575,6 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
     }
 }
 
-fn property_keys(event: &ArloEvent) -> Vec<&str> {
-    let mut keys: Vec<&str> = event
-        .properties
-        .as_ref()
-        .and_then(|p| p.as_object())
-        .map(|o| o.keys().map(String::as_str).collect())
-        .unwrap_or_default();
-    keys.sort_unstable();
-    keys
-}
-
 /// Property names whose value is a URL (`name:scheme`, never the value).
 fn url_keys(event: &ArloEvent) -> Vec<String> {
     let Some(map) = event.properties.as_ref().and_then(|p| p.as_object()) else {
@@ -645,38 +602,4 @@ fn url_kind(url: &str) -> String {
                 .map(|(_, ext)| ext.to_ascii_lowercase())
         })
         .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn is_watchalong(url: &str) -> bool {
-    url::Url::parse(url).is_ok_and(|u| {
-        u.query_pairs()
-            .any(|(k, v)| k == "watchalong" && v == "true")
-    })
-}
-
-fn activity_state(event: &ArloEvent) -> Option<&str> {
-    event
-        .properties
-        .as_ref()?
-        .get("activityState")
-        .and_then(|v| v.as_str())
-}
-
-fn load_and_validate_config() -> Result<ArloConfig, String> {
-    if !Path::new(CONFIG_PATH).exists() {
-        return Err(format!(
-            "`{CONFIG_PATH}` not found. Copy `config.toml.example` and fill it in."
-        ));
-    }
-    let config = ArloConfig::load_from_file(CONFIG_PATH)
-        .map_err(|e| format!("Failed to parse `{CONFIG_PATH}`: {e}"))?;
-    let imap_ok = config
-        .mfa
-        .as_ref()
-        .and_then(|m| m.imap.as_ref())
-        .is_some_and(|i| i.enabled.unwrap_or(false));
-    if !imap_ok {
-        return Err("this probe needs `[mfa.imap].enabled = true` (see list_cameras)".to_string());
-    }
-    Ok(config)
 }
