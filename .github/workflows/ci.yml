@@ -209,7 +209,9 @@ jobs:
         # value is flaky. The remaining uncovered paths are the IMAP
         # fetcher (needs an IMAP server double), the local-hub client's
         # request methods and the opt-in browser-proxy transport.
-        run: cargo tarpaulin --locked --all-features --workspace --timeout 120 --out xml --fail-under 72
+        # `manual_examples/` are probes against a live account, never run
+        # by the suite; codecov.yml ignores the same path.
+        run: cargo tarpaulin --locked --all-features --workspace --timeout 120 --out xml --fail-under 72 --exclude-files 'manual_examples/*'
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
