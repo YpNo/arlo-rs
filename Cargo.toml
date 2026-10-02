@@ -110,6 +110,8 @@ tokio = { version = "1.52", features = ["test-util"] }
 tempfile = "3.26.0"
 mockito = "1.6.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Raw RTSPS client of the `probe_rtsps_setup` manual example.
+tokio-rustls = "0.26"
 
 # Manual, live-account smoke tests (not autodiscovered — they live in
 # `manual_examples/`, not `examples/`). Run with `cargo run --example <name>`.
@@ -128,3 +130,7 @@ path = "manual_examples/record_stream.rs"
 [[example]]
 name = "peek_stream_url"
 path = "manual_examples/peek_stream_url.rs"
+
+[[example]]
+name = "probe_rtsps_setup"
+path = "manual_examples/probe_rtsps_setup.rs"

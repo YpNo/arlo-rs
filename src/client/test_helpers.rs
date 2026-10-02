@@ -57,6 +57,21 @@ pub(crate) fn authenticated_mocked_client(mock: Arc<MockTransport>) -> ArloClien
     client
 }
 
+/// An authenticated client whose event bus is already up and detached:
+/// the returned sender publishes events into it, so code that waits on
+/// the bus runs without MQTT.
+pub(crate) fn authenticated_client_with_bus(
+    mock: Arc<MockTransport>,
+) -> (
+    ArloClient,
+    tokio::sync::broadcast::Sender<crate::models::events::ArloEvent>,
+) {
+    let client = authenticated_mocked_client(mock);
+    let (bus, sender) = crate::events::EventBus::detached();
+    assert!(client.event_bus.set(bus).is_ok(), "fresh client has no bus");
+    (client, sender)
+}
+
 /// Convenience to seed auth state on an already-built client.
 pub(crate) fn set_test_token(client: &mut ArloClient, token: &str, user_id: &str, device_id: &str) {
     client.auth.set_token(token.to_string());

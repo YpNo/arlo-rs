@@ -18,6 +18,8 @@ mod modes;
 mod sensors;
 mod stream;
 
+pub use stream::{IOS_APP_USER_AGENT_LEGACY, PYAARLO_IOS_APP_VERSION, ios_app_user_agent};
+
 use crate::client::ArloClient;
 use crate::endpoints::{API_DEVICES, API_DEVICES_V2};
 use crate::error::ArloError;

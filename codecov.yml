@@ -16,6 +16,8 @@ ignore:
   - "target/"
   - "tests/"
   - "examples/"
+  # The manual probes against a live account: never run by the suite.
+  - "manual_examples/"
   - "**/*.cargo/"
 
 comment:

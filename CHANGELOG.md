@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `ArloClient::get_stream_url_as(device, user_agent)`: the `get` stream
+  query under a chosen client identity. Arlo answers it with a stream
+  format per `User-Agent` (pyaarlo's `user_agent` option): a browser gets
+  MPEG-DASH, the iOS app (`ios_app_user_agent(version)`) gets `rtsps://`,
+  and during a user view in the app that is the view's own watch-along
+  stream, which a plain RTSP client can play (captures 2026-09-30).
+- `manual_examples/probe_rtsps_setup`: event-driven probe that obtains
+  that stream during an app view and plays it with a raw RTSPS client
+  (OPTIONS, DESCRIBE, SETUP, PLAY), reporting each step with URLs and
+  session ids redacted.
+
+### Fixed
+- `force_start_stream` (and `start_stream`'s fallback) always timed out
+  after 30 s: current Arlo returns the URL in the POST reply and never on
+  the event bus. The reply's URL is now returned; the bus wait remains
+  for backends that announce it there.
+
 ## [0.2.1](https://github.com/YpNo/arlo-rs/compare/v0.2.0...v0.2.1) - 2026-09-28
 
 ### Fixed
