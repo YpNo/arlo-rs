@@ -62,14 +62,15 @@
 
 use arlo_rs::ArloClient;
 use arlo_rs::config::ArloConfig;
-use std::path::Path;
 
-const CONFIG_PATH: &str = "config.toml";
+mod common;
+
+/// Its own cache: a push pairing beside the IMAP examples' session.
 const CACHE_PATH: &str = ".arlo_session_push.json";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_tracing();
+    common::init_tracing_with("warn,arlo_rs=info");
 
     println!("=== arlo-rs manual smoke test: PUSH login ===\n");
 
@@ -105,43 +106,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         println!("✓ Push approved; session cached to `{CACHE_PATH}`.");
     }
-    // The device_id is the trusted-browser identity: a prefix is enough
-    // to recognise it in a bug report.
-    println!(
-        "  user_id  : {}\n  device_id: {}…\n",
-        client.user_id().unwrap_or("<missing>"),
-        client.device_id().chars().take(8).collect::<String>()
-    );
+    common::print_identity(&client);
 
     // ---- 4. Prove the session works: list cameras ----
     println!("→ Fetching device list...");
     let devices = client.get_devices().await?;
-    let cameras: Vec<_> = devices
-        .iter()
-        .filter(|d| {
-            matches!(
-                d.device_type.as_str(),
-                "camera" | "arloq" | "arlobridge" | "doorbell" | "chime"
-            )
-        })
-        .collect();
-
-    if cameras.is_empty() {
-        println!("ℹ  No camera-class devices found on this account.");
-    } else {
-        println!("✓ {} camera(s) found:\n", cameras.len());
-        for (i, cam) in cameras.iter().enumerate() {
-            println!("  [{}] {}", i + 1, cam.device_name);
-            println!("       device_id : {}", cam.device_id);
-            println!("       parent_id : {}", cam.parent_id);
-            println!("       type      : {}", cam.device_type);
-            println!("       state     : {}", cam.state);
-            if let Some(model) = &cam.model_id {
-                println!("       model     : {model}");
-            }
-            println!();
-        }
-    }
+    common::print_camera_devices(&devices);
 
     // ---- 5. Logout ----
     println!("→ Logging out...");
@@ -152,34 +122,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Loads `config.toml` and refuses to proceed unless the fields this
-/// example needs are present. Friendlier than letting the auth flow
-/// fail mid-stream with a generic message.
+/// `config.toml` with credentials and push as the preferred factor;
+/// refusing early beats a generic auth failure mid-stream.
 fn load_and_validate_config() -> Result<ArloConfig, String> {
-    if !Path::new(CONFIG_PATH).exists() {
-        return Err(format!(
-            "`{CONFIG_PATH}` not found. Copy `config.toml.example` and fill it in \
-             (see this file's header for the minimal push layout)."
-        ));
-    }
-    let config = ArloConfig::load_from_file(CONFIG_PATH)
-        .map_err(|e| format!("Failed to parse `{CONFIG_PATH}`: {e}"))?;
-
-    let creds = config
-        .credentials
-        .as_ref()
-        .ok_or_else(|| "Missing `[credentials]` block in config.toml".to_string())?;
-    if creds.email.as_deref().unwrap_or("").is_empty() {
-        return Err("`[credentials].email` is empty in config.toml".to_string());
-    }
-    if creds
-        .password
-        .as_ref()
-        .is_none_or(|p| arlo_rs::secrecy::ExposeSecret::expose_secret(p).is_empty())
-    {
-        return Err("`[credentials].password` is empty in config.toml".to_string());
-    }
-
+    let config = common::load_config()?;
+    common::require_credentials(&config)?;
     let preferred = config
         .mfa
         .as_ref()
@@ -192,16 +139,5 @@ fn load_and_validate_config() -> Result<ArloConfig, String> {
              `manual_examples/list_cameras` for the email/IMAP flow."
         ));
     }
-
     Ok(config)
-}
-
-/// `tracing` subscriber matching the other examples. Defaults to INFO
-/// for `arlo_rs`, WARN elsewhere; `RUST_LOG` overrides.
-fn init_tracing() {
-    use tracing_subscriber::{EnvFilter, fmt};
-
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,arlo_rs=info"));
-    fmt().with_env_filter(filter).init();
 }
