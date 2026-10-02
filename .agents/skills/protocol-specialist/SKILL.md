@@ -16,8 +16,29 @@ description: Protocol emulation and state management for the Arlo ecosystem.
 - **State Hydration**: Periodically refresh device states from the REST API to ensure events haven't been missed.
 
 ## MFA Flow Orchestration
-- Manage the transition from `start_auth` to `finish_auth` using a clear state machine.
-- Integrate IMAP/SMS solvers as injectable adapters.
+
+`client/auth/{flow,ceremony,push}.rs`, `client/mfa.rs`, `client/auth_imap.rs`. Facts
+(code and captures, 2026-10-02):
+
+- **Order in `authenticate*`:** cached token → `session/v3` validation (only Arlo's own
+  verdict discards it; network/5xx/429 keep it and surface, so an outage costs no OTP)
+  → `login` → `auth_completed` short-cut → **trusted-browser fast path** → factor
+  selection → `startAuth` → OTP via the `MfaHandler` (or push polling) → `finishAuth`
+  → `complete_session` (pairing with `browserAuthCode`, V3 validation, cache write).
+- **Trusted browser** (reference client 0.8.0.15+): `getFactorId {factorType:"BROWSER"}`
+  succeeds only for a paired `device_id` + cookie jar; `startAuth` on that factor returns
+  the full token, no OTP. 9204 = not trusted → OTP ceremony. The session cache therefore
+  holds three things — token, cookies, `device_id` — and the pairing is what makes later
+  logins silent; `logout()` keeps `device_id` + cookies on purpose.
+- **Push** needs PUSH as the account's *primary* factor (`startAuth` with an empty
+  `factorType` dispatches the primary one); `finishAuth` is polled without `otp`, 9233 /
+  9276 / 9278 = pending, 200 + `data.token` = approved.
+- **IMAP**: baseline of unseen mail (45 s budget), poll every 5 s within a 90 s budget,
+  `From` must be an `arlo.com` address, newest first, 6-digit code from `<h1>`, a bare
+  digit line, or a loose match; Gmail needs a mailbox refresh to see new mail.
+- **Lockout** 9017 is fatal for 5 minutes; never retry a `Fatal` or probe a locked account.
+- Classification lives in `models/error_codes.rs` (`ErrorAction`); consumers branch on
+  codes, never on message text.
 
 ## Arlo v3 Live Signaling (WebRTC)
 
@@ -40,8 +61,19 @@ Do not re-derive them; extend this list when a capture adds one.
   `data.error = 14001` ("RTSP Streaming in progress, SIP Streaming is not allowed").
   `data.error` arrives as a **string or a number**; `success_false_error` accepts both
   and keeps `data.message`. Consumers match the numeric code, never the text.
-- **The app's stream cannot be joined.** The watch-along DASH URL answers 502 from
-  awselb for every variant tried.
+- **The stream format is keyed on `User-Agent`** (captures 2026-09-30/10-01). The same
+  `get` stream query answers a browser identity with a watch-along MPEG-DASH URL (502
+  from awselb, every variant) and the iOS app identity (`ios_app_user_agent(version)`,
+  `(iPhone15,2 18_1_1) iOS Arlo <v>`) with `rtsps://<ip>:443/vzmodulelive/<cam>_<ts>?egressToken=…&watchalong=true`,
+  during a view the view's own stream. A raw RTSPS client plays it (TLS validation off:
+  the certificate cannot match an IP); GStreamer's `rtspsrc` is refused at `SETUP` (403).
+- **That server's framing is sloppy**: the first RTCP SR after `PLAY` is `$`-framed, the
+  periodic ones arrive bare; the AAC audio track's RTP (PT 0) arrives bare too, without
+  any `SETUP` for it. Clients must resync on the next plausible `$` header.
+- **A watch-along client counts as a viewer**: while one is connected the camera keeps
+  streaming after the app closes its view and the bus never reports `idle`; it reports
+  `idle` ~340 ms after the client's `TEARDOWN`. Consumers must release the stream
+  periodically to learn whether the app still views.
 - **`get_stream_url` (`action:"get"` on `/startStream`) is not passive**: it wakes an
   idle camera. Call it only after the bus reported `activityState == "userStreamActive"`,
   never on a timer or as a probe loop.
@@ -54,8 +86,8 @@ Do not re-derive them; extend this list when a capture adds one.
   2026-09-29). During an app view the reply holds a watch-along DASH URL (502, like
   `get_stream_url`'s) plus `sipCallInfo` + `iceServers` with `callId` / `conferenceId`
   null; a WebRTC leg with those coordinates connects to the gateway and is refused with
-  `code 3, NO_ROUTE_DESTINATION`. The app's live view cannot be joined by any route we
-  can act as; the app is never disturbed by these requests.
+  `code 3, NO_ROUTE_DESTINATION`. The view is joined through the `User-Agent`-keyed
+  RTSPS stream above, not through these coordinates; the app is never disturbed.
 - **An app view is announced twice**: `activityState: startUserStream`, then
   `userStreamActive` about 200 ms later; `idle` when it closes.
 - **Motion is a pulse train, not a state.** While motion lasts a camera repeats
