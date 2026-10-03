@@ -72,7 +72,7 @@ imap-rs-client = "0.2.1"
 imap-rs-tls = "0.2.1"
 rustls = { version = "0.23", features = ["ring"] }
 flate2 = "1.1.9"
-base64 = "0.22.1"
+base64 = "0.23.0"
 tracing = "0.1"
 secrecy = { version = "0.10", features = ["serde"] }
 async-trait = "0.1"
