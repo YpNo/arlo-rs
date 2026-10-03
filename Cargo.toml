@@ -64,7 +64,7 @@ cookie_store = "0.22"
 # `wreq` 6 addresses requests by `http::Uri`, `cookie_store` scopes by
 # `url::Url`; the jar converts between them. Already in the graph via both.
 url = "2.5"
-mailparse = "0.16.1"
+mailparse = "0.17.0"
 # Three small OTP patterns; regex-lite covers them without the
 # regex-automata / aho-corasick / regex-syntax tree.
 regex-lite = "0.1"
