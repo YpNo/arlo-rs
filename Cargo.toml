@@ -4,7 +4,7 @@ version = "0.2.3"
 edition = "2024"
 # Minimum supported Rust: the pinned toolchain. Cargo refuses dependency
 # versions that need a newer compiler, and CI builds with exactly this one.
-rust-version = "1.98.1"
+rust-version = "1.99.0"
 license = "MIT"
 description = "A high-level, asynchronous Rust client for Arlo security cameras, supporting MFA, MQTT event streaming, and WebRTC signaling."
 repository = "https://github.com/YpNo/arlo-rs"
@@ -64,7 +64,7 @@ cookie_store = "0.22"
 # `wreq` 6 addresses requests by `http::Uri`, `cookie_store` scopes by
 # `url::Url`; the jar converts between them. Already in the graph via both.
 url = "2.5"
-mailparse = "0.16.1"
+mailparse = "0.17.0"
 # Three small OTP patterns; regex-lite covers them without the
 # regex-automata / aho-corasick / regex-syntax tree.
 regex-lite = "0.1"
@@ -72,7 +72,7 @@ imap-rs-client = "0.2.1"
 imap-rs-tls = "0.2.1"
 rustls = { version = "0.23", features = ["ring"] }
 flate2 = "1.1.9"
-base64 = "0.22.1"
+base64 = "0.23.1"
 tracing = "0.1"
 secrecy = { version = "0.10", features = ["serde"] }
 async-trait = "0.1"
@@ -80,7 +80,7 @@ async-trait = "0.1"
 # `/hmsweb/client/subscribe`). tokio-tungstenite gives full control of
 # Arlo's non-standard WS handshake (custom Origin + `mqtt` subprotocol);
 # mqttbytes is rumqttc's MQTT 3.1.1 packet codec (no broker runtime).
-tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 mqttbytes = "0.6"
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }

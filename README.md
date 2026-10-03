@@ -9,7 +9,7 @@
 [![GitHub release](https://img.shields.io/github/v/release/YpNo/arlo-rs?sort=semver)](https://github.com/YpNo/arlo-rs/releases/latest)
 [![docs.rs](https://docs.rs/arlo-rs/badge.svg)](https://docs.rs/arlo-rs)
 [![codecov](https://codecov.io/gh/YpNo/arlo-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/YpNo/arlo-rs)
-[![MSRV](https://img.shields.io/badge/MSRV-1.98.1-blue.svg)](https://github.com/YpNo/arlo-rs)
+[![MSRV](https://img.shields.io/badge/MSRV-1.99.0-blue.svg)](https://github.com/YpNo/arlo-rs)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 `arlo-rs` is a robust, asynchronous Rust client for the Arlo camera ecosystem. It natively fully replaces legacy Python implementations by dynamically adapting strictly to Arlo's constantly updating telemetry metrics and undocumented headers.
@@ -42,7 +42,7 @@ arlo-rs = "0.2.0"
 `arlo-rs` links BoringSSL (through `stealthscraper-rs` → `wreq`), which is
 built from source by `btls-sys` and needs a C/C++ toolchain, CMake and
 `libclang` (for `bindgen`). The Rust toolchain is pinned in
-`rust-toolchain.toml` (1.98.1, also the declared `rust-version`; `rustup` picks it up automatically). On
+`rust-toolchain.toml` (1.99.0, also the declared `rust-version`; `rustup` picks it up automatically). On
 Debian / Ubuntu:
 
 ```bash
