@@ -1,6 +1,6 @@
 [package]
 name = "arlo-rs"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 # Minimum supported Rust: the pinned toolchain. Cargo refuses dependency
 # versions that need a newer compiler, and CI builds with exactly this one.
