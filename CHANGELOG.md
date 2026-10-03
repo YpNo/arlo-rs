@@ -9,9 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.3](https://github.com/YpNo/arlo-rs/compare/v0.2.2...v0.2.3) - 2026-10-03
 
+### Fixed
+
+- *(auth)* classify Arlo's error 9261 "Invalid factor data" as an untrusted browser, like 9204: a fresh install's device id gets 9261 from the trusted-browser probe, and the OTP ceremony is now the chosen path rather than the fallback for an unknown code ([#35](https://github.com/YpNo/arlo-rs/pull/35))
+
 ### Other
 
 - stage the pipeline and run each job only where it earns its minutes ([#35](https://github.com/YpNo/arlo-rs/pull/35))
+- *(examples)* `list_cameras` and `push_login` share the common module ([#35](https://github.com/YpNo/arlo-rs/pull/35))
 
 ## [0.2.2](https://github.com/YpNo/arlo-rs/compare/v0.2.1...v0.2.2) - 2026-10-02
 
