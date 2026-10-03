@@ -2,8 +2,8 @@
 # `rust-version` in Cargo.toml — mise's rust wins over rustup's file — and a
 # floating cmake would change the BoringSSL build under us.
 [tools]
-cmake = "4.4.3"
-rust = "1.98.1"
+cmake = "4.4.4"
+rust = "1.99.0"
 
 [env]
 # Container-only path. arlo-rs pulls boring-sys2 (BoringSSL) via
