@@ -27,7 +27,7 @@ description: Protocol emulation and state management for the Arlo ecosystem.
   → `complete_session` (pairing with `browserAuthCode`, V3 validation, cache write).
 - **Trusted browser** (reference client 0.8.0.15+): `getFactorId {factorType:"BROWSER"}`
   succeeds only for a paired `device_id` + cookie jar; `startAuth` on that factor returns
-  the full token, no OTP. 9204 = not trusted → OTP ceremony. The session cache therefore
+  the full token, no OTP. 9204 (known device, untrusted) or 9261 (`Invalid factor data`: a device id Arlo never saw) = not trusted → OTP ceremony. The session cache therefore
   holds three things — token, cookies, `device_id` — and the pairing is what makes later
   logins silent; `logout()` keeps `device_id` + cookies on purpose.
 - **Push** needs PUSH as the account's *primary* factor (`startAuth` with an empty

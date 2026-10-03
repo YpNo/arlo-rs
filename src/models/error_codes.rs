@@ -64,8 +64,10 @@ pub const TRANSIENT: &[u32] = &[0, 9000, 9029, 9241, 9306, 9316, 9334];
 pub const DEVICE_OFFLINE: &[u32] = &[2059, 2222];
 /// "This browser is not trusted, complete a login." (The official table
 /// maps 9204 to an unrelated e-mail error; on the auth endpoints this is
-/// the only meaning that makes sense.)
-pub const UNTRUSTED: &[u32] = &[9204];
+/// the only meaning that makes sense.) 9261 ("Invalid factor data") is
+/// what `getFactorId {factorType:"BROWSER"}` answers for a device id
+/// Arlo has never seen — a fresh install (captured 2026-10-03).
+pub const UNTRUSTED: &[u32] = &[9204, 9261];
 
 /// Classifies an Arlo `meta.error` code on its own.
 pub fn classify_arlo_error(error: u32) -> ErrorAction {
