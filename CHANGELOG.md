@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/YpNo/arlo-rs/compare/v0.2.3...v0.3.0) - 2026-10-03
+
+### Fixed
+
+- *(deps)* [**breaking**] roll up Renovate — tokio-tungstenite 0.30, base64 0.23, mailparse 0.17, Rust 1.99.0 ([#40](https://github.com/YpNo/arlo-rs/pull/40))
+
+### Other
+
+- *(changelog)* restore the 0.2.3 entries the squash of #35 dropped ([#39](https://github.com/YpNo/arlo-rs/pull/39))
+
 ## [0.2.3](https://github.com/YpNo/arlo-rs/compare/v0.2.2...v0.2.3) - 2026-10-03
 
 ### Fixed
