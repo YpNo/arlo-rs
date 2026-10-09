@@ -147,7 +147,7 @@ jobs:
       - name: Install cargo-audit
         # Prebuilt binary, exact version, checksum verified by the action's
         # signed manifest — no `cargo install` of whatever is newest.
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-audit@0.22.2
       - name: Run cargo audit
@@ -221,7 +221,7 @@ jobs:
         # Exact version, checksum verified. The previous step downloaded
         # the newest GitHub release unverified and ran it against the
         # full test suite in the job that also holds CODECOV_TOKEN.
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-tarpaulin@0.37.4
 
