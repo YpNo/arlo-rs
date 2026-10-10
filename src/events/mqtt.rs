@@ -107,6 +107,16 @@ pub(crate) fn subscription_topics(devices: &[Device], user_id: &str) -> Vec<Stri
     topics
 }
 
+/// Ids of the devices without an `xCloudId`: device events publish on
+/// that id, so no subscription carries theirs.
+pub(crate) fn devices_without_xcloud(devices: &[Device]) -> Vec<&str> {
+    devices
+        .iter()
+        .filter(|d| d.x_cloud_id.is_none())
+        .map(|d| d.device_id.as_str())
+        .collect()
+}
+
 /// Upper bound on the SUBSCRIBE list; a real account has a few dozen.
 const MAX_TOPIC_FILTERS: usize = 256;
 
@@ -649,6 +659,22 @@ mod tests {
                 "u/U1/in/#".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn devices_without_xcloud_names_only_those_lacking_it() {
+        let devices: Vec<Device> = serde_json::from_str(
+            r#"[
+            {"deviceId":"A","parentId":"A","deviceType":"camera","deviceName":"a",
+             "uniqueId":"u1","state":"provisioned","xCloudId":"XC-A"},
+            {"deviceId":"CHIME","parentId":"CHIME","deviceType":"chime","deviceName":"c",
+             "uniqueId":"u2","state":"provisioned"}
+        ]"#,
+        )
+        .expect("devices parse");
+
+        assert_eq!(devices_without_xcloud(&devices), vec!["CHIME"]);
+        assert!(devices_without_xcloud(&devices[..1]).is_empty());
     }
 
     #[test]

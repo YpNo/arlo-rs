@@ -28,7 +28,7 @@ pub use endpoints::ArloEndpoints;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::OnceCell;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 pub use transport::HttpTransport;
 pub use ws::{TungsteniteConnector, WsConnector};
 
@@ -247,14 +247,19 @@ impl ArloClient {
                 // `d/<xCloudId>/out/#` wildcard is owner-only) plus the
                 // user inbox.
                 let devices = self.get_devices().await?;
-                let with_xcloud = devices.iter().filter(|d| d.x_cloud_id.is_some()).count();
                 let topics = crate::events::subscription_topics(&devices, &user_id);
                 info!(
                     device_count = devices.len(),
-                    with_xcloud,
                     topic_count = topics.len(),
-                    "resolved MQTT event-bus subscription (no xCloud ⇒ legacy get_devices, no camera events)"
+                    "resolved MQTT event-bus subscription"
                 );
+                let without_xcloud = crate::events::devices_without_xcloud(&devices);
+                if !without_xcloud.is_empty() {
+                    warn!(
+                        devices = ?without_xcloud,
+                        "devices without an xCloudId: no events reach this client for them over MQTT"
+                    );
+                }
 
                 EventBus::start(
                     MqttParams {

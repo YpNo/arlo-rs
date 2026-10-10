@@ -21,7 +21,7 @@
 
 mod mqtt;
 
-pub(crate) use mqtt::{MqttParams, subscription_topics};
+pub(crate) use mqtt::{MqttParams, devices_without_xcloud, subscription_topics};
 
 use crate::error::ArloError;
 use crate::models::events::ArloEvent;
