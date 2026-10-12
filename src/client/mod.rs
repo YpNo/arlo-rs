@@ -407,6 +407,68 @@ mod tests {
         assert!(matches!(err, ArloError::AuthError(_)));
     }
 
+    /// A writer appending to a shared buffer, for reading the log back.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The bus starts from `session/v3`'s broker and the device list; the
+    /// log states the counts, and names only the devices no subscription
+    /// can serve (it used to end in a caveat that read as a fault).
+    #[tokio::test]
+    async fn events_starts_the_bus_and_names_devices_without_an_xcloud_id() {
+        let mock = Arc::new(MockTransport::new());
+        mock.queue_get(
+            r#"{"success":true,"data":{"userId":"U-test","token":"t","validFor":3600,
+                "mqttUrl":"wss://mqtt-cluster-z1-1.arloxcld.com:8084"}}"#,
+        );
+        mock.queue_get(
+            r#"[{"deviceId":"CAM1","parentId":"B1","deviceType":"camera","deviceName":"c",
+                 "uniqueId":"u1","state":"provisioned","xCloudId":"XC-1"},
+                {"deviceId":"CHIME1","parentId":"B1","deviceType":"chime","deviceName":"ch",
+                 "uniqueId":"u2","state":"provisioned"}]"#,
+        );
+        let client = authenticated_mocked_client(Arc::clone(&mock));
+        let capture = Capture::default();
+        let log = Arc::clone(&capture.0);
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || capture.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+
+        client.events().await.expect("the bus starts");
+
+        let text = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("resolved MQTT event-bus subscription"),
+            "{text}"
+        );
+        assert!(text.contains("device_count=2"), "{text}");
+        assert!(
+            !text.contains("no xCloud"),
+            "the old caveat is gone: {text}"
+        );
+        let warning = text
+            .lines()
+            .find(|line| line.contains("WARN") && line.contains("without an xCloudId"))
+            .expect("a warning names the device");
+        assert!(
+            warning.contains("CHIME1") && !warning.contains("CAM1"),
+            "{warning}"
+        );
+    }
+
     #[tokio::test]
     async fn events_errors_without_an_active_session() {
         // No token cached → the bus can't authenticate the MQTT CONNECT.
