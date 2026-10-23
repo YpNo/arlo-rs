@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/YpNo/arlo-rs/compare/v0.3.1...v0.3.2) - 2026-10-22
+
+### Security
+
+- *(deps)* rustls advisories + fold the open Renovate updates (mailparse 0.18, Rust 1.99.1, lockfile, actions) ([#53](https://github.com/YpNo/arlo-rs/pull/53))
+
 ## [0.3.1](https://github.com/YpNo/arlo-rs/compare/v0.3.0...v0.3.1) - 2026-10-12
 
 ### Fixed
