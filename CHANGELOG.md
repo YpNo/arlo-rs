@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/YpNo/arlo-rs/compare/v0.3.3...v0.3.4) - 2026-10-24
+
+### Other
+
+- a plan job decides what each run deserves; gate once per change
+
 ## [0.3.3](https://github.com/YpNo/arlo-rs/compare/v0.3.2...v0.3.3) - 2026-10-24
 
 ### Fixed
