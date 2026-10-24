@@ -1,10 +1,19 @@
 name: Rust CI
 
-# Minutes are metered. The workflow is staged — format → clippy → test →
-# coverage / SonarQube, with doc beside test — so a failed stage skips the
-# costlier ones; docs-only changes do not run it; the weekly schedule
-# runs the audits only; Renovate's PRs skip coverage and SonarQube; the
-# release-plz jobs run only on the push that needs them.
+# Minutes are metered. A change is gated once, on its own pull request;
+# the `plan` job decides what each run deserves and every job keys off
+# its outputs:
+#   - pull request with code: format → clippy → test → doc, coverage,
+#     SonarQube (+ deny, audit, gitleaks). Renovate/Dependabot: no
+#     coverage or SonarQube. A release-plz PR (version + changelog only):
+#     deny, audit, gitleaks — no build.
+#   - push to main after an ordinary merge: gitleaks + the release-pr job
+#     only (the code was gated on its PR).
+#   - push to main that merges the release PR: format → clippy → test
+#     (+ deny, audit, gitleaks), then publish. No coverage.
+#   - weekly schedule: audits plus one coverage/SonarQube baseline on main.
+#   - workflow_dispatch: gates, then publish a hand-set version.
+# Docs-only changes never trigger it (paths-ignore).
 on:
   pull_request:
     branches: [ "main", "master"]
@@ -39,13 +48,66 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      docs: ${{ steps.plan.outputs.docs }}
+      coverage: ${{ steps.plan.outputs.coverage }}
+      sonar: ${{ steps.plan.outputs.sonar }}
+      audits: ${{ steps.plan.outputs.audits }}
+      secrets: ${{ steps.plan.outputs.secrets }}
+      release: ${{ steps.plan.outputs.release }}
+      release_pr: ${{ steps.plan.outputs.release_pr_job }}
+    steps:
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_MSG: ${{ github.event.head_commit.message }}
+          PR_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Decide once what this run deserves; every job keys off these outputs.
+          # Minutes are metered: a change is gated on its own pull request, and a
+          # push to main re-runs the build only for the release merge about to be
+          # published. Anything else that runs on main is cheap or scheduled.
+          is() { [ "$1" = "true" ]; }
+          is_pr=false; [ "$EVENT" = pull_request ] && is_pr=true
+          main_push=false; [ "$EVENT" = push ] && main_push=true
+          release_pr=false; is $is_pr && case "$HEAD_REF" in release-plz*) release_pr=true;; esac
+          bot_pr=false; is $is_pr && case "$ACTOR" in 'renovate[bot]'|'dependabot[bot]') bot_pr=true;; esac
+          fork_pr=false; is $is_pr && [ "$PR_REPO" != "$REPO" ] && fork_pr=true
+          release_push=false; is $main_push && case "$HEAD_MSG" in 'chore: release'*) release_push=true;; esac
+          dispatch=false; [ "$EVENT" = workflow_dispatch ] && dispatch=true
+          schedule=false; [ "$EVENT" = schedule ] && schedule=true
+
+          build=false;    { { is $is_pr && ! is $release_pr; } || is $release_push || is $dispatch || is $schedule; } && build=true
+          docs=false;     { is $is_pr && ! is $release_pr; } && docs=true
+          coverage=false; { { is $is_pr && ! is $release_pr && ! is $bot_pr; } || is $schedule; } && coverage=true
+          sonar=false;    { is $coverage && ! is $fork_pr && [ "$ACTOR" != 'dependabot[bot]' ]; } && sonar=true
+          audits=false;   { is $is_pr || is $release_push || is $dispatch || is $schedule; } && audits=true
+          secrets=false;  { is $is_pr || is $main_push; } && secrets=true
+          release=false;  { is $release_push || is $dispatch; } && release=true
+          release_pr_job=false; { is $main_push && ! is $release_push; } && release_pr_job=true
+
+          for k in build docs coverage sonar audits secrets release release_pr_job; do
+            eval v=\$$k; echo "$k=$v" >> "$GITHUB_OUTPUT"; echo "$k=$v"
+          done
+          { echo "### Plan for \`$EVENT\`"; echo; echo '| job group | runs |'; echo '|---|---|';
+            for k in build docs coverage sonar audits secrets release release_pr_job; do eval v=\$$k; echo "| $k | $v |"; done; } >> "$GITHUB_STEP_SUMMARY"
+
   format:
     name: Check Formatting
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Root of the build chain: the weekly schedule is for the audits only,
-    # and everything below `needs` this job.
-    if: github.event_name != 'schedule'
+    # Root of the build chain: everything below `needs` this job, so a
+    # run the plan keeps build-free stops here.
+    needs: [plan]
+    if: needs.plan.outputs.build == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
@@ -106,6 +168,8 @@ jobs:
     name: Security & License Audit
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: [plan]
+    if: needs.plan.outputs.audits == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run cargo-deny
@@ -117,6 +181,8 @@ jobs:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: [plan]
+    if: needs.plan.outputs.secrets == 'true'
     # On pull_request events the action lists the PR's commits through the
     # API, which needs pull-requests: read. Comments are off so write access
     # is never required; findings fail the job and show in the log.
@@ -140,6 +206,8 @@ jobs:
     name: cargo audit (RUSTSEC advisories)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [plan]
+    if: needs.plan.outputs.audits == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
@@ -161,15 +229,10 @@ jobs:
     name: SonarQube
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [test]
-    # SONAR_TOKEN is withheld from fork and Dependabot pull requests, so
-    # the scan would always fail there; skip it instead of going red.
-    # Renovate's bumps carry no code to analyse.
-    if: >-
-      github.actor != 'dependabot[bot]' &&
-      github.actor != 'renovate[bot]' &&
-      (github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository)
+    needs: [plan, test]
+    # Only where the plan allows: code PRs from this repository (the token
+    # is withheld from forks and Dependabot) and the weekly baseline.
+    if: needs.plan.outputs.sonar == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -183,7 +246,8 @@ jobs:
     name: Documentation Check
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: [clippy]
+    needs: [plan, clippy]
+    if: needs.plan.outputs.docs == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
@@ -201,10 +265,10 @@ jobs:
     name: Code Coverage
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    needs: [test]
-    # The costliest job (instrumented rebuild, ~5 min): not for a
-    # dependency bump — the tests already ran on it.
-    if: github.actor != 'renovate[bot]'
+    needs: [plan, test]
+    # The costliest job (instrumented rebuild): code PRs from people and
+    # the weekly baseline on main; never a dependency bump or a release.
+    if: needs.plan.outputs.coverage == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -262,13 +326,10 @@ jobs:
     name: release-plz (publish + tag)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: [format, clippy, test, security, secrets, audit, doc, coverage]
-    # Only the merge of the release PR (squash-merged, its title leads the
-    # commit message) or a manual dispatch has something to publish.
-    if: >-
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
-      ((github.event_name == 'push' && startsWith(github.event.head_commit.message, 'chore: release')) ||
-      github.event_name == 'workflow_dispatch')
+    # The release merge (its squash title leads the commit message) or a
+    # manual dispatch: the build gates ran on this very commit just above.
+    needs: [plan, format, clippy, test, security, secrets, audit]
+    if: needs.plan.outputs.release == 'true'
     permissions:
       contents: write
     concurrency:
@@ -299,13 +360,11 @@ jobs:
     name: release-plz (release PR)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: [format, clippy, test, security, secrets, audit, doc, coverage]
-    # Every other push to main may need a release PR; the release merge
-    # itself has nothing new to propose.
-    if: >-
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
-      !startsWith(github.event.head_commit.message, 'chore: release')
+    # Every ordinary push to main may need a release PR. It depends on no
+    # gate: the merged code was gated on its own PR, and the release PR it
+    # opens is gated again when merged.
+    needs: [plan]
+    if: needs.plan.outputs.release_pr == 'true'
     permissions:
       contents: write
       pull-requests: write
