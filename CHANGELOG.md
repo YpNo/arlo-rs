@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/YpNo/arlo-rs/compare/v0.3.2...v0.3.3) - 2026-10-24
+
+### Fixed
+
+- *(deps)* stealthscraper-rs 1.0.1 (brotli 9), fold the remaining Renovate updates
+
 ## [0.3.2](https://github.com/YpNo/arlo-rs/compare/v0.3.1...v0.3.2) - 2026-10-22
 
 ### Security
