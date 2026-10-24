@@ -57,7 +57,7 @@ toml = "1.1"
 # hints and `impersonation_client()`; it also re-exports `wreq`, which the
 # default transport builds on (`stealthscraper_rs::wreq`). Headless Chrome +
 # the MITM proxy only come in through its `browser` feature.
-stealthscraper-rs = { version = "1.0.0", default-features = false }
+stealthscraper-rs = { version = "1.0.1", default-features = false }
 # Backing store for the persistent cookie jar (Arlo's "trust this browser"
 # state lives in cookies), plugged into `wreq` through its `CookieStore` trait.
 cookie_store = "0.22"
