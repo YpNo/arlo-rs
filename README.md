@@ -205,21 +205,29 @@ API reference; `CLAUDE.md` carries the module map and design rules.
 
 ## 🔁 CI/CD
 
-`.github/workflows/ci.yml` runs on every push and pull request: `cargo
-fmt --check`, `clippy -D warnings`, tests, `cargo doc -D warnings`,
-`cargo-deny` (licenses, bans, sources, advisories), `cargo audit`,
-gitleaks secret scanning, coverage, and SonarQube (skipped on forks).
-Every job has a timeout and every action is pinned to a commit SHA;
-tools are installed at exact, checksum-verified versions.
+`.github/workflows/ci.yml` gates every change once, on its pull request,
+and a `plan` job decides what each run deserves:
 
-Releases are driven by [release-plz](https://release-plz.dev) from the
-last two jobs of the same workflow, so they run only after every gate is
-green on `main`: `release-pr` keeps a "chore: release" pull request up to
-date (version bump derived from the Conventional Commits since the last
-tag, `CHANGELOG.md` section generated), and once `main` carries a version
-that is not on crates.io yet, `release` publishes the crate, tags
-`v<version>` and creates the GitHub release with the changelog as its
-body. Configuration lives in `release-plz.toml`. Renovate keeps
+| Trigger | What runs |
+|---|---|
+| Pull request with code | `cargo fmt --check` → `clippy -D warnings` → tests → `cargo doc -D warnings`, coverage (tarpaulin gate + Codecov), SonarQube; `cargo-deny`, `cargo audit`, gitleaks in parallel |
+| Renovate / Dependabot PR | the same without coverage and SonarQube |
+| release-plz "chore: release" PR | `cargo-deny`, `cargo audit`, gitleaks — no build (version and changelog only) |
+| Push to `main` after an ordinary merge | gitleaks and the release-plz `release-pr` job only |
+| Push to `main` merging the release PR | fmt → clippy → tests, deny, audit, gitleaks, then publish |
+| Weekly schedule | the audits plus one coverage / SonarQube baseline of `main` |
+| `workflow_dispatch` | the gates, then publish a hand-set version |
+
+Documentation-only changes never trigger the workflow. Every job has a
+timeout, every action is pinned to a commit SHA, and tools are installed
+at exact, checksum-verified versions.
+
+Releases are driven by [release-plz](https://release-plz.dev):
+`release-pr` keeps a "chore: release" pull request up to date (version
+bump derived from the Conventional Commits since the last tag,
+`CHANGELOG.md` section generated), and merging it publishes the crate,
+tags `v<version>` and creates the GitHub release with the changelog as
+its body. Configuration lives in `release-plz.toml`. Renovate keeps
 dependencies and action digests current (three-day release age, weekly
 lockfile maintenance, OSV alerts).
 
