@@ -386,7 +386,7 @@ mod tests {
             properties: Some(properties),
             source: None,
             trans_id: trans_id.map(String::from),
-            active_mode: None,
+            ..ArloEvent::default()
         }
     }
 
@@ -735,7 +735,7 @@ mod error_echo_tests {
             properties: Some(properties),
             source: None,
             trans_id: Some("t-1".into()),
-            active_mode: None,
+            ..ArloEvent::default()
         }
     }
 
