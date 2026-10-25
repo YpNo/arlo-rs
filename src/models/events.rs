@@ -4,7 +4,7 @@ use serde_json::Value;
 /// One SSE event broadcast by the [`crate::events::EventBus`]. Fields map
 /// directly to Arlo's wire format; missing optionals reflect inconsistencies
 /// in Arlo's payloads (e.g. `publishResponse` is sometimes elided).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArloEvent {
     /// e.g. `"is"`, `"set"`, `"notify"`, `"redirect"`. Empty when the
@@ -32,6 +32,37 @@ pub struct ArloEvent {
     /// the *name* of the mode the location just switched to.
     #[serde(default, rename = "activeMode")]
     pub active_mode: Option<String>,
+    /// Top-level `deviceId`, carried by `mediaUploadNotification` (a new
+    /// recording or snapshot) instead of a `cameras/<id>` resource.
+    #[serde(default)]
+    pub device_id: Option<String>,
+    /// Top-level `presignedLastImageUrl` of a `mediaUploadNotification`:
+    /// the device's latest image. For a video doorbell on an account it
+    /// is shared with, the only snapshot announced. A presigned
+    /// credential: do not log it.
+    #[serde(default)]
+    pub presigned_last_image_url: Option<String>,
+}
+
+/// `Debug` without the presigned image URL (a credential): it shows
+/// whether one came.
+impl std::fmt::Debug for ArloEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArloEvent")
+            .field("action", &self.action)
+            .field("resource", &self.resource)
+            .field("publish_response", &self.publish_response)
+            .field("properties", &self.properties)
+            .field("source", &self.source)
+            .field("trans_id", &self.trans_id)
+            .field("active_mode", &self.active_mode)
+            .field("device_id", &self.device_id)
+            .field(
+                "presigned_last_image_url",
+                &self.presigned_last_image_url.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl ArloEvent {
@@ -78,6 +109,37 @@ mod tests {
         .unwrap();
         assert_eq!(ev.action, "");
         assert_eq!(ev.resource, "mediaUploadNotification");
+        // Top level, not under `properties`: the only snapshot a shared
+        // account gets for a video doorbell.
+        assert_eq!(ev.device_id.as_deref(), Some("C1"));
+        assert_eq!(
+            ev.presigned_last_image_url.as_deref(),
+            Some("https://example.invalid/x.jpg")
+        );
+    }
+
+    #[test]
+    fn debug_hides_the_presigned_image_url() {
+        let ev = ArloEvent {
+            resource: "mediaUploadNotification".into(),
+            presigned_last_image_url: Some(
+                "https://example.invalid/x.jpg?X-Amz-Signature=s3cret".into(),
+            ),
+            ..ArloEvent::default()
+        };
+        let text = format!("{ev:?}");
+        assert!(!text.contains("s3cret"), "{text}");
+        assert!(text.contains("<redacted>"), "{text}");
+    }
+
+    #[test]
+    fn a_device_event_has_no_top_level_device_fields() {
+        let ev: ArloEvent = serde_json::from_str(
+            r#"{"action":"is","resource":"cameras/C1","properties":{"motionDetected":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(ev.device_id, None);
+        assert_eq!(ev.presigned_last_image_url, None);
     }
 
     #[test]
