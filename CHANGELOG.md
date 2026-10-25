@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/YpNo/arlo-rs/compare/v0.3.4...v0.4.0) - 2026-10-25
+
+### Added
+
+- *(events)* [**breaking**] top-level deviceId and presignedLastImageUrl on ArloEvent
+
 ## [0.3.4](https://github.com/YpNo/arlo-rs/compare/v0.3.3...v0.3.4) - 2026-10-24
 
 ### Other
