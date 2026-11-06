@@ -4,6 +4,11 @@
 
 # arlo-rs
 
+<!-- Sponsors Badges -->
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/YpNo?style=for-the-badge&logo=github&color=ea4aaa)](https://github.com/sponsors/YpNo)
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/ypno578696)
+
+
 [![Rust CI](https://github.com/YpNo/arlo-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/YpNo/arlo-rs/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/arlo-rs.svg)](https://crates.io/crates/arlo-rs)
 [![GitHub release](https://img.shields.io/github/v/release/YpNo/arlo-rs?sort=semver)](https://github.com/YpNo/arlo-rs/releases/latest)
