@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/YpNo/arlo-rs/compare/v0.4.0...v0.4.1) - 2026-11-06
+
+### Fixed
+
+- *(deps)* stealthscraper-rs 1.0.2, cmake 4.4.5, lockfile refresh
+
+### Other
+
+- add GitHub Sponsors and Ko-fi funding links
+
 ## [0.4.0](https://github.com/YpNo/arlo-rs/compare/v0.3.4...v0.4.0) - 2026-10-25
 
 ### Added
