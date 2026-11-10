@@ -42,7 +42,7 @@ dependencies = [
  "cookie_store",
  "flate2",
  "futures-util",
- "imap-rs-client",
+ "imap-rs-client 0.3.0",
  "imap-rs-tls",
  "mailparse",
  "mockito",
@@ -975,10 +975,23 @@ checksum = "add65c3922bda359ab97f780341425e8333dfcbe247a6c24e822392f42b54efd"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "imap-rs-core",
+ "imap-rs-core 0.2.4",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "imap-rs-client"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b54ca3c836a42db06b7bcf0ee50b04bcad0acc98a4ad32cbb05e4f769ca4d8b"
+dependencies = [
+ "bytes",
+ "imap-rs-core 0.3.0",
+ "thiserror 2.0.21",
+ "tokio",
  "zeroize",
 ]
 
@@ -993,14 +1006,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "imap-rs-core"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c096a203296fe22aa726b562a1270273f0671127ae482ea3b997443b39e7a372"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "imap-rs-tls"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa0e5ef54fe1b800013e7cf6f144a57233d228c086a8cdc172098d98046780ab"
 dependencies = [
  "bytes",
- "imap-rs-client",
- "imap-rs-core",
+ "imap-rs-client 0.2.4",
+ "imap-rs-core 0.2.4",
  "rustls",
  "rustls-pki-types",
  "thiserror 2.0.21",

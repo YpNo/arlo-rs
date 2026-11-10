@@ -68,7 +68,7 @@ mailparse = "0.18.0"
 # Three small OTP patterns; regex-lite covers them without the
 # regex-automata / aho-corasick / regex-syntax tree.
 regex-lite = "0.1"
-imap-rs-client = "0.2.1"
+imap-rs-client = "0.3.0"
 imap-rs-tls = "0.2.1"
 rustls = { version = "0.23", features = ["ring"] }
 flate2 = "1.1.9"
